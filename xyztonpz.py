@@ -5,20 +5,8 @@ from __future__ import print_function
 import argparse
 import os
 import sys
-
-try:
-    from ase.io import read
-except ImportError:
-    raise ImportError('Optional ASE dependency not found! Please run \'pip install sgdml[ase]\' to install it.')
-
 import numpy as np
-
-from sgdml import __version__
-from sgdml.utils import io, ui
-
-if sys.version[0] == '3':
-    raw_input = input
-
+from ase.io import read
 
 # Assumes that the atoms in each molecule are in the same order.
 def read_nonstd_ext_xyz(f):
@@ -29,7 +17,7 @@ def read_nonstd_ext_xyz(f):
         line = line.strip()
         if not n_atoms:
             n_atoms = int(line)
-            print('Number atoms per geometry: {:,}'.format(n_atoms))
+            print('Number of atoms per geometry: {:,}'.format(n_atoms))
 
         file_i, line_i = divmod(i, n_atoms + 2)
 
@@ -45,13 +33,13 @@ def read_nonstd_ext_xyz(f):
         if line_i >= 2:
             R.append(list(map(float, cols[1:4])))
             if file_i == 0:  # first molecule
-                z.append(io._z_str_to_z_dict[cols[0]])
+                z.append(cols[0])  # Store atomic symbols
             F.append(list(map(float, cols[4:7])))
 
         if file_i % 1000 == 0:
-            sys.stdout.write('\rNumber geometries found so far: {:,}'.format(file_i))
+            sys.stdout.write('\rNumber of geometries found so far: {:,}'.format(file_i))
             sys.stdout.flush()
-    sys.stdout.write('\rNumber geometries found so far: {:,}'.format(file_i))
+    sys.stdout.write('\rNumber of geometries found so far: {:,}'.format(file_i))
     sys.stdout.flush()
     print()
 
@@ -61,79 +49,62 @@ def read_nonstd_ext_xyz(f):
     F = np.array(F).reshape(-1, n_atoms, 3)
 
     if F.shape[0] != R.shape[0]:
-        sys.exit(
-            ui.color_str('[FAIL]', fore_color=ui.RED, bold=True)
-            + ' Force labels are missing from dataset or are incomplete!'
-        )
+        print('[FAIL] Force labels are missing from the dataset or are incomplete!', file=sys.stderr)
+        sys.exit(1)
 
     f.close()
     return (R, z, E, F)
 
 
-parser = argparse.ArgumentParser(
-    description='Creates a dataset from extended XYZ format.'
-)
-parser.add_argument(
-    'dataset',
-    metavar='<dataset>',
-    type=argparse.FileType('r'),
-    help='path to extended xyz dataset file',
-)
-parser.add_argument(
-    '-o',
-    '--overwrite',
-    dest='overwrite',
-    action='store_true',
-    help='overwrite existing dataset file',
-)
+# Parse arguments
+parser = argparse.ArgumentParser(description='Creates a dataset from extended XYZ format.')
+parser.add_argument('dataset', metavar='<dataset>', type=argparse.FileType('r'),
+                    help='Path to extended xyz dataset file')
+parser.add_argument('-o', '--overwrite', dest='overwrite', action='store_true',
+                    help='Overwrite existing dataset file')
 args = parser.parse_args()
 dataset = args.dataset
-
 
 name = os.path.splitext(os.path.basename(dataset.name))[0]
 dataset_file_name = name + '.npz'
 
+# Check for existing file
 dataset_exists = os.path.isfile(dataset_file_name)
 if dataset_exists and args.overwrite:
-    print(ui.color_str('[INFO]', bold=True) + ' Overwriting existing dataset file.')
+    print('[INFO] Overwriting existing dataset file.')
 if not dataset_exists or args.overwrite:
-    print('Writing dataset to \'{}\'...'.format(dataset_file_name))
+    print(f'Writing dataset to \'{dataset_file_name}\'...')
 else:
-    sys.exit(
-        ui.color_str('[FAIL]', fore_color=ui.RED, bold=True)
-        + ' Dataset \'{}\' already exists.'.format(dataset_file_name)
-    )
+    print(f'[FAIL] Dataset \'{dataset_file_name}\' already exists.', file=sys.stderr)
+    sys.exit(1)
 
 lattice, R, z, E, F = None, None, None, None, None
 
-mols = read(dataset.name, index=':')
-calc = mols[0].get_calculator()
-is_extxyz = calc is not None
-if is_extxyz:
+# Read dataset
+try:
+    mols = read(dataset.name, index=':')
+    calc = mols[0].get_calculator()
+    is_extxyz = calc is not None
+except Exception:
+    is_extxyz = False
 
-    print("\rNumber geometries found: {:,}\n".format(len(mols)))
+if is_extxyz:
+    print("\rNumber of geometries found: {:,}\n".format(len(mols)))
 
     if 'forces' not in calc.results:
-        sys.exit(
-            ui.color_str('[FAIL]', fore_color=ui.RED, bold=True)
-            + ' Forces are missing in the input file!'
-        )
+        print('[FAIL] Forces are missing in the input file!', file=sys.stderr)
+        sys.exit(1)
 
     lattice = np.array(mols[0].get_cell().T)
-    if not np.any(lattice): # all zeros
-        print(
-            ui.color_str('[INFO]', bold=True)
-            + ' No lattice vectors specified in extended XYZ file.'
-        )
+    if not np.any(lattice):  # all zeros
+        print('[INFO] No lattice vectors specified in extended XYZ file.')
         lattice = None
 
     Z = np.array([mol.get_atomic_numbers() for mol in mols])
     all_z_the_same = (Z == Z[0]).all()
     if not all_z_the_same:
-        sys.exit(
-            ui.color_str('[FAIL]', fore_color=ui.RED, bold=True)
-            + ' Order of atoms changes accross dataset.'
-        )
+        print('[FAIL] Order of atoms changes across the dataset!', file=sys.stderr)
+        sys.exit(1)
 
     R = np.array([mol.get_positions() for mol in mols])
     z = Z[0]
@@ -145,34 +116,30 @@ if is_extxyz:
     F = np.array([mol.get_forces() for mol in mols])
 
 else:  # legacy non-standard XYZ format
-
     with open(dataset.name) as f:
         R, z, E, F = read_nonstd_ext_xyz(f)
 
-
-# Base variables contained in every model file.
+# Prepare dataset variables
 base_vars = {
-    'type': 'd',
-    'code_version': __version__,
+    'type': 'dataset',
     'name': name,
-    'theory': 'unknown',
     'R': R,
     'z': z,
     'F': F,
+    'F_min': np.min(F.ravel()),
+    'F_max': np.max(F.ravel()),
+    'F_mean': np.mean(F.ravel()),
+    'F_var': np.var(F.ravel()),
 }
 
-base_vars['F_min'], base_vars['F_max'] = np.min(F.ravel()), np.max(F.ravel())
-base_vars['F_mean'], base_vars['F_var'] = np.mean(F.ravel()), np.var(F.ravel())
-
-print('Please provide a description of the length unit used in your input file, e.g. \'Ang\' or \'au\': ')
-print('Note: This string will be stored in the dataset file and passed on to models files for later reference.')
-r_unit = raw_input('> ').strip()
+# Ask user for units
+print('Please provide a description of the length unit used in your input file, e.g., "Ang" or "au": ')
+r_unit = input('> ').strip()
 if r_unit != '':
     base_vars['r_unit'] = r_unit
 
-print('Please provide a description of the energy unit used in your input file, e.g. \'kcal/mol\' or \'eV\': ')
-print('Note: This string will be stored in the dataset file and passed on to models files for later reference.')
-e_unit = raw_input('> ').strip()
+print('Please provide a description of the energy unit used in your input file, e.g., "kcal/mol" or "eV": ')
+e_unit = input('> ').strip()
 if e_unit != '':
     base_vars['e_unit'] = e_unit
 
@@ -181,11 +148,12 @@ if E is not None:
     base_vars['E_min'], base_vars['E_max'] = np.min(E), np.max(E)
     base_vars['E_mean'], base_vars['E_var'] = np.mean(E), np.var(E)
 else:
-    print(ui.color_str('[INFO]', bold=True) + ' No energy labels found in dataset.')
+    print('[INFO] No energy labels found in the dataset.')
 
 if lattice is not None:
     base_vars['lattice'] = lattice
 
-base_vars['md5'] = io.dataset_md5(base_vars)
+# Save dataset
 np.savez_compressed(dataset_file_name, **base_vars)
-print(ui.color_str('[DONE]', fore_color=ui.GREEN, bold=True))
+print('[DONE] Dataset saved to:', dataset_file_name)
+
