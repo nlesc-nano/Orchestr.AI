@@ -9,3 +9,13 @@ The simplest way to install SchNetPack is through pip which will automatically g
 
 ```bash
 pip install schnetpack
+```
+
+### Install SchNetPack from source
+One can also install the most recent code from their repository:
+
+```bash
+git clone https://github.com/atomistic-machine-learning/schnetpack.git
+cd schnetpack
+pip install .
+```
