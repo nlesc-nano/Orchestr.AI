@@ -19,3 +19,6 @@ git clone https://github.com/atomistic-machine-learning/schnetpack.git
 cd schnetpack
 pip install .
 ```
+
+### Visualization tools
+SchNetPack supports multiple logging backends via PyTorch Lightning. The default logger is Tensorboard.
