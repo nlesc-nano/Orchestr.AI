@@ -22,3 +22,6 @@ pip install .
 
 ### Visualization tools
 SchNetPack supports multiple logging backends via PyTorch Lightning. The default logger is Tensorboard.
+
+## Getting started
+The current version of the platform is developped for being run in a cluster. Thus, in this repository one can find the necessary code, a bash script example for submitting jobs in a slurm queue system and an input file example.
