@@ -28,7 +28,7 @@ The current version of the platform is developped for being run in a cluster. Th
 
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
-### Files
+### Machine Learning Files
 1. input_preparation.py: This file reads the xyz coordinates and constructs the npz files requiered for the training. Currently, it is not automatic, as it does not read the input.yaml and it has the name of the coordinates hardcoded.
 2. xyztonpz.py: Used by input_preparation.py. It could be integrated there and a units conversion procedure will be included.
 3. input.yaml: Example of an input file with the tuneable parameters.
@@ -37,3 +37,4 @@ This plaform is currently being subject of several changes. Thus, on the meanwhi
 6. training_inference.sh: Example of a bash file for running both the training and the inference in a slurm based cluster. The input generation should be included here (or ideally in the python code).
 
 ### Postprocessing
+Currently, we have scripts used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
