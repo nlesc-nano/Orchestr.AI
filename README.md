@@ -29,11 +29,11 @@ The current version of the platform is developped for being run in a cluster. Th
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
 ### Files
-* inference_code.py
-* input.yaml
-* input_preparation.py
+* inference_code.py: It predicts the desired values after the training.
+* input.yaml: Example of an input file with the tuneable parameters.
+* input_preparation.py: This file reads the xyz coordinates and constructs the npz files requiered for the training. Currently, it is not automatic, as it does not read the input.yaml and it has the name of the coordinates hardcoded.
 * training_inference.sh
 * training_model_code.py
-* xyztonpz.py
+* xyztonpz.py: Used by input_preparation.py. It could be integrated there and a units conversion procedure will be included.
 
 ### Postprocessing
