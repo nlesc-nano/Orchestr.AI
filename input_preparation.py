@@ -4,7 +4,6 @@ import numpy as np
 import os
 import re
 
-# INPUT
 # Processing the xyz files
 # Specify the positions xyz file and read its contents
 positions_file = 'CsPbBr3_2.4nm_PBE_MD_NVE_2.5fs-pos-1.xyz'
@@ -22,10 +21,8 @@ with open(forces_file, 'r') as file2:
 temp_file = 'postemp.xyz'
 temp_file2 = 'fortemp.xyz'
 output_file = 'cspbbr3.xyz'
-# INPUT
 
 # We remove the stuff from the header of each step and we maintain only the energies
-
 # Process each line
 modified_lines = []
 for line in lines:
@@ -40,10 +37,6 @@ for line in lines:
 # Write the modified lines to the output file
 with open(temp_file, 'w') as file:
     file.writelines(modified_lines)
-
-
-# In[4]:
-
 
 # For the forces, we also remove the stuff from the header of each step and maintain only the energies.
 # This file will be used later for combining both
@@ -62,9 +55,6 @@ for line in lines2:
 # Write the modified lines to the output file
 with open(temp_file2, 'w') as file:
     file.writelines(modified_lines)
-
-
-# In[5]:
 
 
 # Function for finding the difference lines
@@ -90,16 +80,8 @@ def combine_files(file1_path, file2_path, output_path):
     with open(output_path, 'w') as output_file:
         output_file.write('\n'.join(combined_lines))
 
-
-# In[6]:
-
-
 # We combine positions (temp_file) with forces (temp_file2)
 combine_files(temp_file, temp_file2, output_file)
-
-
-# In[7]:
-
 
 # We clean the temporary files that were created and are not useful anymore
 if os.path.exists('postemp.xyz'):
@@ -107,19 +89,8 @@ if os.path.exists('postemp.xyz'):
 elif os.path.exists('fortemp.xyz'):
     os.remove('fortemp.xyz')
 
-
-# In[8]:
-
-
 # Generate npz file'
 if os.path.exists('cspbbr3.npz'):
     os.remove('cspbbr3.npz')
 
 get_ipython().run_line_magic('run', 'xyztonpz.py cspbbr3.xyz')
-
-
-# In[ ]:
-
-
-
-
