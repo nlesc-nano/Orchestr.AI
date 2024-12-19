@@ -30,22 +30,22 @@ if [ -z "$CONFIG_FILE" ]; then
 fi
 
 # Copy necessary files to SCRATCH_DIR
-cp training_model_code.py $SCRATCH_DIR
+cp training.py $SCRATCH_DIR
 cp "$CONFIG_FILE" $SCRATCH_DIR
 cp *.npz $SCRATCH_DIR
 cp *.hdf5 $SCRATCH_DIR
-cp inference_code.py $SCRATCH_DIR
+cp inference.py $SCRATCH_DIR
 
 cd $SCRATCH_DIR
 
 # Run training
-python training_model_code.py --config "$CONFIG_FILE"
+python training.py --config "$CONFIG_FILE"
 
 # Check if training was successful
 if [ $? -eq 0 ]; then
     echo "Training completed successfully. Starting inference."
     # Run inference
-    python inference_code.py --config "$CONFIG_FILE"
+    python inference.py --config "$CONFIG_FILE"
 else
     echo "Training failed. Skipping inference."
 fi

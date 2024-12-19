@@ -32,8 +32,8 @@ This plaform is currently being subject of several changes. Thus, on the meanwhi
 1. input_preparation.py: This file reads the xyz coordinates and constructs the npz files requiered for the training. Currently, it is not automatic, as it does not read the input.yaml and it has the name of the coordinates hardcoded.
 2. xyztonpz.py: Used by input_preparation.py. It could be integrated there and a units conversion procedure will be included.
 3. input.yaml: Example of an input file with the tuneable parameters.
-4. training_model_code.py: The main training code. Currently is only based in SchNetPack. It should be redifined in a main function that calls the different packages. For that purpose, the functions should be organized in different files.
-5. inference_code.py: It predicts the desired values after the training.
+4. training.py: The main training code. Currently is only based in SchNetPack. It should be redifined in a main function that calls the different packages. For that purpose, the functions should be organized in different files.
+5. inference.py: It predicts the desired values after the training.
 6. training_inference.sh: Example of a bash file for running both the training and the inference in a slurm based cluster. The input generation should be included here (or ideally in the python code).
 
 ### Postprocessing
