@@ -2,8 +2,8 @@ settings:
   # Data handling settings
   data:
     hdf5_file: 'renumbered_output_chunks_1_to_5_New.hdf5'
-    dataset_path: './cspbbr3_newData_NEW_12-11-2024.npz'
-    output_type: 4  # 1 for 'energies and forces', 2 for 'energies, forces, HOMO, and LUMO', 3 for 'energies, forces, and bandgap', 4 for 'energies, forces, and eigenvalues vector'
+    dataset_path: '.cspbbr3.npz'
+    output_type: 1  # 1 for 'energies and forces', 2 for 'energies, forces, HOMO, and LUMO', 3 for 'energies, forces, and bandgap', 4 for 'energies, forces, and eigenvalues vector'
     eigenvalue_labels: ['HOMO', 'LUMO', 'LUMO+1']  # Eigenvalues to extract   ['HOMO-1', 'HOMO', 'LUMO', 'LUMO+1']
 
   # Model architecture settings
