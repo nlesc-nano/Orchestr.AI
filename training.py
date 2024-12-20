@@ -169,7 +169,7 @@ def homo_lumo_loss_fn(pred, target):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Machine Learning Force Field Training with SchNetPack")
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to the configuration YAML file")
+    parser.add_argument("--config", type=str, default="input.yaml", help="Path to the configuration YAML file")
     args = parser.parse_args()
     return args
 
