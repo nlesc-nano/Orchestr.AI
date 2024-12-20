@@ -41,7 +41,7 @@ If an user wants to run locally the training code, one can do the following:
 ```bash
 python training.py --config input_file.yaml
 ```
-By default, if no input file is specified the training code looks for a file called input.yaml.
+By default, if no input file is specified, the training code looks for a file called input.yaml.
 
 ### Postprocessing
 Currently, we have scripts used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
