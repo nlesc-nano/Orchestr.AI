@@ -15,6 +15,7 @@ import argparse
 import functools
 import logging
 import time
+import sys #TEST
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
@@ -418,6 +419,11 @@ def main():
                         "verbose": config['settings']['training']['scheduler']['verbose']},
         scheduler_monitor=config['settings']['logging']['monitor']
     )
+
+    #TEST
+    print(scheduler_cls)
+    sys.exit("Stopping the program now.")
+    #TEST
 
     logger = pl.loggers.TensorBoardLogger(save_dir=folder)
     callbacks = [
