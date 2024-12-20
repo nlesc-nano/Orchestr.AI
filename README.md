@@ -36,5 +36,12 @@ This plaform is currently being subject of several changes. Thus, on the meanwhi
 5. inference.py: It predicts the desired values after the training.
 6. training_inference.sh: Example of a bash file for running both the training and the inference in a slurm based cluster. The input generation should be included here (or ideally in the python code).
 
+### Training locally
+If an user wants to run locally the training code, one can do the following:
+```bash
+python training.py --config input_file.yaml
+```
+By default, if no input file is specified the training code looks for a file called input.yaml.
+
 ### Postprocessing
 Currently, we have scripts used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
