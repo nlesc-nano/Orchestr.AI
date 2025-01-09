@@ -421,7 +421,8 @@ def main():
     )
 
     #TEST
-    print(scheduler_cls)
+    print()
+    print(task.scheduler_cls)
     sys.exit("Stopping the program now.")
     #TEST
 
