@@ -413,7 +413,7 @@ def main():
         outputs=outputs,
         optimizer_cls=torch.optim.AdamW,
         optimizer_args={"lr": config['settings']['training']['optimizer']['lr']},
-        scheduler_cls=ReduceLROnPlateau,
+        scheduler_cls=config['settings']['training']['scheduler']['type'],
         scheduler_args={"mode": "min", "factor": config['settings']['training']['scheduler']['factor'],
                         "patience": config['settings']['training']['scheduler']['patience'],
                         "verbose": config['settings']['training']['scheduler']['verbose']},
