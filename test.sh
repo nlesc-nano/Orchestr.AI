@@ -2,7 +2,7 @@
 
 #SBATCH --qos=long
 #SBATCH --job-name=scheduler
-#SBATCH --time=01:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=12
 #SBATCH --cpus-per-task=1

@@ -423,7 +423,7 @@ def main():
     #TEST
     print()
     print(task.scheduler_cls)
-    sys.exit("Stopping the program now.")
+    #sys.exit("Stopping the program now.")
     #TEST
 
     logger = pl.loggers.TensorBoardLogger(save_dir=folder)
