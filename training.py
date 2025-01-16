@@ -16,7 +16,6 @@ import argparse
 import functools
 import logging
 import time
-import sys #TEST
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
@@ -438,7 +437,7 @@ def main():
     task = spk.task.AtomisticTask(
         model=nnpot,
         outputs=outputs,
-        optimizer_cls=torch.optim.AdamW,
+        optimizer_cls=optimizer_cls,
         optimizer_args={"lr": config['settings']['training']['optimizer']['lr']},
         scheduler_cls=scheduler_cls,
         scheduler_args={"mode": "min", "factor": config['settings']['training']['scheduler']['factor'],
@@ -446,12 +445,6 @@ def main():
                         "verbose": config['settings']['training']['scheduler']['verbose']},
         scheduler_monitor=config['settings']['logging']['monitor']
     )
-
-    #TEST
-    print()
-    print(task.scheduler_cls)
-    #sys.exit("Stopping the program now.")
-    #TEST
 
     logger = pl.loggers.TensorBoardLogger(save_dir=folder)
     callbacks = [
