@@ -4,11 +4,12 @@ import os
 import h5py
 from ase import Atoms
 import torch
+import torch.optim as optim
+import torch.optim.lr_scheduler as lr_sched
 import torchmetrics
 import pytorch_lightning as pl
 import schnetpack as spk
 import schnetpack.transform as trn
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import yaml
 import argparse
@@ -22,7 +23,6 @@ np.random.seed(42)
 torch.manual_seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
-
 
 def setup_logging():
     script_directory = os.getcwd()
@@ -50,6 +50,27 @@ def find_middle_two_numbers(n):
         return [(n // 2) - 1, n // 2]
     else:
         return [n // 2]
+
+# Map user-defined string to PyTorch optimizer class
+def get_optimizer_class(name):
+    optimizers_map = {
+        'Adam':  optim.Adam,
+        'AdamW': optim.AdamW,
+        'SGD':   optim.SGD
+    }
+    if name not in optimizers_map:
+        raise ValueError(f"Unsupported optimizer '{name}'. Available: {list(optimizers_map.keys())}")
+    return optimizers_map[name]
+
+# Map user-defined string to PyTorch scheduler class
+def get_scheduler_class(name):
+    schedulers_map = {
+        'ReduceLROnPlateau': lr_sched.ReduceLROnPlateau,
+        'StepLR':            lr_sched.StepLR
+    }
+    if name not in schedulers_map:
+        raise ValueError(f"Unsupported scheduler '{name}'. Available: {list(schedulers_map.keys())}")
+    return schedulers_map[name]
 
 def read_homo_lumo_and_gaps_to_dataframe(filename):
     with h5py.File(filename, 'r') as f:
@@ -407,12 +428,18 @@ def main():
             metrics={"MAE": torchmetrics.MeanAbsoluteError()}
         ))
 
+    optimizer_name = config['settings']['training']['optimizer']['type']
+    scheduler_name = config['settings']['training']['scheduler']['type']
+
+    optimizer_cls = get_optimizer_class(optimizer_name)
+    scheduler_cls = get_scheduler_class(scheduler_name)
+    
     task = spk.task.AtomisticTask(
         model=nnpot,
         outputs=outputs,
-        optimizer_cls=torch.optim.AdamW,
+        optimizer_cls=optimizer_cls,
         optimizer_args={"lr": config['settings']['training']['optimizer']['lr']},
-        scheduler_cls=ReduceLROnPlateau,
+        scheduler_cls=scheduler_cls,
         scheduler_args={"mode": "min", "factor": config['settings']['training']['scheduler']['factor'],
                         "patience": config['settings']['training']['scheduler']['patience'],
                         "verbose": config['settings']['training']['scheduler']['verbose']},
