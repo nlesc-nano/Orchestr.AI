@@ -13,17 +13,7 @@ from utils.model import setup_model
 from utils.helpers import load_config, get_optimizer_class, get_scheduler_class
 import schnetpack.transform as trn
 
-def timer(func):
-    """A decorator that records the execution time of the function it decorates and logs the time."""
-    @functools.wraps(func)
-    def wrapper_timer(*args, **kwargs):
-        start_time = time.perf_counter()
-        value = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        run_time = end_time - start_time
-        logging.info(f"Finished {func.__name__!r} in {run_time:.4f} secs")
-        return value
-    return wrapper_timer
+from utils.logging_utils import  timer
 
 @timer
 def main(args):
