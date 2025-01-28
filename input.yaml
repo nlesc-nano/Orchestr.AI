@@ -44,13 +44,13 @@ settings:
 
   # Training settings
   training:
-    accelerator: 'cpu'
+    accelerator: 'gpu'
     devices: 1
     precision: 32
     batch_size: 8
     num_train: 2198
     num_val: 549
-    max_epochs: 5
+    max_epochs: 100
     num_workers: 24
     pin_memory: true
     optimizer:
