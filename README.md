@@ -20,6 +20,8 @@ cd schnetpack
 pip install .
 ```
 
+One should note that for the latest version of the code, Pyton 3.12.0 is required.
+
 ### Visualization tools
 SchNetPack supports multiple logging backends via PyTorch Lightning. The default logger is Tensorboard.
 
