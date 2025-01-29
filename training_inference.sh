@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --qos=regular
-#SBATCH --job-name=train
+#SBATCH --job-name=new_train_enforholo
 #SBATCH --time=1-00:00:00  
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=24
@@ -12,7 +12,8 @@
 #SBATCH --error=%x-%j.err
 
 module load Anaconda3
-source activate #path of the corresponding anaconda environment
+source activate /scratch/xain1234/envs/M_MLFF
+
 
 CDIR=`pwd`
 
@@ -37,16 +38,17 @@ fi
 echo "Using configuration file: $CONFIG_FILE"
 
 # Copy necessary files to SCRATCH_DIR
-cp training.py $SCRATCH_DIR
+cp main.py $SCRATCH_DIR
 cp "$CONFIG_FILE" $SCRATCH_DIR
 cp *.npz $SCRATCH_DIR
 cp *.hdf5 $SCRATCH_DIR
 cp inference.py $SCRATCH_DIR
+cp -r utils $SCRATCH_DIR 
 
 cd $SCRATCH_DIR
 
 # Run training
-python training.py --config "$CONFIG_FILE"
+python main.py --config "$CONFIG_FILE"
 
 # Check if training was successful
 if [ $? -eq 0 ]; then
