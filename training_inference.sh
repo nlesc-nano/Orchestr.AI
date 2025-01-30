@@ -25,21 +25,29 @@ CONFIG_FILE=$1
 
 # Check if config file is provided
 if [ -z "$CONFIG_FILE" ]; then
-    echo "No config file provided. Usage: sbatch training_inference.sh config_file.yaml"
+    CONFIG_FILE="input.yaml"
+fi
+
+# Check if the config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: Configuration file '$CONFIG_FILE' does not exist."
     exit 1
 fi
 
+echo "Using configuration file: $CONFIG_FILE"
+
 # Copy necessary files to SCRATCH_DIR
-cp training.py $SCRATCH_DIR
+cp main.py $SCRATCH_DIR
+cp -r utils $SCRATCH_DIR 
+cp inference.py $SCRATCH_DIR
 cp "$CONFIG_FILE" $SCRATCH_DIR
 cp *.npz $SCRATCH_DIR
 cp *.hdf5 $SCRATCH_DIR
-cp inference.py $SCRATCH_DIR
 
 cd $SCRATCH_DIR
 
 # Run training
-python training.py --config "$CONFIG_FILE"
+python main.py --config "$CONFIG_FILE"
 
 # Check if training was successful
 if [ $? -eq 0 ]; then

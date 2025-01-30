@@ -28,11 +28,14 @@ The current version of the platform is developped for being run in a cluster. Th
 
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
+### Preprocessing Files
+In the preprocessing folder, one can find files for preparing positions, forces and energies after DFT simulations for the training. This folder has its own readme.
+
 ### Machine Learning Files
 1. input_preparation.py: This file reads the xyz coordinates and constructs the npz files requiered for the training. Currently, it is not automatic, as it does not read the input.yaml and it has the name of the coordinates hardcoded.
 2. xyztonpz.py: Used by input_preparation.py. It could be integrated there and a units conversion procedure will be included.
 3. input.yaml: Example of an input file with the tuneable parameters.
-4. training.py: The main training code. Currently is only based in SchNetPack. It should be redifined in a main function that calls the different packages. For that purpose, the functions should be organized in different files.
+4. main.py: This is the main file for the training code. The main functions can be found in the utils folder.
 5. inference.py: It predicts the desired values after the training.
 6. training_inference.sh: Example of a bash file for running both the training and the inference in a slurm based cluster. The input generation should be included here (or ideally in the python code).
 
@@ -43,5 +46,5 @@ python training.py --config input_file.yaml
 ```
 By default, if no input file is specified, the training code looks for a file called input.yaml.
 
-### Postprocessing
+### Preprocessing
 Currently, we have scripts used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
