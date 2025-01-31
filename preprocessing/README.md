@@ -11,11 +11,18 @@ pip install PLAMS
 One can find more information [here](https://www.scm.com/doc/plams/started.html#installing-plams).
 
 ### Install Compound Attachment Tool (CAT), nano-CAT and auto-FOX
-[CAT](https://github.com/nlesc-nano/CAT)
+To install these packages we recommend to download the latest versions from their original repositories in the links below:
 
-[nano-CAT](https://github.com/nlesc-nano/nano-CAT)
+* [CAT](https://github.com/nlesc-nano/CAT)
 
-[auto-FOX](https://github.com/nlesc-nano/auto-FOX)
+* [nano-CAT](https://github.com/nlesc-nano/nano-CAT)
+
+* [auto-FOX](https://github.com/nlesc-nano/auto-FOX)
+
+Then, to install them one can do the following in each folder:
+```bash
+pip install .
+```
 
 ### Other packages
 Apart from usual python packages such as numpy, scipy, sklearn or yaml, one needs to install also periodictable:
