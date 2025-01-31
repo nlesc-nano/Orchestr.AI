@@ -13,11 +13,11 @@ One can find more information [here](https://www.scm.com/doc/plams/started.html#
 ### Install Compound Attachment Tool (CAT), nano-CAT and auto-FOX
 To install these packages we recommend to download the latest versions from their original repositories in the links below:
 
-* [CAT](https://github.com/nlesc-nano/CAT)
+* [CAT](https://github.com/nlesc-nano/CAT);
 
-* [nano-CAT](https://github.com/nlesc-nano/nano-CAT)
+* [nano-CAT](https://github.com/nlesc-nano/nano-CAT);
 
-* [auto-FOX](https://github.com/nlesc-nano/auto-FOX)
+* [auto-FOX](https://github.com/nlesc-nano/auto-FOX).
 
 Then, to install them one can do the following in each folder:
 ```bash
