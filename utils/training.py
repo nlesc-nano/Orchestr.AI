@@ -1,6 +1,4 @@
 import os
-import time
-import functools
 import logging
 import numpy as np
 import torch
@@ -13,23 +11,28 @@ from utils.model import setup_model
 from utils.helpers import load_config, get_optimizer_class, get_scheduler_class
 import schnetpack.transform as trn
 
-from utils.logging_utils import  timer
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
-@timer
-def main(args):
-    np.random.seed(42)
-    torch.manual_seed(42)
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
+        torch.cuda.manual_seed_all(seed)
 
-    config = load_config(args.config)
+def load_data(config):
+    try:
+        data = np.load(config['settings']['data']['dataset_path'])
+    except FileNotFoundError:
+        logging.error(f"Dataset file not found: {config['settings']['data']['dataset_path']}")
+        raise
 
-    data = np.load(config['settings']['data']['dataset_path'])
     output_type = config['settings']['data']['output_type']
     include_homo_lumo = output_type == 2
     include_bandgap = output_type == 3
     include_eigenvalues_vector = output_type == 4
 
+    df_eigenvalues = None
     if include_homo_lumo or include_bandgap or include_eigenvalues_vector:
         data_hdf = config['settings']['data']['hdf5_file']
 
@@ -40,14 +43,13 @@ def main(args):
         eigenvalue_labels = config['settings']['data']['eigenvalue_labels']
         df_eigenvalues = read_eigenvalues_to_dataframe(data_hdf, eigenvalue_labels)
 
-    # Prepare data for SchNetPack
+    return data, df_eigenvalues, include_homo_lumo, include_bandgap, include_eigenvalues_vector
+
+def preprocess_data(data, df_eigenvalues, include_homo_lumo, include_bandgap, include_eigenvalues_vector):
     numbers = data["z"]
     atoms_list = []
     property_list = []
     
-    logging.info("Done data loading")
-    
-    # Preprocess data to avoid in-loop data fetching
     positions_array = np.array(data["R"])
     energies_array = np.array(data["E"])
     forces_array = np.array(data["F"])
@@ -79,19 +81,21 @@ def main(args):
             properties['bandgap'] = np.array([bandgap_values[idx]], dtype=np.float32)
 
         if include_eigenvalues_vector:
-            properties['eigenvalues_vector'] = eigenvalues_vectors[idx].reshape(1, -1)  # Adjusted here
+            properties['eigenvalues_vector'] = eigenvalues_vectors[idx].reshape(1, -1)
 
         atoms_list.append(ats)
         property_list.append(properties)
 
-    logging.info("loop complete")
-    
+    return atoms_list, property_list
+
+def setup_logging_and_dataset(config, atoms_list, property_list, include_homo_lumo, include_bandgap, include_eigenvalues_vector):
     folder = config['settings']['logging']['folder']
     os.makedirs(folder, exist_ok=True)
     os.makedirs(os.path.join(folder, "lightning_logs"), exist_ok=True)
 
-    if os.path.exists(os.path.join(folder, 'cspbbr3.db')):
-        os.remove(os.path.join(folder, 'cspbbr3.db'))
+    db_path = os.path.join(folder, config['settings']['general']['database_name'])
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
     property_units = {
         'energy': config['settings']['model']['property_unit_dict']['energy'],
@@ -105,35 +109,17 @@ def main(args):
         property_units.update({'eigenvalues_vector': 'eV'})
 
     new_dataset = spk.data.ASEAtomsData.create(
-        os.path.join(folder, 'cspbbr3.db'),
+        db_path,
         distance_unit=config['settings']['model']['distance_unit'],
         property_unit_dict=property_units
     )
 
     new_dataset.add_systems(property_list, atoms_list)
+    logging.info(f"Dataset created at {db_path}")
     
-    #######################################################################
+    return new_dataset, property_units 
 
-    # Now we can have a look at the data
-    print('Number of reference calculations:', len(new_dataset))
-
-    print('Available properties:')
-    for p in new_dataset.available_properties:
-        print('-', p)
-    print()
-
-    example = new_dataset[0]
-    print('Properties of molecule with id 0:')
-    for k, v in example.items():
-        print('-', k, ':', v.shape)
-
-    #######################################################################
-    
-    del data, atoms_list, property_list
-    
-    if include_homo_lumo or include_bandgap or include_eigenvalues_vector:
-        del df_eigenvalues
-
+def prepare_transformations(config, include_homo_lumo, include_bandgap):
     transformations = [
         trn.ASENeighborList(cutoff=config['settings']['model']['cutoff']),
         trn.RemoveOffsets("energy", remove_mean=True, remove_atomrefs=False),
@@ -145,11 +131,14 @@ def main(args):
     if include_bandgap:
         transformations.append(trn.RemoveOffsets("bandgap", remove_mean=True, remove_atomrefs=False))
 
+    return transformations
+
+def setup_data_module(config, db_path, transformations, property_units):
     custom_data = spk.data.AtomsDataModule(
-        os.path.join(folder, 'cspbbr3.db'),
+        db_path,
         batch_size=config['settings']['training']['batch_size'],
         distance_unit=config['settings']['model']['distance_unit'],
-        property_units=property_units,
+        property_units=property_units,  # Use property_units directly
         num_train=config['settings']['training']['num_train'],
         num_val=config['settings']['training']['num_val'],
         transforms=transformations,
@@ -159,11 +148,11 @@ def main(args):
 
     custom_data.prepare_data()
     custom_data.setup()
-
-    logging.info("Done data Preparation")
+    logging.info("Data module prepared and set up")
     
-    nnpot, outputs = setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
+    return custom_data
 
+def setup_task_and_trainer(config, nnpot, outputs, folder):
     optimizer_name = config['settings']['training']['optimizer']['type']
     scheduler_name = config['settings']['training']['scheduler']['type']
 
@@ -185,8 +174,7 @@ def main(args):
     logger = pl.loggers.TensorBoardLogger(save_dir=folder)
     callbacks = [
         spk.train.ModelCheckpoint(
-            model_path=os.path.join(folder,
-                                    config['settings']['logging']['checkpoint_dir']),
+            model_path=os.path.join(folder, config['settings']['logging']['checkpoint_dir']),
             save_top_k=1,
             monitor=config['settings']['logging']['monitor']
         ),
@@ -202,6 +190,23 @@ def main(args):
         precision=config['settings']['training']['precision'],
         devices=config['settings']['training']['devices']
     )
-    logging.info("Start training")
     
+    logging.info("Task and trainer set up")
+    return task, trainer
+       
+def main(args):
+    config = load_config(args.config)
+    set_seed(config['settings']['general']['seed'])
+
+    data, df_eigenvalues, include_homo_lumo, include_bandgap, include_eigenvalues_vector = load_data(config)
+    atoms_list, property_list = preprocess_data(data, df_eigenvalues, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
+    new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
+    
+    transformations = prepare_transformations(config, include_homo_lumo, include_bandgap)
+    custom_data = setup_data_module(config, os.path.join(config['settings']['logging']['folder'], config['settings']['general']['database_name']), transformations, property_units)
+    
+    nnpot, outputs = setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
+    task, trainer = setup_task_and_trainer(config, nnpot, outputs, config['settings']['logging']['folder'])
+    
+    logging.info("Starting training")
     trainer.fit(task, datamodule=custom_data)
