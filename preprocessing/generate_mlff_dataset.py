@@ -1,25 +1,17 @@
 import numpy as np
-import os 
 import pickle 
-import periodictable
 import random
 import matplotlib.pyplot as plt
 import yaml 
 import pprint 
-from scipy.sparse import lil_matrix
-from scipy.spatial import cKDTree
-from scipy.fftpack import fft, fftfreq
-from scipy.signal import correlate
-from scipy.spatial.distance import cdist
+from periodictable import elements
 from scipy.spatial.transform import Rotation as R
-from scipy.stats import zscore
 from scm.plams import Molecule
 from CAT.recipes import replace_surface
 from sklearn.cluster import KMeans
 from sklearn.cluster import DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
-from collections import Counter
 
 np.set_printoptions(threshold=np.inf)
 
@@ -85,8 +77,6 @@ def compute_surface_indices_with_replace_surface_dynamic(
         surface_indices (list): Indices of the replaced surface atoms in the structure.
         replaced_atom_types (list): Updated atom types after replacement.
     """
-    import random
-    from periodictable import elements
 
     print(f"Reading molecule from {input_file}...")
     mol_original = Molecule(input_file)  # Load the original molecule
@@ -464,7 +454,6 @@ def create_mass_dict(atom_types):
     Returns:
         dict: Dictionary where keys are atom types and values are atomic masses.
     """
-    from periodictable import elements
 
     mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
     print(f"Generated mass dictionary: {mass_dict}")
@@ -480,8 +469,6 @@ def perform_pca_and_plot(datasets, num_components=2, labels=None, ax=None):
         labels (list): List of sample labels (optional).
         ax (matplotlib.axes.Axes): Pre-created axis for plotting (optional).
     """
-    from sklearn.decomposition import PCA
-    import matplotlib.pyplot as plt
 
     print(f"Performing PCA for {len(datasets)} datasets...")
     combined_data = np.concatenate(list(datasets.values()))
@@ -545,14 +532,12 @@ def cluster_trajectory(rmsd_md_internal, clustering_method, num_clusters, md_pos
         cluster_labels = kmeans.fit_predict(rmsd_md_internal)
     elif clustering_method == "DBSCAN":
         print("Using DBSCAN clustering...")
-        from sklearn.cluster import DBSCAN
         eps = 0.2  # Distance threshold for forming clusters
         min_samples = 10  # Minimum number of points to form a dense region
         dbscan = DBSCAN(eps=eps, min_samples=min_samples, metric="precomputed")
         cluster_labels = dbscan.fit_predict(rmsd_md_internal)
     elif clustering_method == "GMM":
         print("Using Gaussian Mixture Model clustering...")
-        from sklearn.mixture import GaussianMixture
         gmm = GaussianMixture(n_components=num_clusters, random_state=42)
         cluster_labels = gmm.fit_predict(rmsd_md_internal)
     else:
