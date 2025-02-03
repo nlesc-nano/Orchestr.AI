@@ -1,0 +1,75 @@
+settings:
+  # Data handling settings
+  data:
+    hdf5_file: 'renumbered_output_chunks_1_to_5_New.hdf5'
+    dataset_path: './cspbbr3_newData_NEW_12-11-2024.npz'
+    output_type: 1  # 1 for 'energies and forces', 2 for 'energies, forces, HOMO, and LUMO', 3 for 'energies, forces, and bandgap', 4 for 'energies, forces, and eigenvalues vector'
+    eigenvalue_labels: ['HOMO', 'LUMO', 'LUMO+1']  # Eigenvalues to extract   ['HOMO-1', 'HOMO', 'LUMO', 'LUMO+1']
+
+  # Model architecture settings
+  model:
+    cutoff: 12.
+    n_rbf: 20
+    n_atom_basis: 128
+    n_interactions: 8
+    distance_unit: 'Ang'
+    property_unit_dict:
+      energy: 'kcal/mol'
+      forces: 'kcal/mol/Ang'
+      homo: 'eV'
+      lumo: 'eV'
+      bandgap: 'eV'
+      eigenvalues_vector: 'eV'
+
+  # Output settings
+  outputs:
+    energy:
+      loss_weight: 0.2
+      metrics: "MAE"
+    forces:
+      loss_weight: 0.8
+      metrics: "MAE"
+    homo:
+      loss_weight: 0.5
+      metrics: "MAE"
+    lumo:
+      loss_weight: 0.5
+      metrics: "MAE"
+    gap:
+      loss_weight: 0.5
+      metrics: "MAE"
+    eigenvalues_vector:
+      loss_weight: 1.5
+      metrics: "MAE"
+
+  # Training settings
+  training:
+    accelerator: 'gpu'
+    devices: 1
+    precision: 32
+    batch_size: 8
+    num_train: 2198
+    num_val: 549
+    max_epochs: 100
+    num_workers: 24
+    pin_memory: true
+    optimizer:
+      type: 'AdamW'
+      lr: 0.0001
+    scheduler:
+      type: 'ReduceLROnPlateau'
+      factor: 0.8
+      patience: 30
+      verbose: true
+
+  # Logging and checkpoint settings
+  logging:
+    folder: './cspbbr3'
+    log_dir: "lightning_logs"
+    checkpoint_dir: "best_inference_model"
+    monitor: "val_loss"
+
+  # Testing settings
+  testing:
+    trained_model_path: './cspbbr3'  # Path to load the trained model
+    csv_file_name: 'actual_vs_predicted_enrgforc.csv'  # Path to save the predictions CSV
