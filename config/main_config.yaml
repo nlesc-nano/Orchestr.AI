@@ -1,4 +1,9 @@
 settings:
+  # General settings
+  general:
+    seed: 42  # Random seed for reproducibility
+    database_name: 'cspbbr3.db'  # Name of the database file
+
   # Data handling settings
   data:
     hdf5_file: 'renumbered_output_chunks_1_to_5_New.hdf5'
