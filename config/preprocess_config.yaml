@@ -1,5 +1,5 @@
-pos_file: "mean_md-pos-1.xyz"
-frc_file: "mean_md-frc-1.xyz"
+pos_file: "data/raw/mean_md-pos-1.xyz"
+frc_file: "data/raw/mean_md-frc-1.xyz"
 temperature: 300.0
 temperature_target: 300
 temperature_target_surface: 450
