@@ -338,32 +338,35 @@ def load_binary(filename):
     print(f"Loaded data from binary file: {filename}")
     return data["frequencies"], data["eigenvectors"]
 
-def save_xyz(filename, positions, atom_types, energies=None, output_dir=None):
+def save_xyz(filename, positions, atom_types, energies=None):
     """
-    Save atomic positions to an XYZ file, defaulting to 'data/processed'.
+    Save atomic positions to an XYZ file in 'data/processed'.
 
     Parameters:
-        filename (str): Filename (not full path) for the output XYZ file.
-        positions (np.ndarray): Shape (num_frames, num_atoms, 3).
-        atom_types (list[str]): Atomic symbols (e.g., ["Cs", "Br", ...]).
-        energies (list[float], optional): Energies for each frame.
-        output_dir (str or Path, optional): Directory to store output in.
-            Defaults to [project_root]/data/processed/.
+        filename (str): The filename (e.g. 'aligned_positions.xyz').
+        positions (list or np.ndarray): Atomic positions of shape (num_frames, num_atoms, 3).
+        atom_types (list[str]): List of atom types (e.g. ["Cs", "Br", ...]).
+        energies (list[float], optional): If provided, each energy is written in the frame comment line.
     """
-    if output_dir is None:
-        # Adjust 'parents[3]' or 'parents[4]' based on your script's nesting
-        output_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
 
-    output_path = Path(output_dir) / filename
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Adjust parents[3] or parents[4] depending on how many levels you need to go up
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
 
-    with output_path.open("w") as f:
+    output_path = processed_dir / filename
+
+    with open(output_path, "w") as f:
+        # positions: shape (num_frames, num_atoms, 3)
+        num_frames = len(positions)
+        num_atoms = len(atom_types)
+
         for i, frame in enumerate(positions):
-            f.write(f"{len(atom_types)}\n")
+            f.write(f"{num_atoms}\n")
             if energies and energies[i] is not None:
                 f.write(f"Frame {i+1}, Energy = {energies[i]:.6f}\n")
             else:
                 f.write(f"Frame {i+1}\n")
+
             for atom, (x, y, z) in zip(atom_types, frame):
                 f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
 
