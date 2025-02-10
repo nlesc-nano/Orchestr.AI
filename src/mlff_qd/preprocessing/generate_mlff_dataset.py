@@ -165,15 +165,21 @@ def save_forces_xyz(filename, forces, atom_types):
         forces (np.ndarray): Atomic forces (num_frames, num_atoms, 3).
         atom_types (list): Atomic types (num_atoms).
     """
-    print(f"Saving aligned forces to {filename}...")
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = processed_dir / filename
+    print(f"Saving aligned forces to {output_path}...")
+
     num_frames, num_atoms, _ = forces.shape
-    with open(filename, "w") as f:
+    with open(output_path, "w") as f:
         for frame_idx in range(num_frames):
             f.write(f"{num_atoms}\n")
             f.write(f"Frame {frame_idx + 1}: Aligned forces\n")
             for atom, (fx, fy, fz) in zip(atom_types, forces[frame_idx]):
                 f.write(f"{atom} {fx:.6f} {fy:.6f} {fz:.6f}\n")
-    print(f"Aligned forces saved to {filename}.")
+    
+    print(f"Aligned forces saved to {output_path}.")
 
 def save_frequencies(filename, frequencies):
     """
