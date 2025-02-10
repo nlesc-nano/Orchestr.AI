@@ -132,10 +132,15 @@ def save_positions_xyz(filename, positions, atom_types, energies=None):
         atom_types (list): Atomic types (num_atoms).
         energies (list or np.ndarray): Total energies for each frame (optional).
     """
-    print(f"Saving aligned positions to {filename}...")
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = processed_dir / filename
+    print(f"Saving aligned positions to {output_path}...")
+
     num_frames, num_atoms, _ = positions.shape
 
-    with open(filename, "w") as f:
+    with open(output_path, "w") as f:
         for frame_idx in range(num_frames):
             f.write(f"{num_atoms}\n")
 
@@ -148,7 +153,7 @@ def save_positions_xyz(filename, positions, atom_types, energies=None):
             for atom, (x, y, z) in zip(atom_types, positions[frame_idx]):
                 f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
 
-    print(f"Aligned positions saved to {filename}.")
+    print(f"Aligned positions saved to {output_path}.")
 
 
 def save_forces_xyz(filename, forces, atom_types):
@@ -1028,7 +1033,7 @@ if __name__ == "__main__":
 
     # Load aligned MD structures
     print("Parsing aligned MD structures...")
-    md_positions, atom_types, _ = parse_positions_xyz("aligned_positions.xyz", num_atoms)
+    md_positions, atom_types, _ = parse_positions_xyz("data/processed/aligned_positions.xyz", num_atoms)
 
     print("Computing RMSD matrix for MD trajectory...")
     rmsd_md_internal = compute_rmsd_matrix(md_positions)
