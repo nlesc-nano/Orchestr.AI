@@ -338,20 +338,29 @@ def load_binary(filename):
     print(f"Loaded data from binary file: {filename}")
     return data["frequencies"], data["eigenvectors"]
 
-def save_xyz(filename, positions, atom_types, energies=None):
+def save_xyz(filename, positions, atom_types, energies=None, output_dir=None):
     """
-    Save atomic positions to an XYZ file.
+    Save atomic positions to an XYZ file, defaulting to 'data/processed'.
 
     Parameters:
-        filename (str): Path to the output XYZ file.
-        positions (list): Atomic positions (num_frames, num_atoms, 3).
-        atom_types (list): Atomic types.
-        energies (list): Optional list of energies for each frame.
+        filename (str): Filename (not full path) for the output XYZ file.
+        positions (np.ndarray): Shape (num_frames, num_atoms, 3).
+        atom_types (list[str]): Atomic symbols (e.g., ["Cs", "Br", ...]).
+        energies (list[float], optional): Energies for each frame.
+        output_dir (str or Path, optional): Directory to store output in.
+            Defaults to [project_root]/data/processed/.
     """
-    with open(filename, "w") as f:
+    if output_dir is None:
+        # Adjust 'parents[3]' or 'parents[4]' based on your script's nesting
+        output_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+
+    output_path = Path(output_dir) / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w") as f:
         for i, frame in enumerate(positions):
             f.write(f"{len(atom_types)}\n")
-            if energies:
+            if energies and energies[i] is not None:
                 f.write(f"Frame {i+1}, Energy = {energies[i]:.6f}\n")
             else:
                 f.write(f"Frame {i+1}\n")
@@ -680,7 +689,7 @@ def generate_surface_core_pca_samples(
     save_xyz("mean_structure.xyz", mean_positions[np.newaxis, :, :], atom_types)
     surface_replaced_file = "surface_replaced.xyz"
     surface_indices, replaced_atom_types = compute_surface_indices_with_replace_surface_dynamic(
-        "mean_structure.xyz",
+        "data/processed/mean_structure.xyz",
         surface_atom_types=surface_atom_types,
         f=1.0,
         surface_replaced_file=surface_replaced_file,
