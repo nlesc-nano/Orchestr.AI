@@ -255,3 +255,24 @@ def setup_data_module(config, db_path, transformations, property_units):
     logging.info("Data module prepared and set up")
     
     return custom_data
+    
+    
+
+def show_dataset_info(dataset):
+    """
+    Display information about the dataset, including available properties and an example molecule.
+    
+    Args:
+        dataset (spk.data.ASEAtomsData): The dataset to inspect.
+    """
+    print('Number of reference calculations:', len(dataset))
+
+    print('Available properties:')
+    for p in dataset.available_properties:
+        print('-', p)
+    print()
+
+    example = dataset[0]
+    print('Properties of molecule with id 0:')
+    for k, v in example.items():
+        print('-', k, ':', v.shape)
