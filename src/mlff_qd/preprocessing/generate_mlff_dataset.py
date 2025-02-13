@@ -1023,8 +1023,8 @@ if __name__ == "__main__":
     reorder_xyz_trajectory(frc_file, "reordered_forces.xyz", num_atoms)
 
     # Parse reordered positions and forces
-    positions, atom_types, energies_hartree = parse_positions_xyz("reordered_positions.xyz", num_atoms)
-    forces = parse_forces_xyz("reordered_forces.xyz", num_atoms)
+    positions, atom_types, energies_hartree = parse_positions_xyz("data/processed/reordered_positions.xyz", num_atoms)
+    forces = parse_forces_xyz("data/processed/reordered_forces.xyz", num_atoms)
 
     # Center and align positions
     centered_positions = center_positions(positions, masses)
@@ -1129,7 +1129,11 @@ if __name__ == "__main__":
     combined_sample_reshaped = np.vstack(combined_sample_list).reshape(-1, num_atoms, 3)
 
     # Save the non-MD training dataset to XYZ file with titles
-    with open("training_dataset.xyz", "w") as xyz_file:
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    output_path = processed_dir / "training_dataset.xyz"
+
+    with open(output_path, "w") as xyz_file:
         for i, (structure, title) in enumerate(zip(combined_sample_reshaped, frame_titles)):
             xyz_file.write(f"{len(structure)}\n")  # Write the number of atoms
             xyz_file.write(f"{title}\n")  # Write the title of the frame
