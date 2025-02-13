@@ -1,3 +1,7 @@
 *xyz
 *npz
 *hdf5
+
+src/mlff_qd.egg-info/*
+src/mlff_qd/__pycache__/*
+src/mlff_qd/preprocessing/__pycache__/*
