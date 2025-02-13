@@ -79,6 +79,11 @@ def compute_surface_indices_with_replace_surface_dynamic(
         replaced_atom_types (list): Updated atom types after replacement.
     """
 
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    surface_replaced_file = processed_dir / surface_replaced_file
+
     print(f"Reading molecule from {input_file}...")
     mol_original = Molecule(input_file)  # Load the original molecule
     mol_updated = mol_original.copy()  # Create a copy to track cumulative changes
@@ -114,7 +119,7 @@ def compute_surface_indices_with_replace_surface_dynamic(
 
     # Save the final updated molecule to the output file
     print(f"Writing modified molecule with replacements to {surface_replaced_file}...")
-    mol_updated.write(surface_replaced_file)
+    mol_updated.write(str(surface_replaced_file))
 
     # Extract updated atom types
     replaced_atom_types = [atom.symbol for atom in mol_updated]
