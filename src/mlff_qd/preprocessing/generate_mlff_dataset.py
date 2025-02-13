@@ -383,8 +383,14 @@ def save_xyz(filename, positions, atom_types, energies=None):
 
 def reorder_xyz_trajectory(input_file, output_file, num_atoms):
     """Reorder atoms in the XYZ trajectory."""
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = processed_dir / output_file
+
     print(f"Reordering atoms in trajectory file: {input_file}")
-    with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+    
+    with open(input_file, "r") as infile, open(output_path, "w") as outfile:
         lines = infile.readlines()
         num_lines_per_frame = num_atoms + 2
         for i in range(0, len(lines), num_lines_per_frame):
@@ -393,7 +399,7 @@ def reorder_xyz_trajectory(input_file, output_file, num_atoms):
             sorted_atoms = sorted(atom_lines, key=lambda x: x.split()[0])
             outfile.writelines(header)
             outfile.writelines(sorted_atoms)
-    print(f"Reordered trajectory saved to: {output_file}")
+    print(f"Reordered trajectory saved to: {output_path}")
 
 def parse_positions_xyz(filename, num_atoms):
     """
