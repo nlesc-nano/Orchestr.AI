@@ -69,6 +69,14 @@ cd MLFF_QD
 pip install -e .
 ```
 
+### Preprocessing tools
+The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw.
+
+The preprocessing code can be run as:
+```bash
+python -m mlff_qd.preprocessing.generate_mlff_dataset
+```
+
 ### Training locally
 If an user wants to run locally the training code, one can do the following:
 ```bash
