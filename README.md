@@ -61,6 +61,14 @@ The current version of the platform is developped for being run in a cluster. Th
 
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
+### Installation of the mlff_qd package
+One can install the platform using pip in the following way:
+```bash
+git checkout https://github.com/nlesc-nano/MLFF_QD.git
+cd MLFF_QD  
+pip install -e .
+```
+
 ### Training locally
 If an user wants to run locally the training code, one can do the following:
 ```bash
