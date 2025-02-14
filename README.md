@@ -70,7 +70,7 @@ pip install -e .
 ```
 
 ### Preprocessing tools
-The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw.
+The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw. This tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
 
 The preprocessing code can be run as:
 ```bash
@@ -83,6 +83,3 @@ If an user wants to run locally the training code, one can do the following:
 python training.py --config input_file.yaml
 ```
 By default, if no input file is specified, the training code looks for a file called input.yaml.
-
-### Preprocessing
-Currently, we have scripts used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
