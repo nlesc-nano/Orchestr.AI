@@ -3,7 +3,8 @@ import pickle
 import random
 import matplotlib.pyplot as plt
 import yaml 
-import pprint 
+import pprint
+import argparse
 from pathlib import Path
 from periodictable import elements
 from scipy.spatial.transform import Rotation as R
@@ -983,7 +984,12 @@ def load_config(config_file=None):
 
 if __name__ == "__main__":
     # Load configuration
-    config = load_config()
+    parser = argparse.ArgumentParser(description="MLFF Data Generation")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to the YAML config file.")
+    args = parser.parse_args()
+
+    config = load_config(config_file=args.config)
 
     # Default values used with .get()
     pos_file = config.get("pos_file", "trajectory_pos.xyz")
