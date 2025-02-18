@@ -72,9 +72,14 @@ pip install -e .
 ### Preprocessing tools
 The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw. This tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
 
-The preprocessing code can be run as:
+By default, the preprocessing code assumes that the input file is config/preprocess_config.yaml. If that is the case, it can be run as:
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset
+```
+
+However, if an user wants to specify a different custom configuration file for the preprocessing, the code can be run as:
+```bash
+python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
 ```
 
 ### Training locally
