@@ -991,9 +991,15 @@ if __name__ == "__main__":
 
     config = load_config(config_file=args.config)
 
+    PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
     # Default values used with .get()
     pos_file = config.get("pos_file", "trajectory_pos.xyz")
     frc_file = config.get("frc_file", "trajectory_frc.xyz")
+    pos_file_path = PROJECT_ROOT / "data" / "raw" / pos_file_name
+    frc_file_path = PROJECT_ROOT / "data" / "raw" / frc_file_name
+    pos_file_str = str(pos_file_path)
+    frc_file_str = str(frc_file_path)
     temperature = config.get("temperature", 300.0)
     temperature_target = config.get("temperature_target", 300.0)
     temperature_target_surface = config.get("temperature_target_surface", 450.0)
