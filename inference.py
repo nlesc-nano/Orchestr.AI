@@ -51,7 +51,8 @@ def main():
     trained_model_path = config['settings']['testing']['trained_model_path']
     print(f"Trained model path: {trained_model_path}")
 
-    db_path = os.path.join(trained_model_path, 'cspbbr3.db')
+    db_name =  config['settings']['general']['database_name']
+    db_path = os.path.join(trained_model_path, db_name) 
 
     batch_size = config['settings']['training']['batch_size']
     num_train = config['settings']['training']['num_train']
@@ -83,6 +84,9 @@ def main():
 
     print('Available properties in the dataset:')
     print(dataset.available_properties)
+    
+    total_atoms = dataset[0]['_n_atoms'].item()  
+    print(f'Total atoms: {total_atoms}')
 
     data_module = spk.data.AtomsDataModule(
         db_path,
@@ -229,18 +233,36 @@ def main():
         # Compute MAEs for all properties
         energy_mae = mean_absolute_error(np.concatenate(all_actual_energy), np.concatenate(all_predicted_energy))
         forces_mae = mean_absolute_error(all_actual_forces_flat, all_predicted_forces_flat)
-        print(f"Energy MAE on {dataset_type} data: {energy_mae} kcal/mol")
-        print(f"Forces MAE on {dataset_type} data: {forces_mae} kcal/mol/Ang")
+
+
+        energy_mae_per_atom = (energy_mae/total_atoms) 
+
+        print(f"Energy MAE on {dataset_type} data: {energy_mae} {property_units['energy']}") 
+        print(f"Energy MAE per Atom on {dataset_type} data: {energy_mae_per_atom} {property_units['energy']}") 
+        print(f"Forces MAE on {dataset_type} data: {forces_mae} {property_units['forces']}") 
+
 
         if include_homo_lumo:
             homo_mae = mean_absolute_error(np.concatenate(all_actual_homo), np.concatenate(all_predicted_homo))
             lumo_mae = mean_absolute_error(np.concatenate(all_actual_lumo), np.concatenate(all_predicted_lumo))
-            print(f"HOMO MAE on {dataset_type} data: {homo_mae} eV")
-            print(f"LUMO MAE on {dataset_type} data: {lumo_mae} eV")
+
+            homo_mae_per_atom = (homo_mae/total_atoms) 
+            lumo_mae_per_atom = (lumo_mae/total_atoms) 
+            
+            print(f"HOMO MAE on {dataset_type} data: {homo_mae} {property_units['homo']}") 
+            print(f"HOMO MAE  per Atom on {dataset_type} data: {homo_mae_per_atom} {property_units['homo']}")  
+
+            print(f"LUMO MAE on {dataset_type} data: {lumo_mae} {property_units['lumo ']}") 
+            print(f"LUMO MAE per Atom on {dataset_type} data: {lumo_mae_per_atom} {property_units['lumo']}")
+
 
         if include_bandgap:
             bandgap_mae = mean_absolute_error(np.concatenate(all_actual_bandgap), np.concatenate(all_predicted_bandgap))
-            print(f"Bandgap MAE on {dataset_type} data: {bandgap_mae} eV")
+
+            bandgap_mae_per_atom = (bandgap_mae/total_atoms)
+
+            print(f"Bandgap MAE on {dataset_type} data: {bandgap_mae} {property_units['bandgap']}") 
+            print(f"Bandgap MAE per Atom on {dataset_type} data: {bandgap_mae_per_atom} {property_units['bandgap']}") 
 
         if include_eigenvalues_vector:
             # Compute MAE for each eigenvalue label
@@ -248,7 +270,10 @@ def main():
                 actual = all_actual_eigenvalues_vector[:, i]
                 predicted = all_predicted_eigenvalues_vector[:, i]
                 mae = mean_absolute_error(actual, predicted)
-                print(f"{label} MAE on {dataset_type} data: {mae} eV")
+                mae_new = (mae/total_atoms) 
+
+                print(f"{label} MAE on {dataset_type} data: {mae} {property_units[label]}") 
+                print(f"{label} MAE  per Atom on {dataset_type} data: {mae_new} {property_units[label]}") 
 
         # Save forces in a pickle file
         forces_data = {
@@ -259,6 +284,14 @@ def main():
         with open(forces_pkl_file_path, 'wb') as f:
             pickle.dump(forces_data, f)
         print(f"Forces data saved to {forces_pkl_file_path}")
+
+        # Convergence Check 
+        if energy_mae_per_atom < 10 and forces_mae < 0.05:
+            print("MLFF converged!")
+        elif energy_mae_per_atom < 20 and forces_mae < 0.1:
+            print("MLFF near convergence")
+        else:
+            print("MLFF not yet converged. Continuing training...")
 
     # Run inference on both datasets
     run_inference(train_loader, "train", include_eigenvalues_vector, eigenvalue_labels)
