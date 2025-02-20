@@ -994,10 +994,10 @@ if __name__ == "__main__":
     PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
     # Default values used with .get()
-    pos_file = config.get("pos_file", "trajectory_pos.xyz")
-    frc_file = config.get("frc_file", "trajectory_frc.xyz")
-    pos_file_path = PROJECT_ROOT / "data" / "raw" / pos_file_name
-    frc_file_path = PROJECT_ROOT / "data" / "raw" / frc_file_name
+    pos_file_name = config.get("pos_file", "trajectory_pos.xyz")
+    frc_file_name = config.get("frc_file", "trajectory_frc.xyz")
+    pos_file_path = PROJECT_ROOT / pos_file_name
+    frc_file_path = PROJECT_ROOT / frc_file_name
     pos_file_str = str(pos_file_path)
     frc_file_str = str(frc_file_path)
     temperature = config.get("temperature", 300.0)
@@ -1020,10 +1020,10 @@ if __name__ == "__main__":
     pprint.pprint(config, indent=4, width=80)
 
     # Read total number of atoms
-    num_atoms = get_num_atoms(pos_file) 
+    num_atoms = get_num_atoms(pos_file_str) 
 
     # Get atom_types 
-    _, atom_types, _ = parse_positions_xyz(pos_file, num_atoms)
+    _, atom_types, _ = parse_positions_xyz(pos_file_str, num_atoms)
 
     # Dynamically create the mass dictionary
     print("Creating mass dictionary...")
@@ -1031,8 +1031,8 @@ if __name__ == "__main__":
     masses = np.array([mass_dict[atom] for atom in atom_types])
 
     # Reorder positions and forces by atom type
-    reorder_xyz_trajectory(pos_file, "reordered_positions.xyz", num_atoms)
-    reorder_xyz_trajectory(frc_file, "reordered_forces.xyz", num_atoms)
+    reorder_xyz_trajectory(pos_file_str, "reordered_positions.xyz", num_atoms)
+    reorder_xyz_trajectory(frc_file_str, "reordered_forces.xyz", num_atoms)
 
     # Parse reordered positions and forces
     positions, atom_types, energies_hartree = parse_positions_xyz("data/processed/reordered_positions.xyz", num_atoms)
