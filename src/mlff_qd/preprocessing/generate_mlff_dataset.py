@@ -712,13 +712,14 @@ def generate_surface_core_pca_samples(
 
     # Identify surface and core atoms
     mean_positions = np.mean(md_positions, axis=0)
-    save_xyz("mean_structure.xyz", mean_positions[np.newaxis, :, :], atom_types)
-    surface_replaced_file = "surface_replaced.xyz"
+    mean_structure_path = PROJECT_ROOT / "data" / "processed" / "mean_structure.xyz"
+    save_xyz(str(mean_structure_path), mean_positions[np.newaxis, :, :], atom_types)
+    surface_replaced_file_path = PROJECT_ROOT / "data" / "processed" / "surface_replaced.xyz"
     surface_indices, replaced_atom_types = compute_surface_indices_with_replace_surface_dynamic(
-        "data/processed/mean_structure.xyz",
+        str(mean_structure_path),
         surface_atom_types=surface_atom_types,
         f=1.0,
-        surface_replaced_file=surface_replaced_file,
+        surface_replaced_file=str(surface_replaced_file_path),
     )
     num_atoms = mean_positions.shape[0]
     core_indices = np.setdiff1d(np.arange(num_atoms), surface_indices)
@@ -991,9 +992,15 @@ if __name__ == "__main__":
 
     config = load_config(config_file=args.config)
 
+    PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
     # Default values used with .get()
-    pos_file = config.get("pos_file", "trajectory_pos.xyz")
-    frc_file = config.get("frc_file", "trajectory_frc.xyz")
+    pos_file_name = config.get("pos_file", "trajectory_pos.xyz")
+    frc_file_name = config.get("frc_file", "trajectory_frc.xyz")
+    pos_file_path = PROJECT_ROOT / pos_file_name
+    frc_file_path = PROJECT_ROOT / frc_file_name
+    pos_file_str = str(pos_file_path)
+    frc_file_str = str(frc_file_path)
     temperature = config.get("temperature", 300.0)
     temperature_target = config.get("temperature_target", 300.0)
     temperature_target_surface = config.get("temperature_target_surface", 450.0)
@@ -1014,61 +1021,64 @@ if __name__ == "__main__":
     pprint.pprint(config, indent=4, width=80)
 
     # Read total number of atoms
-    num_atoms = get_num_atoms(pos_file) 
+    num_atoms = get_num_atoms(pos_file_str) 
 
     # Get atom_types 
-    _, atom_types, _ = parse_positions_xyz(pos_file, num_atoms)
+    _, atom_types, _ = parse_positions_xyz(pos_file_str, num_atoms)
 
     # Dynamically create the mass dictionary
     print("Creating mass dictionary...")
     mass_dict = create_mass_dict(atom_types)
     masses = np.array([mass_dict[atom] for atom in atom_types])
 
-    # Reorder positions and forces by atom type
-    reorder_xyz_trajectory(pos_file, "reordered_positions.xyz", num_atoms)
-    reorder_xyz_trajectory(frc_file, "reordered_forces.xyz", num_atoms)
+    # Reorder raw XYZ -> processed "reordered_positions.xyz" / "reordered_forces.xyz"
+    reordered_positions_path = PROJECT_ROOT / "data" / "processed" / "reordered_positions.xyz"
+    reordered_forces_path    = PROJECT_ROOT / "data" / "processed" / "reordered_forces.xyz"
 
-    # Parse reordered positions and forces
-    positions, atom_types, energies_hartree = parse_positions_xyz("data/processed/reordered_positions.xyz", num_atoms)
-    forces = parse_forces_xyz("data/processed/reordered_forces.xyz", num_atoms)
+    # Write them out
+    reorder_xyz_trajectory(pos_file_str, str(reordered_positions_path), num_atoms)
+    reorder_xyz_trajectory(frc_file_str, str(reordered_forces_path), num_atoms)
 
-    # Center and align positions
+    # Now parse those reordered files:
+    positions, atom_types, energies_hartree = parse_positions_xyz(str(reordered_positions_path), num_atoms)
+    forces = parse_forces_xyz(str(reordered_forces_path), num_atoms)
+
+    # Center, align, & save results
     centered_positions = center_positions(positions, masses)
     aligned_positions = align_to_reference(centered_positions, centered_positions[0])
 
-    # Align forces
     rotation_matrices = [R.align_vectors(frame, centered_positions[0])[0].as_matrix() for frame in centered_positions]
     aligned_forces = rotate_forces(forces, rotation_matrices)
 
     mean_positions = np.mean(aligned_positions, axis=0)
 
-    # Save aligned positions and forces
+    # Save them to data/processed:
     save_xyz("mean_structure.xyz", mean_positions[np.newaxis, :, :], atom_types)
     save_positions_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree)
     save_forces_xyz("aligned_forces.xyz", aligned_forces, atom_types)
 
-    # Convert energies to eV
+    # Convert energies/forces
     energies_ev = [e * hartree_to_eV if e is not None else None for e in energies_hartree]
-    # Convert forces to eV/Å
-    aligned_forces_ev = aligned_forces * hartree_bohr_to_eV_angstrom 
+    aligned_forces_ev = aligned_forces * hartree_bohr_to_eV_angstrom
+
     save_positions_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev)
     save_forces_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types)
 
-    # Load aligned MD structures
-    print("Parsing aligned MD structures...")
-    md_positions, atom_types, _ = parse_positions_xyz("data/processed/aligned_positions.xyz", num_atoms)
+    # Parse aligned positions from processed
+    aligned_positions_path = PROJECT_ROOT / "data" / "processed" / "aligned_positions.xyz"
+    md_positions, atom_types, _ = parse_positions_xyz(str(aligned_positions_path), num_atoms)
 
     print("Computing RMSD matrix for MD trajectory...")
     rmsd_md_internal = compute_rmsd_matrix(md_positions)
-
-    num_frames = md_positions.shape[0]  # Total number of frames
+    num_frames = md_positions.shape[0]
     print(f"Number of frames is : {num_frames}")
 
-    # Clustering-Based Sampling
+    # Clustering + PCA + Random
     print("Performing clustering on MD trajectory...")
-    representative_md = cluster_trajectory(rmsd_md_internal, clustering_method, num_clusters, md_positions, atom_types) 
+    representative_md = cluster_trajectory(
+        rmsd_md_internal, clustering_method, num_clusters, md_positions, atom_types
+    )
 
-    # Generate sample dataset based on PCA  
     pca_samples = generate_structures_from_pca(
         rmsd_md_internal,
         md_positions,
@@ -1080,7 +1090,6 @@ if __name__ == "__main__":
         temperature_target
     )
 
-    # Generate sample dataset based on PCA but separating core from surface, allowing for surface atoms to be displace more
     pca_surface_samples = generate_surface_core_pca_samples(
         md_positions,
         atom_types,
@@ -1094,57 +1103,48 @@ if __name__ == "__main__":
         max_displacement
     )
 
-    # Generate Randomized Samples
     randomized_samples = generate_randomized_samples(
         representative_md,
         atom_types,
-        num_samples_randomization, 
+        num_samples_randomization,
         max_random_displacement
     )
 
-    # Load or generate your datasets (MD, Wigner, Randomized, Normal Modes, Surface)
-    combined_samples = { 
-        "MD": md_positions, 
-        "PCA": pca_samples, 
+    # Combine data sets + final training dataset
+    combined_samples = {
+        "MD": md_positions,
+        "PCA": pca_samples,
         "PCA_Surface": pca_surface_samples,
         "Randomized": randomized_samples,
     }
 
-    # Print the shape of each dataset
     print("Dataset shapes before flattening:")
     for name, samples in combined_samples.items():
         print(f"{name}: {np.array(samples).shape}")
 
-    # Plot the PCA of the generated sampls on the MD with either rmsd or positons  
     plot_generated_samples(combined_samples)
 
-    # Combine all non-MD datasets into a single NumPy array
-    combined_sample_list = []  # List to hold individual datasets
-    frame_titles = []  # List to hold titles for each frame in the XYZ file
+    combined_sample_list = []
+    frame_titles = []
 
     for name, samples in combined_samples.items():
         if name != "MD":  # Exclude MD samples
-            samples_array = np.array(samples)  # Ensure samples are a NumPy array
+            samples_array = np.array(samples)
             combined_sample_list.append(samples_array)
-
-            # Generate titles for each frame in this dataset
             for i in range(len(samples)):
                 frame_titles.append(f"Frame {i + 1} from {name}")
 
-    # Concatenate the non-MD datasets along the first axis
     combined_sample_reshaped = np.vstack(combined_sample_list).reshape(-1, num_atoms, 3)
 
-    # Save the non-MD training dataset to XYZ file with titles
-    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir = PROJECT_ROOT / "data" / "processed"
     processed_dir.mkdir(parents=True, exist_ok=True)
     output_path = processed_dir / "training_dataset.xyz"
 
     with open(output_path, "w") as xyz_file:
         for i, (structure, title) in enumerate(zip(combined_sample_reshaped, frame_titles)):
-            xyz_file.write(f"{len(structure)}\n")  # Write the number of atoms
-            xyz_file.write(f"{title}\n")  # Write the title of the frame
+            xyz_file.write(f"{len(structure)}\n")
+            xyz_file.write(f"{title}\n")
             for atom, coords in zip(atom_types, structure):
                 xyz_file.write(f"{atom} {coords[0]:.6f} {coords[1]:.6f} {coords[2]:.6f}\n")
 
     print(f"Saved non-MD training dataset with {combined_sample_reshaped.shape[0]} structures.")
-
