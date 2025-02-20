@@ -55,7 +55,7 @@ settings:
     batch_size: 8
     num_train: 2198
     num_val: 549
-    max_epochs: 100
+    max_epochs: 100 
     num_workers: 24
     pin_memory: true
     optimizer:
@@ -78,3 +78,7 @@ settings:
   testing:
     trained_model_path: './cspbbr3'  # Path to load the trained model
     csv_file_name: 'actual_vs_predicted_enrgforc.csv'  # Path to save the predictions CSV
+
+  # Resume training settings
+  resume_training:
+    resume_checkpoint_dir: null # Path to model checkpoint file if required 

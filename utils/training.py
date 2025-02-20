@@ -30,5 +30,12 @@ def main(args):
     nnpot, outputs = setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
     task, trainer = setup_task_and_trainer(config, nnpot, outputs, config['settings']['logging']['folder'])
     
-    logging.info("Starting training")
-    trainer.fit(task, datamodule=custom_data)
+    # Check if we should resume from a checkpoint
+    checkpoint_path = config['settings']['resume_training'].get('resume_checkpoint_dir')
+
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        logging.info(f"Resuming training from checkpoint: {checkpoint_path}")
+        trainer.fit(task, datamodule=custom_data, ckpt_path=checkpoint_path)
+    else:
+        logging.info("Starting training from scratch")
+        trainer.fit(task, datamodule=custom_data)
