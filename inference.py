@@ -246,23 +246,15 @@ def main():
             homo_mae = mean_absolute_error(np.concatenate(all_actual_homo), np.concatenate(all_predicted_homo))
             lumo_mae = mean_absolute_error(np.concatenate(all_actual_lumo), np.concatenate(all_predicted_lumo))
 
-            homo_mae_per_atom = (homo_mae/total_atoms) 
-            lumo_mae_per_atom = (lumo_mae/total_atoms) 
-            
+
             print(f"HOMO MAE on {dataset_type} data: {homo_mae} {property_units['homo']}") 
-            print(f"HOMO MAE  per Atom on {dataset_type} data: {homo_mae_per_atom} {property_units['homo']}")  
-
             print(f"LUMO MAE on {dataset_type} data: {lumo_mae} {property_units['lumo ']}") 
-            print(f"LUMO MAE per Atom on {dataset_type} data: {lumo_mae_per_atom} {property_units['lumo']}")
-
 
         if include_bandgap:
             bandgap_mae = mean_absolute_error(np.concatenate(all_actual_bandgap), np.concatenate(all_predicted_bandgap))
 
-            bandgap_mae_per_atom = (bandgap_mae/total_atoms)
 
-            print(f"Bandgap MAE on {dataset_type} data: {bandgap_mae} {property_units['bandgap']}") 
-            print(f"Bandgap MAE per Atom on {dataset_type} data: {bandgap_mae_per_atom} {property_units['bandgap']}") 
+            print(f"Bandgap MAE on {dataset_type} data: {bandgap_mae} {property_units['bandgap']}")  
 
         if include_eigenvalues_vector:
             # Compute MAE for each eigenvalue label
@@ -270,10 +262,8 @@ def main():
                 actual = all_actual_eigenvalues_vector[:, i]
                 predicted = all_predicted_eigenvalues_vector[:, i]
                 mae = mean_absolute_error(actual, predicted)
-                mae_new = (mae/total_atoms) 
-
-                print(f"{label} MAE on {dataset_type} data: {mae} {property_units[label]}") 
-                print(f"{label} MAE  per Atom on {dataset_type} data: {mae_new} {property_units[label]}") 
+                
+                print(f"{label} MAE on {dataset_type} data: {mae} {property_units[label]}")  
 
         # Save forces in a pickle file
         forces_data = {
@@ -285,10 +275,10 @@ def main():
             pickle.dump(forces_data, f)
         print(f"Forces data saved to {forces_pkl_file_path}")
 
-        # Convergence Check 
-        if energy_mae_per_atom < 10 and forces_mae < 0.05:
+        # Convergence Check  
+        if energy_mae_per_atom < 10/1000 and forces_mae < 0.05:
             print("MLFF converged!")
-        elif energy_mae_per_atom < 20 and forces_mae < 0.1:
+        elif energy_mae_per_atom < 20/1000 and forces_mae < 0.1:
             print("MLFF near convergence")
         else:
             print("MLFF not yet converged. Continuing training...")
