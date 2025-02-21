@@ -20,6 +20,35 @@ import time
 
 from utils.logging_utils import  timer,setup_logging
 
+def convert_units(value, from_unit, to_unit):
+    """Convert energy or force values between different unit systems."""
+    conversion_factors = {
+        # Energy conversions
+        ("Hartree", "eV"): 27.2114,
+        ("eV", "Hartree"): 1 / 27.2114,
+        ("kcal/mol", "eV"): 0.0433641,
+        ("eV", "kcal/mol"): 1 / 0.0433641,
+        ("kJ/mol", "eV"): 0.010364,
+        ("eV", "kJ/mol"): 1 / 0.010364,
+
+        # Force conversions
+        ("Hartree/Bohr", "eV/Å"): 51.4221,
+        ("eV/Å", "Hartree/Bohr"): 1 / 51.4221,
+        ("kcal/mol/Å", "eV/Å"): 0.0433641,
+        ("eV/Å", "kcal/mol/Å"): 1 / 0.0433641,
+        ("kJ/mol/Å", "eV/Å"): 0.010364,
+        ("eV/Å", "kJ/mol/Å"): 1 / 0.010364
+    }
+
+    if from_unit == to_unit:
+        return value  # No conversion needed
+
+    key = (from_unit, to_unit)
+    if key in conversion_factors:
+        return value * conversion_factors[key]
+    else:
+        raise ValueError(f"Unsupported conversion: {from_unit} to {to_unit}")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run inference with SchNet using a configuration file.")
@@ -275,10 +304,23 @@ def main():
             pickle.dump(forces_data, f)
         print(f"Forces data saved to {forces_pkl_file_path}")
 
-        # Convergence Check  
-        if energy_mae_per_atom < 10/1000 and forces_mae < 0.05:
+        # Read energy and force units from MLFF setup
+        energy_unit = property_units['energy']
+        force_unit = property_units['forces']
+
+        # Define reference convergence values in eV and eV/Å
+        energy_convergence_eV = 0.01  # 10 meV = 0.01 eV
+        force_convergence_strict_eV_A = 0.05  # 0.05 eV/Å
+        force_convergence_loose_eV_A = 0.1  # 0.1 eV/Å
+
+        # Convert MLFF values to eV and eV/Å
+        energy_mae_per_atom_eV = convert_units(energy_mae_per_atom, energy_unit, "eV")
+        forces_mae_eV_A = convert_units(forces_mae, force_unit, "eV/Å")
+
+        # Check convergence
+        if energy_mae_per_atom_eV < energy_convergence_eV and forces_mae_eV_A < force_convergence_strict_eV_A:
             print("MLFF converged!")
-        elif energy_mae_per_atom < 20/1000 and forces_mae < 0.1:
+        elif energy_mae_per_atom_eV < 2 * energy_convergence_eV and forces_mae_eV_A < force_convergence_loose_eV_A:
             print("MLFF near convergence")
         else:
             print("MLFF not yet converged. Continuing training...")
