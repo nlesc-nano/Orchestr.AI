@@ -23,22 +23,6 @@ from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV, 
 
 np.set_printoptions(threshold=np.inf)
 
-def rotate_forces(forces, rotation_matrices):
-    """
-    Rotate forces for each frame to match the aligned orientation.
-
-    Parameters:
-        forces (np.ndarray): Atomic forces (num_frames, num_atoms, 3).
-        rotation_matrices (np.ndarray): Rotation matrices (num_frames, 3, 3).
-
-    Returns:
-        np.ndarray: Rotated forces (num_frames, num_atoms, 3).
-    """
-    rotated_forces = np.zeros_like(forces)
-    for frame_idx, frame_forces in enumerate(forces):
-        rotated_forces[frame_idx] = frame_forces @ rotation_matrices[frame_idx]
-    return rotated_forces
-
 def compute_rmsd_matrix(structures1, structures2=None):
     """
     Compute the RMSD matrix for pairs of structures efficiently.
