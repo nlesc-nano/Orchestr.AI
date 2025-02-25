@@ -15,27 +15,12 @@ from sklearn.cluster import DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 
-from mlff_qd.utils.io import save_xyz
+from mlff_qd.utils.io import save_xyz, save_frequencies
 from mlff_qd.utils.pca import generate_pca_samples
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV, bohr_to_angstrom, amu_to_kg, c
 
 np.set_printoptions(threshold=np.inf)
-
-def save_frequencies(filename, frequencies):
-    """
-    Save vibrational frequencies to a file.
-
-    Parameters:
-        filename (str): Path to the output file.
-        frequencies (np.ndarray): Vibrational frequencies (cm^-1).
-    """
-    print(f"Saving vibrational frequencies to {filename}...")
-    with open(filename, "w") as f:
-        f.write("Vibrational Frequencies (cm^-1):\n")
-        for i, freq in enumerate(frequencies, start=1):
-            f.write(f"Mode {i}: {freq:.6f} cm^-1\n")
-    print(f"Frequencies saved to {filename}.")
 
 def center_positions(positions, masses):
     """

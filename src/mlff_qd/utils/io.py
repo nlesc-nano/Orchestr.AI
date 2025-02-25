@@ -70,3 +70,19 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
                 f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
 
     print(f"Done. Wrote {num_frames} frames to '{output_path}'.")
+
+def save_frequencies(filename, frequencies):
+    """
+    Save vibrational frequencies to a file.
+
+    Parameters:
+        filename (str): Path to the output file.
+        frequencies (np.ndarray): Vibrational frequencies (cm^-1).
+    """
+    print(f"Saving vibrational frequencies to {filename}...")
+    with open(filename, "w") as f:
+        f.write("Vibrational Frequencies (cm^-1):\n")
+        for i, freq in enumerate(frequencies, start=1):
+            f.write(f"Mode {i}: {freq:.6f} cm^-1\n")
+    
+    print(f"Frequencies saved to {filename}.")
