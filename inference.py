@@ -140,8 +140,9 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-
-    best_model_path = os.path.join(trained_model_path, 'best_inference_model')
+    
+    model_name = config['settings']['logging']['checkpoint_dir'] 
+    best_model_path = os.path.join(trained_model_path, model_name)
     best_model = torch.load(best_model_path, map_location=device)
 
     # Filter out None postprocessors
