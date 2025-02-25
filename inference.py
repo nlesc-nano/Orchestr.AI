@@ -66,17 +66,6 @@ def main():
     args = parse_args()
     config = load_config(args.config)
 
-    output_type = config['settings']['data']['output_type']
-    include_homo_lumo = output_type == 2
-    include_bandgap = output_type == 3
-    include_eigenvalues_vector = output_type == 4  # New flag for output_type 4
-
-    # Read eigenvalue_labels if output_type is 4
-    if include_eigenvalues_vector:
-        eigenvalue_labels = config['settings']['data']['eigenvalue_labels']
-    else:
-        eigenvalue_labels = []
-
     trained_model_path = config['settings']['testing']['trained_model_path']
     print(f"Trained model path: {trained_model_path}")
 
@@ -95,19 +84,6 @@ def main():
         'energy': config['settings']['model']['property_unit_dict']['energy'],
         'forces': config['settings']['model']['property_unit_dict']['forces']
     }
-    if include_homo_lumo:
-        property_units.update({
-            'homo': config['settings']['model']['property_unit_dict']['homo'],
-            'lumo': config['settings']['model']['property_unit_dict']['lumo'],
-        })
-    if include_bandgap:
-        property_units.update({
-            'bandgap': config['settings']['model']['property_unit_dict']['bandgap'],
-        })
-    if include_eigenvalues_vector:
-        property_units.update({
-            'eigenvalues_vector': config['settings']['model']['property_unit_dict']['eigenvalues_vector'],
-        })
 
     dataset = ASEAtomsData(db_path)
 
@@ -152,37 +128,18 @@ def main():
     best_model.eval()
 
     @timer
-    def run_inference(loader, dataset_type, include_eigenvalues_vector, eigenvalue_labels):
+    def run_inference(loader, dataset_type):
         all_actual_energy = []
         all_predicted_energy = []
         all_actual_forces = []
         all_predicted_forces = []
 
-        if include_homo_lumo:
-            all_actual_homo = []
-            all_predicted_homo = []
-            all_actual_lumo = []
-            all_predicted_lumo = []
-
-        if include_bandgap:
-            all_actual_bandgap = []
-            all_predicted_bandgap = []
-
-        if include_eigenvalues_vector:
-            all_actual_eigenvalues_vector = []
-            all_predicted_eigenvalues_vector = []
 
         for batch in tqdm(loader, desc=f"Running inference on {dataset_type} data"):
             batch = {key: value.to(device) for key, value in batch.items()}
             batch['positions'] = batch['_positions']
             batch['positions'].requires_grad_()
             exclude_keys = ['energy', 'forces']
-            if include_homo_lumo:
-                exclude_keys += ['homo', 'lumo']
-            if include_bandgap:
-                exclude_keys.append('bandgap')
-            if include_eigenvalues_vector:
-                exclude_keys.append('eigenvalues_vector')  # Exclude eigenvalues_vector from input
 
             input_batch = {k: batch[k] for k in batch if k not in exclude_keys}
 
@@ -200,56 +157,12 @@ def main():
             all_actual_forces.append(actual_forces)
             all_predicted_forces.append(predicted_forces)
 
-            # Collect HOMO and LUMO if applicable
-            if include_homo_lumo:
-                actual_homo = batch['homo'].detach().cpu().numpy()
-                predicted_homo = result['homo'].detach().cpu().numpy()
-                all_actual_homo.append(actual_homo)
-                all_predicted_homo.append(predicted_homo)
-
-                actual_lumo = batch['lumo'].detach().cpu().numpy()
-                predicted_lumo = result['lumo'].detach().cpu().numpy()
-                all_actual_lumo.append(actual_lumo)
-                all_predicted_lumo.append(predicted_lumo)
-
-            # Collect bandgap if applicable
-            if include_bandgap:
-                actual_bandgap = batch['bandgap'].detach().cpu().numpy()
-                predicted_bandgap = result['bandgap'].detach().cpu().numpy()
-                all_actual_bandgap.append(actual_bandgap)
-                all_predicted_bandgap.append(predicted_bandgap)
-
-            # Collect eigenvalues_vector if applicable
-            if include_eigenvalues_vector:
-                actual_eigenvalues = batch['eigenvalues_vector'].detach().cpu().numpy()
-                predicted_eigenvalues = result['eigenvalues_vector'].detach().cpu().numpy()
-                all_actual_eigenvalues_vector.append(actual_eigenvalues)
-                all_predicted_eigenvalues_vector.append(predicted_eigenvalues)
-
         # Save results for this dataset
         data = {
             'Actual Energy': np.concatenate(all_actual_energy).flatten(),
             'Predicted Energy': np.concatenate(all_predicted_energy).flatten(),
         }
 
-        if include_homo_lumo:
-            data['Actual HOMO'] = np.concatenate(all_actual_homo).flatten()
-            data['Predicted HOMO'] = np.concatenate(all_predicted_homo).flatten()
-            data['Actual LUMO'] = np.concatenate(all_actual_lumo).flatten()
-            data['Predicted LUMO'] = np.concatenate(all_predicted_lumo).flatten()
-
-        if include_bandgap:
-            data['Actual Bandgap'] = np.concatenate(all_actual_bandgap).flatten()
-            data['Predicted Bandgap'] = np.concatenate(all_predicted_bandgap).flatten()
-
-        if include_eigenvalues_vector:
-            # Concatenate all eigenvalues vectors
-            all_actual_eigenvalues_vector = np.concatenate(all_actual_eigenvalues_vector, axis=0)
-            all_predicted_eigenvalues_vector = np.concatenate(all_predicted_eigenvalues_vector, axis=0)
-
-            for i, label in enumerate(eigenvalue_labels):
-                data[f'Actual {label}'] = all_actual_eigenvalues_vector[:, i]
-                data[f'Predicted {label}'] = all_predicted_eigenvalues_vector[:, i]
 
         df = pd.DataFrame(data)
         csv_file_path = os.path.join(os.getcwd(), f'{dataset_type}_predictions.csv')
@@ -271,29 +184,6 @@ def main():
         print(f"Energy MAE per Atom on {dataset_type} data: {energy_mae_per_atom} {property_units['energy']}") 
         print(f"Forces MAE on {dataset_type} data: {forces_mae} {property_units['forces']}") 
 
-
-        if include_homo_lumo:
-            homo_mae = mean_absolute_error(np.concatenate(all_actual_homo), np.concatenate(all_predicted_homo))
-            lumo_mae = mean_absolute_error(np.concatenate(all_actual_lumo), np.concatenate(all_predicted_lumo))
-
-
-            print(f"HOMO MAE on {dataset_type} data: {homo_mae} {property_units['homo']}") 
-            print(f"LUMO MAE on {dataset_type} data: {lumo_mae} {property_units['lumo ']}") 
-
-        if include_bandgap:
-            bandgap_mae = mean_absolute_error(np.concatenate(all_actual_bandgap), np.concatenate(all_predicted_bandgap))
-
-
-            print(f"Bandgap MAE on {dataset_type} data: {bandgap_mae} {property_units['bandgap']}")  
-
-        if include_eigenvalues_vector:
-            # Compute MAE for each eigenvalue label
-            for i, label in enumerate(eigenvalue_labels):
-                actual = all_actual_eigenvalues_vector[:, i]
-                predicted = all_predicted_eigenvalues_vector[:, i]
-                mae = mean_absolute_error(actual, predicted)
-                
-                print(f"{label} MAE on {dataset_type} data: {mae} {property_units[label]}")  
 
         # Save forces in a pickle file
         forces_data = {
@@ -327,8 +217,8 @@ def main():
             print("MLFF not yet converged. Continuing training...")
 
     # Run inference on both datasets
-    run_inference(train_loader, "train", include_eigenvalues_vector, eigenvalue_labels)
-    run_inference(validation_loader, "validation", include_eigenvalues_vector, eigenvalue_labels)
+    run_inference(train_loader, "train")
+    run_inference(validation_loader, "validation")
 
 
 if __name__ == '__main__':

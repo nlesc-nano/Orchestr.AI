@@ -4,7 +4,7 @@ import schnetpack.transform as trn
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import torchmetrics
 
-def setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_vector):
+def setup_model(config):
     cutoff = config['settings']['model']['cutoff']
     n_rbf = config['settings']['model']['n_rbf']
     n_atom_basis = config['settings']['model']['n_atom_basis']
@@ -23,25 +23,7 @@ def setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_
         spk.atomistic.Forces(energy_key='energy', force_key='forces')
     ]
 
-    if include_homo_lumo:
-        output_modules.extend([
-            spk.atomistic.Atomwise(n_in=n_atom_basis, output_key='homo'),
-            spk.atomistic.Atomwise(n_in=n_atom_basis, output_key='lumo')
-        ])
-
-    if include_bandgap:
-        output_modules.append(spk.atomistic.Atomwise(n_in=n_atom_basis, output_key='bandgap'))
-
-    if include_eigenvalues_vector:
-        n_out = len(config['settings']['data']['eigenvalue_labels'])
-        output_modules.append(spk.atomistic.Atomwise(n_in=n_atom_basis, output_key='eigenvalues_vector', n_out=n_out))
-
     postprocessors = [trn.CastTo64(), trn.AddOffsets('energy', add_mean=True, add_atomrefs=False)]
-    if include_homo_lumo:
-        postprocessors.append(trn.AddOffsets('homo', add_mean=True, add_atomrefs=False))
-        postprocessors.append(trn.AddOffsets('lumo', add_mean=True, add_atomrefs=False))
-    if include_bandgap:
-        postprocessors.append(trn.AddOffsets('bandgap', add_mean=True, add_atomrefs=False))
 
     nnpot = spk.model.NeuralNetworkPotential(
         representation=schnet,
@@ -65,25 +47,5 @@ def setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_
     )
 
     outputs = [output_energy, output_forces]
-
-    if include_homo_lumo:
-        outputs.extend([
-            spk.task.ModelOutput(name='homo', loss_fn=torch.nn.MSELoss(), loss_weight=config['settings']['outputs']['homo']['loss_weight'], metrics={"MAE": torchmetrics.MeanAbsoluteError()}),
-            spk.task.ModelOutput(name='lumo', loss_fn=torch.nn.MSELoss(), loss_weight=config['settings']['outputs']['lumo']['loss_weight'], metrics={"MAE": torchmetrics.MeanAbsoluteError()})
-        ])
-
-    if include_bandgap:
-        outputs.append(spk.task.ModelOutput(
-            name='bandgap', loss_fn=torch.nn.MSELoss(),
-            loss_weight=config['settings']['outputs']['gap']['loss_weight'],
-            metrics={"MAE": torchmetrics.MeanAbsoluteError()}
-        ))
-
-    if include_eigenvalues_vector:
-        outputs.append(spk.task.ModelOutput(
-            name='eigenvalues_vector', loss_fn=homo_lumo_loss_fn,
-            loss_weight=config['settings']['outputs']['eigenvalues_vector']['loss_weight'],
-            metrics={"MAE": torchmetrics.MeanAbsoluteError()}
-        ))
 
     return nnpot, outputs

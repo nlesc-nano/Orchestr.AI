@@ -17,17 +17,17 @@ def main(args):
     config = load_config(args.config)
     set_seed(config['settings']['general']['seed'])
 
-    data, df_eigenvalues, include_homo_lumo, include_bandgap, include_eigenvalues_vector = load_data(config)
-    atoms_list, property_list = preprocess_data(data, df_eigenvalues, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
-    new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
+    data = load_data(config)
+    atoms_list, property_list = preprocess_data(data)
+    new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list)
     
     # Show dataset information
     show_dataset_info(new_dataset)
     
-    transformations = prepare_transformations(config, include_homo_lumo, include_bandgap)
+    transformations = prepare_transformations(config)
     custom_data = setup_data_module(config, os.path.join(config['settings']['logging']['folder'], config['settings']['general']['database_name']), transformations, property_units)
     
-    nnpot, outputs = setup_model(config, include_homo_lumo, include_bandgap, include_eigenvalues_vector)
+    nnpot, outputs = setup_model(config)
     task, trainer = setup_task_and_trainer(config, nnpot, outputs, config['settings']['logging']['folder'])
     
     # Check if we should resume from a checkpoint
