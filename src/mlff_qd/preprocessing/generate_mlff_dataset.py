@@ -17,6 +17,7 @@ from sklearn.decomposition import PCA
 
 from mlff_qd.utils.io import save_xyz
 from mlff_qd.utils.pca import generate_pca_samples
+from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 
 np.set_printoptions(threshold=np.inf)
 
@@ -26,71 +27,6 @@ hartree_to_eV = 27.211386245988  # 1 Hartree = 27.211386245988 eV
 bohr_to_angstrom = 0.529177210903  # 1 Bohr = 0.529177210903 Å
 amu_to_kg = 1.66053906660e-27  # 1 amu = 1.66053906660e-27 kg
 c = 2.99792458e10  # Speed of light in cm/s
-
-def compute_surface_indices_with_replace_surface_dynamic(
-    input_file, surface_atom_types, f=1.0, surface_replaced_file="surface_replaced.xyz"
-):
-    """
-    Dynamically replace surface atoms with random elements from the periodic table that are not in the molecule.
-
-    Parameters:
-        input_file (str): Path to the input .xyz file.
-        surface_atom_types (list): List of atom types considered as surface atoms to be replaced.
-        f (float): Fraction of surface atoms to replace (default: 1.0).
-        surface_replaced_file (str): Path to the output .xyz file with surface atoms replaced.
-
-    Returns:
-        surface_indices (list): Indices of the replaced surface atoms in the structure.
-        replaced_atom_types (list): Updated atom types after replacement.
-    """
-
-    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    surface_replaced_file = processed_dir / surface_replaced_file
-
-    print(f"Reading molecule from {input_file}...")
-    mol_original = Molecule(input_file)  # Load the original molecule
-    mol_updated = mol_original.copy()  # Create a copy to track cumulative changes
-
-    # Identify atom types in the molecule
-    molecule_atom_types = {atom.symbol for atom in mol_original}
-
-    # Generate a list of replacement elements from the periodic table
-    available_elements = [el.symbol for el in elements if el.symbol not in molecule_atom_types]
-
-    # Prepare replacements dynamically
-    replacements = [
-        (atom_type, random.choice(available_elements)) for atom_type in surface_atom_types
-    ]
-    print(f"Dynamic replacements: {replacements}")
-
-    surface_indices = []  # Collect indices of replaced surface atoms
-    for i, (original_symbol, replacement_symbol) in enumerate(replacements):
-        print(f"Replacing surface atoms: {original_symbol} -> {replacement_symbol} (f={f})...")
-
-        # Create a new molecule for this replacement
-        mol_new = replace_surface(mol_updated, symbol=original_symbol, symbol_new=replacement_symbol, f=f)
-
-        # Update `mol_updated` to incorporate the changes
-        mol_updated = mol_new.copy()
-
-        # Identify the replaced atoms in the molecule
-        for idx, atom in enumerate(mol_new):
-            if atom.symbol == replacement_symbol:
-                surface_indices.append(idx)
-
-        print(f"Replacement {i+1}: {len(surface_indices)} surface atoms replaced so far.")
-
-    # Save the final updated molecule to the output file
-    print(f"Writing modified molecule with replacements to {surface_replaced_file}...")
-    mol_updated.write(str(surface_replaced_file))
-
-    # Extract updated atom types
-    replaced_atom_types = [atom.symbol for atom in mol_updated]
-
-    print(f"Surface replacements completed. {len(surface_indices)} surface atoms identified and replaced.")
-    return surface_indices, replaced_atom_types
 
 def save_frequencies(filename, frequencies):
     """
@@ -589,10 +525,10 @@ def generate_surface_core_pca_samples(
     save_xyz(str(mean_structure_path), mean_positions[np.newaxis, :, :], atom_types)
     surface_replaced_file_path = PROJECT_ROOT / "data" / "processed" / "surface_replaced.xyz"
     surface_indices, replaced_atom_types = compute_surface_indices_with_replace_surface_dynamic(
-        str(mean_structure_path),
-        surface_atom_types=surface_atom_types,
-        f=1.0,
-        surface_replaced_file=str(surface_replaced_file_path),
+            str(mean_structure_path),
+            surface_atom_types,
+            str(surface_replaced_file_path),
+            f=1.0,
     )
     num_atoms = mean_positions.shape[0]
     core_indices = np.setdiff1d(np.arange(num_atoms), surface_indices)
