@@ -32,12 +32,12 @@ def convert_units(value, from_unit, to_unit):
         ("eV", "kJ/mol"): 1 / 0.010364,
 
         # Force conversions
-        ("Hartree/Bohr", "eV/Å"): 51.4221,
-        ("eV/Å", "Hartree/Bohr"): 1 / 51.4221,
-        ("kcal/mol/Å", "eV/Å"): 0.0433641,
-        ("eV/Å", "kcal/mol/Å"): 1 / 0.0433641,
-        ("kJ/mol/Å", "eV/Å"): 0.010364,
-        ("eV/Å", "kJ/mol/Å"): 1 / 0.010364
+        ("Hartree/Bohr", "eV/Ang"): 51.4221,
+        ("eV/Ang", "Hartree/Bohr"): 1 / 51.4221,
+        ("kcal/mol/Ang", "eV/Ang"): 0.0433641,
+        ("eV/Ang", "kcal/mol/Ang"): 1 / 0.0433641,
+        ("kJ/mol/Ang", "eV/Ang"): 0.010364,
+        ("eV/Ang", "kJ/mol/Ang"): 1 / 0.010364
     }
 
     if from_unit == to_unit:
@@ -308,14 +308,14 @@ def main():
         energy_unit = property_units['energy']
         force_unit = property_units['forces']
 
-        # Define reference convergence values in eV and eV/Å
+        # Define reference convergence values in eV and eV/Ang
         energy_convergence_eV = 0.01  # 10 meV = 0.01 eV
-        force_convergence_strict_eV_A = 0.05  # 0.05 eV/Å
-        force_convergence_loose_eV_A = 0.1  # 0.1 eV/Å
+        force_convergence_strict_eV_A = 0.05  # 0.05 eV/Ang
+        force_convergence_loose_eV_A = 0.1  # 0.1 eV/Ang
 
-        # Convert MLFF values to eV and eV/Å
+        # Convert MLFF values to eV and eV/Ang
         energy_mae_per_atom_eV = convert_units(energy_mae_per_atom, energy_unit, "eV")
-        forces_mae_eV_A = convert_units(forces_mae, force_unit, "eV/Å")
+        forces_mae_eV_A = convert_units(forces_mae, force_unit, "eV/Ang")
 
         # Check convergence
         if energy_mae_per_atom_eV < energy_convergence_eV and forces_mae_eV_A < force_convergence_strict_eV_A:
