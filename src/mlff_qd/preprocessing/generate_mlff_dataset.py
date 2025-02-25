@@ -17,6 +17,7 @@ from sklearn.decomposition import PCA
 
 from mlff_qd.utils.io import save_xyz, save_frequencies
 from mlff_qd.utils.pca import generate_pca_samples
+from mlff_qd.utils.preprocessing import center_positions
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV, bohr_to_angstrom, amu_to_kg, c
 
