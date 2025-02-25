@@ -16,6 +16,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 
 from mlff_qd.utils.io import save_xyz
+from mlff_qd.utils.pca import generate_pca_samples
 
 np.set_printoptions(threshold=np.inf)
 
@@ -25,45 +26,6 @@ hartree_to_eV = 27.211386245988  # 1 Hartree = 27.211386245988 eV
 bohr_to_angstrom = 0.529177210903  # 1 Bohr = 0.529177210903 Å
 amu_to_kg = 1.66053906660e-27  # 1 amu = 1.66053906660e-27 kg
 c = 2.99792458e10  # Speed of light in cm/s
-
-# --- Utility Functions ---
-def generate_pca_samples(reference_structure, pca_model, num_samples, scaling_factor=1.0):
-    """
-    Generate new structures by perturbing along PCA components.
-
-    Parameters:
-        reference_structure (np.ndarray): Atomic positions of the reference structure (num_atoms, 3).
-        pca_model (PCA): Precomputed PCA model.
-        num_samples (int): Number of new structures to generate.
-        scaling_factor (float): Scaling factor for perturbations.
-
-    Returns:
-        np.ndarray: Array of generated structures (num_samples, num_atoms, 3).
-    """
-    flattened_ref = reference_structure.flatten()  # Flatten the reference structure
-    num_features = pca_model.components_.shape[1]  # Number of features used in PCA
-
-    # Validate that the reference structure matches PCA components
-    if flattened_ref.size != num_features:
-        raise ValueError(
-            f"Mismatch in size: flattened_ref ({flattened_ref.size}) does not match PCA components ({num_features})"
-        )
-
-    generated_structures = []
-
-    for _ in range(num_samples):
-        perturbation = np.zeros_like(flattened_ref)
-        for pc_idx in range(pca_model.n_components_):
-            perturbation += (
-                scaling_factor
-                * np.random.uniform(-1, 1)
-                * pca_model.components_[pc_idx]
-            )
-        new_structure = flattened_ref + perturbation
-        generated_structures.append(new_structure.reshape(-1, 3))
-
-    return np.array(generated_structures)
-
 
 def compute_surface_indices_with_replace_surface_dynamic(
     input_file, surface_atom_types, f=1.0, surface_replaced_file="surface_replaced.xyz"
