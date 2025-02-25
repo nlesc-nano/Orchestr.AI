@@ -128,40 +128,6 @@ def compute_surface_indices_with_replace_surface_dynamic(
     print(f"Surface replacements completed. {len(surface_indices)} surface atoms identified and replaced.")
     return surface_indices, replaced_atom_types
 
-def save_positions_xyz(filename, positions, atom_types, energies=None):
-    """
-    Save aligned positions to an XYZ file, optionally including energies.
-
-    Parameters:
-        filename (str): Path to the output XYZ file.
-        positions (np.ndarray): Atomic positions (num_frames, num_atoms, 3).
-        atom_types (list): Atomic types (num_atoms).
-        energies (list or np.ndarray): Total energies for each frame (optional).
-    """
-    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    output_path = processed_dir / filename
-    print(f"Saving aligned positions to {output_path}...")
-
-    num_frames, num_atoms, _ = positions.shape
-
-    with open(output_path, "w") as f:
-        for frame_idx in range(num_frames):
-            f.write(f"{num_atoms}\n")
-
-            # Include energy in the title if provided
-            if energies is not None and energies[frame_idx] is not None:
-                f.write(f"Frame {frame_idx + 1}: Aligned positions, Energy = {energies[frame_idx]:.6f} eV\n")
-            else:
-                f.write(f"Frame {frame_idx + 1}: Aligned positions\n")
-
-            for atom, (x, y, z) in zip(atom_types, positions[frame_idx]):
-                f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
-
-    print(f"Aligned positions saved to {output_path}.")
-
-
 def save_forces_xyz(filename, forces, atom_types):
     """
     Save aligned forces to an XYZ-like file.
@@ -1078,14 +1044,14 @@ if __name__ == "__main__":
 
     # Save them to data/processed:
     save_xyz("mean_structure.xyz", mean_positions[np.newaxis, :, :], atom_types)
-    save_positions_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree)
+    save_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree, comment="Aligned positions")
     save_forces_xyz("aligned_forces.xyz", aligned_forces, atom_types)
 
     # Convert energies/forces
     energies_ev = [e * hartree_to_eV if e is not None else None for e in energies_hartree]
     aligned_forces_ev = aligned_forces * hartree_bohr_to_eV_angstrom
 
-    save_positions_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev)
+    save_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev, comment="Aligned positions")
     save_forces_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types)
 
     # Parse aligned positions from processed
