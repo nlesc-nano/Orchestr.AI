@@ -17,33 +17,11 @@ from sklearn.decomposition import PCA
 
 from mlff_qd.utils.io import save_xyz, save_frequencies
 from mlff_qd.utils.pca import generate_pca_samples
-from mlff_qd.utils.preprocessing import center_positions
+from mlff_qd.utils.preprocessing import center_positions, align_to_reference, rotate_forces
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV, bohr_to_angstrom, amu_to_kg, c
 
 np.set_printoptions(threshold=np.inf)
-
-def align_to_reference(positions, reference_positions):
-    """
-    Align atomic positions of each frame to a reference structure using least-squares fitting.
-
-    Parameters:
-        positions (np.ndarray): Atomic positions (num_frames, num_atoms, 3).
-        reference_positions (np.ndarray): Reference positions (num_atoms, 3).
-
-    Returns:
-        np.ndarray: Aligned atomic positions (num_frames, num_atoms, 3).
-    """
-    aligned_positions = np.zeros_like(positions)
-    for frame_idx, frame in enumerate(positions):
-        # Calculate optimal rotation matrix
-        H = frame.T @ reference_positions
-        U, _, Vt = np.linalg.svd(H)
-        rotation_matrix = U @ Vt
-
-        # Apply rotation to align the frame
-        aligned_positions[frame_idx] = frame @ rotation_matrix.T
-    return aligned_positions
 
 def rotate_forces(forces, rotation_matrices):
     """
