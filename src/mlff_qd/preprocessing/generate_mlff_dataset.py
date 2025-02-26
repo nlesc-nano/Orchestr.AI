@@ -17,7 +17,7 @@ from sklearn.decomposition import PCA
 
 from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
 from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
-        load_binary, reorder_xyz_trajectory )
+        load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz )
 from mlff_qd.utils.pca import generate_pca_samples
 from mlff_qd.utils.preprocessing import center_positions, align_to_reference, rotate_forces
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
@@ -25,64 +25,6 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def parse_positions_xyz(filename, num_atoms):
-    """
-    Parse positions from an XYZ file.
-
-    Parameters:
-        filename (str): Path to the XYZ file.
-        num_atoms (int): Number of atoms in each frame.
-
-    Returns:
-        np.ndarray: Atomic positions (num_frames, num_atoms, 3).
-        list: Atomic types.
-        list: Total energies for each frame (if available; otherwise, empty list).
-    """
-    print(f"Parsing positions XYZ file: {filename}")
-    positions = []
-    atom_types = []
-    total_energies = []
-
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2  # 2 lines for header and comment
-
-        for i in range(0, len(lines), num_lines_per_frame):
-            atom_lines = lines[i + 2:i + 2 + num_atoms]
-            comment_line = lines[i + 1]
-
-            # Try parsing the energy; otherwise, skip
-            try:
-                total_energy = float(comment_line.split("=")[-1].strip())
-                total_energies.append(total_energy)
-            except ValueError:
-                total_energies.append(None)  # Placeholder for missing energy
-
-            frame_positions = []
-            for line in atom_lines:
-                parts = line.split()
-                atom_types.append(parts[0])
-                frame_positions.append([float(x) for x in parts[1:4]])
-
-            positions.append(frame_positions)
-
-    return np.array(positions), atom_types[:num_atoms], total_energies
-
-def parse_forces_xyz(filename, num_atoms):
-    """Parse forces from an XYZ file."""
-    print(f"Parsing forces XYZ file: {filename}")
-    forces = []
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2
-        for i in range(0, len(lines), num_lines_per_frame):
-            frame_forces = []
-            for j in range(2, 2 + num_atoms):
-                parts = lines[i + j].split()
-                frame_forces.append(list(map(float, parts[1:4])))
-            forces.append(frame_forces)
-    return np.array(forces)
 
 def get_num_atoms(filename):
     """
