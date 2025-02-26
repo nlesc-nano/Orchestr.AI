@@ -20,27 +20,13 @@ from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
         load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz,
         get_num_atoms )
 from mlff_qd.utils.pca import generate_pca_samples
-from mlff_qd.utils.preprocessing import center_positions, align_to_reference, rotate_forces
+from mlff_qd.utils.preprocessing import ( center_positions, align_to_reference, rotate_forces, 
+        create_mass_dict )
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def create_mass_dict(atom_types):
-    """
-    Create a dictionary mapping atom types to their atomic masses.
-
-    Parameters:
-        atom_types (list): List of atomic types as strings.
-
-    Returns:
-        dict: Dictionary where keys are atom types and values are atomic masses.
-    """
-
-    mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
-    print(f"Generated mass dictionary: {mass_dict}")
-    return mass_dict
 
 def perform_pca_and_plot(datasets, num_components=2, labels=None, ax=None):
     """

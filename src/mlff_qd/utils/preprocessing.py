@@ -73,3 +73,18 @@ def rotate_forces(forces, rotation_matrices):
         rotated_forces[frame_idx] = frame_forces @ rotation_matrices[frame_idx]
     
     return rotated_forces
+
+def create_mass_dict(atom_types):
+    """
+    Create a dictionary mapping atom types to their atomic masses.
+
+    Parameters:
+        atom_types (list): List of atomic types as strings.
+
+    Returns:
+        dict: Dictionary where keys are atom types and values are atomic masses.
+    """
+
+    mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
+    print(f"Generated mass dictionary: {mass_dict}")
+    return mass_dict
