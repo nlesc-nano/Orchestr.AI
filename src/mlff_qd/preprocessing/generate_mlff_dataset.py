@@ -19,7 +19,7 @@ from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
 from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
         load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz,
         get_num_atoms )
-from mlff_qd.utils.pca import generate_pca_samples
+from mlff_qd.utils.pca import generate_pca_samples, perform_pca_and_plot
 from mlff_qd.utils.preprocessing import ( center_positions, align_to_reference, rotate_forces, 
         create_mass_dict )
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
@@ -27,55 +27,6 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def perform_pca_and_plot(datasets, num_components=2, labels=None, ax=None):
-    """
-    Perform PCA and plot the results.
-
-    Parameters:
-        datasets (dict): A dictionary of dataset names and their corresponding samples.
-        num_components (int): Number of PCA components.
-        labels (list): List of sample labels (optional).
-        ax (matplotlib.axes.Axes): Pre-created axis for plotting (optional).
-    """
-
-    print(f"Performing PCA for {len(datasets)} datasets...")
-    combined_data = np.concatenate(list(datasets.values()))
-    combined_labels = labels if labels else sum([[name] * len(data) for name, data in datasets.items()], [])
-
-    # Perform PCA
-    pca = PCA(n_components=num_components)
-    pca_transformed = pca.fit_transform(combined_data)
-
-    # Plot results
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 6))
-
-    unique_labels = sorted(set(combined_labels))
-    colors = plt.cm.get_cmap("tab10", len(unique_labels))
-    for idx, label in enumerate(unique_labels):
-        label_indices = [i for i, lbl in enumerate(combined_labels) if lbl == label]
-        ax.scatter(
-            pca_transformed[label_indices, 0],
-            pca_transformed[label_indices, 1],
-            label=label,
-            alpha=0.7,
-            color=colors(idx),
-        )
-
-    explained_variance = pca.explained_variance_ratio_ * 100
-    ax.set_title(
-        f"PCA Analysis of Molecular Configurations\n"
-        f"Principal Component 1 ({explained_variance[0]:.2f}%) vs "
-        f"Principal Component 2 ({explained_variance[1]:.2f}%)"
-    )
-    ax.set_xlabel(f"Principal Component 1 ({explained_variance[0]:.2f}%)")
-    ax.set_ylabel(f"Principal Component 2 ({explained_variance[1]:.2f}%)")
-    ax.legend()
-
-    if ax is None:
-        plt.tight_layout()
-        plt.show()
 
 def cluster_trajectory(rmsd_md_internal, clustering_method, num_clusters, md_positions, atom_types):
     """
