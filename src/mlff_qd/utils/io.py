@@ -188,3 +188,20 @@ def parse_forces_xyz(filename, num_atoms):
             forces.append(frame_forces)
     
     return np.array(forces)
+
+def get_num_atoms(filename):
+    """
+    Retrieve the number of atoms from the first line of an XYZ file.
+
+    Parameters:
+        filename (str): Path to the XYZ file.
+
+    Returns:
+        int: Number of atoms in the structure.
+    """
+    with open(filename, "r") as f:
+        num_atoms = int(f.readline().strip())
+    
+    print(f"Number of atoms: {num_atoms}")
+    
+    return num_atoms

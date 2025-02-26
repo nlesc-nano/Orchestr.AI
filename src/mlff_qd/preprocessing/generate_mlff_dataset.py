@@ -17,7 +17,8 @@ from sklearn.decomposition import PCA
 
 from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
 from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
-        load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz )
+        load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz,
+        get_num_atoms )
 from mlff_qd.utils.pca import generate_pca_samples
 from mlff_qd.utils.preprocessing import center_positions, align_to_reference, rotate_forces
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
@@ -25,21 +26,6 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def get_num_atoms(filename):
-    """
-    Retrieve the number of atoms from the first line of an XYZ file.
-
-    Parameters:
-        filename (str): Path to the XYZ file.
-
-    Returns:
-        int: Number of atoms in the structure.
-    """
-    with open(filename, "r") as f:
-        num_atoms = int(f.readline().strip())
-    print(f"Number of atoms: {num_atoms}")
-    return num_atoms
 
 def create_mass_dict(atom_types):
     """
