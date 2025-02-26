@@ -86,3 +86,25 @@ def save_frequencies(filename, frequencies):
             f.write(f"Mode {i}: {freq:.6f} cm^-1\n")
     
     print(f"Frequencies saved to {filename}.")
+
+def save_binary(filename, frequencies, positions, eigenvectors, atom_types):
+    """Save frequencies, positions, eigenvectors, and atom types to a binary file."""
+    data = {
+        "frequencies": frequencies,
+        "positions": positions,
+        "eigenvectors": eigenvectors,
+        "atom_types": atom_types
+    }
+    with open(filename, "wb") as f:
+        pickle.dump(data, f)
+
+    print(f"Saved data to binary file: {filename}")
+
+def load_binary(filename):
+    """Load frequencies, positions, eigenvectors, and atom types from a binary file."""
+    with open(filename, "rb") as f:
+        data = pickle.load(f)
+    
+    print(f"Loaded data from binary file: {filename}")
+    
+    return data["frequencies"], data["eigenvectors"]

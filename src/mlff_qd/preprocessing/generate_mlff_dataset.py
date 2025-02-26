@@ -16,32 +16,13 @@ from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 
 from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
-from mlff_qd.utils.io import save_xyz, save_frequencies
+from mlff_qd.utils.io import save_xyz, save_frequencies, save_binary, load_binary
 from mlff_qd.utils.pca import generate_pca_samples
 from mlff_qd.utils.preprocessing import center_positions, align_to_reference, rotate_forces
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV, bohr_to_angstrom, amu_to_kg, c
 
 np.set_printoptions(threshold=np.inf)
-
-def save_binary(filename, frequencies, positions, eigenvectors, atom_types):
-    """Save frequencies, positions, eigenvectors, and atom types to a binary file."""
-    data = {
-        "frequencies": frequencies,
-        "positions": positions,
-        "eigenvectors": eigenvectors,
-        "atom_types": atom_types
-    }
-    with open(filename, "wb") as f:
-        pickle.dump(data, f)
-    print(f"Saved data to binary file: {filename}")
-
-def load_binary(filename):
-    """Load frequencies, positions, eigenvectors, and atom types from a binary file."""
-    with open(filename, "rb") as f:
-        data = pickle.load(f)
-    print(f"Loaded data from binary file: {filename}")
-    return data["frequencies"], data["eigenvectors"]
 
 def reorder_xyz_trajectory(input_file, output_file, num_atoms):
     """Reorder atoms in the XYZ trajectory."""
