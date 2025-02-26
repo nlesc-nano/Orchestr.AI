@@ -16,33 +16,15 @@ from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 
 from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
-from mlff_qd.utils.io import save_xyz, save_frequencies, save_binary, load_binary
+from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
+        load_binary, reorder_xyz_trajectory )
 from mlff_qd.utils.pca import generate_pca_samples
 from mlff_qd.utils.preprocessing import center_positions, align_to_reference, rotate_forces
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
-from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV, bohr_to_angstrom, amu_to_kg, c
+from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
+        bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def reorder_xyz_trajectory(input_file, output_file, num_atoms):
-    """Reorder atoms in the XYZ trajectory."""
-    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    output_path = processed_dir / output_file
-
-    print(f"Reordering atoms in trajectory file: {input_file}")
-    
-    with open(input_file, "r") as infile, open(output_path, "w") as outfile:
-        lines = infile.readlines()
-        num_lines_per_frame = num_atoms + 2
-        for i in range(0, len(lines), num_lines_per_frame):
-            header = lines[i:i + 2]
-            atom_lines = lines[i + 2:i + 2 + num_atoms]
-            sorted_atoms = sorted(atom_lines, key=lambda x: x.split()[0])
-            outfile.writelines(header)
-            outfile.writelines(sorted_atoms)
-    print(f"Reordered trajectory saved to: {output_path}")
 
 def parse_positions_xyz(filename, num_atoms):
     """
