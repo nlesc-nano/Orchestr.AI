@@ -20,7 +20,8 @@ from mlff_qd.utils.cluster import cluster_trajectory
 from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
         load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz,
         get_num_atoms )
-from mlff_qd.utils.pca import generate_pca_samples, perform_pca_and_plot
+from mlff_qd.utils.pca import ( generate_pca_samples, perform_pca_and_plot, 
+        generate_structures_from_pca )
 from mlff_qd.utils.preprocessing import ( center_positions, align_to_reference, rotate_forces, 
         create_mass_dict )
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
@@ -28,95 +29,6 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def generate_structures_from_pca(
-    rmsd_md_internal,
-    md_positions,
-    representative_md,
-    atom_types,
-    num_samples,
-    max_displacement,
-    temperature,
-    temperature_target
-):
-    """
-    Generate PCA-based structures from a given MD trajectory and save them to "pca_generated_samples.xyz".
-
-    Parameters:
-        rmsd_md_internal (np.ndarray): RMSD matrix of the MD trajectory (N x N).
-        md_positions (list of np.ndarray): Aligned MD frames, each frame is (num_atoms, 3).
-        representative_md (list of np.ndarray): A subset of MD frames used as reference frames.
-        atom_types (list of str): Atom types for each atom in the structure.
-        num_samples (int): Number of PCA-based samples to generate.
-        generate_pca_samples (function): Function to generate samples given a reference structure and PCA model.
-        max_displacement (float): Maximum displacement cap to apply to the scaling factors.
-        temperature (float): Temperature at which the MD was performed.
-        temperature_target (float): Target temperature for scaling.
-
-    Returns:
-        np.ndarray: Array of PCA-generated structures with shape (num_samples, num_atoms, 3).
-    """
-    print("Computing RMSD-based scaling factor...")
-    rmsd_values = np.mean(rmsd_md_internal, axis=1)  # Mean RMSD of each frame to all others
-    rmsd_scaling_factor = np.mean(rmsd_values)
-    print(f"RMSD-based scaling factor: {rmsd_scaling_factor:.2f}")
-
-    # Perform PCA on the full aligned MD trajectory
-    flattened_md_positions = np.array([frame.flatten() for frame in md_positions])  # (N_frames, num_atoms*3)
-    pca = PCA()
-    pca.fit(flattened_md_positions)
-
-    # Determine the number of components to capture at least 90% variance
-    explained_variance = np.cumsum(pca.explained_variance_ratio_)
-    optimal_components = np.argmax(explained_variance >= 0.90) + 1
-    print(
-        f"Optimal number of PCA components: {optimal_components} "
-        f"(captures {explained_variance[optimal_components - 1] * 100:.2f}% variance)"
-    )
-
-    # Refit PCA with the optimal number of components
-    pca = PCA(n_components=optimal_components)
-    pca.fit(flattened_md_positions)
-
-    # Compute adjusted scaling factor based on target temperature
-    scaling_factors_temp_adjusted = rmsd_scaling_factor * np.sqrt(temperature_target / temperature)
-    print(f"Scaling factors for PCA components (adjusted for T={temperature_target}K): {scaling_factors_temp_adjusted}")
-
-    # Apply a cap to the scaling factors for maximum displacement
-    scaling_factors_temp_adjusted = min(scaling_factors_temp_adjusted, max_displacement)
-    print(f"Scaled and capped scaling factors: {scaling_factors_temp_adjusted}")
-
-    # Generate PCA-based samples by applying displacements to representative frames
-    print(f"Generating {num_samples} PCA-based samples...")
-    pca_samples = []
-    for i in range(num_samples):
-        start_idx = np.random.choice(len(representative_md))  # Choose random frame from representative_md
-        reference_structure = representative_md[start_idx]
-
-        # Generate a new structure by applying PCA perturbations
-        pca_sample = generate_pca_samples(
-            reference_structure,
-            pca,
-            1,
-            scaling_factor=scaling_factors_temp_adjusted
-        )[0]
-        pca_samples.append(pca_sample)
-
-        # Print progress every 100 samples or for the first sample
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"Generating sample {i + 1}/{num_samples}...")
-
-    pca_samples = np.array(pca_samples)
-    print(f"Generated {len(pca_samples)} PCA-based samples with shape {pca_samples.shape}.")
-
-    pca_samples_rmsd = compute_rmsd_matrix(pca_samples)
-    plot_rmsd_histogram(pca_samples_rmsd, bins=50, title="RMSD Histogram PCA", xlabel="RMSD (Å)", ylabel="Frequency")
-
-    # Write the PCA-based samples directly to "pca_generated_samples.xyz"
-    save_xyz("pca_samples.xyz", pca_samples, atom_types)
-    print(f"Saved {len(pca_samples)} PCA-based samples to 'pca_samples.xyz'.")
-
-    return pca_samples
 
 def generate_surface_core_pca_samples(
     md_positions,
