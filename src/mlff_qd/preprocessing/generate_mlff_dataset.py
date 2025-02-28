@@ -15,7 +15,8 @@ from sklearn.cluster import DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 
-from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
+from mlff_qd.utils.analysis import ( compute_rmsd_matrix, plot_rmsd_histogram,
+        plot_generated_samples )
 from mlff_qd.utils.cluster import cluster_trajectory
 from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
         load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz,
@@ -29,95 +30,6 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def plot_generated_samples(combined_samples):
-    """
-    Plot PCA visualizations of the combined samples dataset for both "positions" and "RMSD" representations,
-    without outlier detection.
-
-    Parameters:
-        combined_samples (dict): Dictionary with dataset names as keys and samples as values. 
-                                 Each dataset should have shape (num_samples, num_atoms, 3) or (num_samples, flattened_dim).
-    """
-    # Flatten datasets for PCA
-    print("Flattening datasets for PCA...")
-    flattened_samples = {}
-    for name, samples in combined_samples.items():
-        samples = np.array(samples)  # Ensure data is a NumPy array
-        if samples.ndim == 3:  # Shape: (num_samples, num_atoms, 3)
-            flattened_samples[name] = samples.reshape(samples.shape[0], -1)  # Flatten to (num_samples, 3*num_atoms)
-        elif samples.ndim == 2:  # Already flattened
-            flattened_samples[name] = samples
-        else:
-            raise ValueError(f"Unexpected shape for dataset '{name}': {samples.shape}")
-
-    # Concatenate all datasets
-    print("Concatenating datasets for PCA...")
-    all_samples_positions = np.concatenate(list(flattened_samples.values()), axis=0)  # Combine datasets row-wise
-    sample_labels = sum([[name] * len(data) for name, data in flattened_samples.items()], [])
-
-    # Prepare RMSD matrix for RMSD-based PCA
-    print("Computing RMSD matrix for all samples...")
-    all_samples_reshaped = all_samples_positions.reshape(all_samples_positions.shape[0], -1, 3)  # Reshape to 3D
-    rmsd_matrix = compute_rmsd_matrix(all_samples_reshaped)
-
-    # Perform PCA for "positions"
-    print("Performing PCA for 'positions'...")
-    pca_positions = PCA(n_components=2)
-    pca_transformed_positions = pca_positions.fit_transform(all_samples_positions)
-    explained_variance_positions = np.sum(pca_positions.explained_variance_ratio_) * 100
-    print(f"Explained variance by first two components (positions): {explained_variance_positions:.2f}%")
-
-    # Perform PCA for "RMSD"
-    print("Performing PCA for 'RMSD'...")
-    pca_rmsd = PCA(n_components=2)
-    pca_transformed_rmsd = pca_rmsd.fit_transform(rmsd_matrix)
-    explained_variance_rmsd = np.sum(pca_rmsd.explained_variance_ratio_) * 100
-    print(f"Explained variance by first two components (RMSD): {explained_variance_rmsd:.2f}%")
-
-    # Create color map for datasets
-    unique_labels = sorted(set(sample_labels))
-    color_map = {label: plt.cm.tab10(idx / len(unique_labels)) for idx, label in enumerate(unique_labels)}
-
-    # Plotting
-    print("Plotting PCA results...")
-    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-
-    # Plot for "positions"
-    for label in unique_labels:
-        label_indices = [i for i, lbl in enumerate(sample_labels) if lbl == label]
-        axes[0].scatter(
-            pca_transformed_positions[label_indices, 0],
-            pca_transformed_positions[label_indices, 1],
-            label=label,
-            color=color_map[label],
-            alpha=0.7
-        )
-    axes[0].set_title("PCA: Positions Representation")
-    axes[0].set_xlabel("Principal Component 1")
-    axes[0].set_ylabel("Principal Component 2")
-    axes[0].legend()
-    axes[0].grid(True)
-
-    # Plot for "RMSD"
-    for label in unique_labels:
-        label_indices = [i for i, lbl in enumerate(sample_labels) if lbl == label]
-        axes[1].scatter(
-            pca_transformed_rmsd[label_indices, 0],
-            pca_transformed_rmsd[label_indices, 1],
-            label=label,
-            color=color_map[label],
-            alpha=0.7
-        )
-    axes[1].set_title("PCA: RMSD Representation")
-    axes[1].set_xlabel("Principal Component 1")
-    axes[1].set_ylabel("Principal Component 2")
-    axes[1].legend()
-    axes[1].grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
 
 def load_config(config_file=None):
     """
