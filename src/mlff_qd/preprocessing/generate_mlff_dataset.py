@@ -23,61 +23,12 @@ from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
 from mlff_qd.utils.pca import ( generate_pca_samples, perform_pca_and_plot, 
         generate_structures_from_pca, generate_surface_core_pca_samples )
 from mlff_qd.utils.preprocessing import ( center_positions, align_to_reference, rotate_forces, 
-        create_mass_dict )
+        create_mass_dict, generate_randomized_samples )
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def generate_randomized_samples(
-    md_positions,
-    atom_types,
-    num_samples=100,
-    base_scale=0.1
-):
-    """
-    Generate random configurations by applying Gaussian perturbations to atomic positions.
-    The displacements are fixed in scale and not adjusted to match any RMSD target.
-
-    Parameters:
-        md_positions (list of np.ndarray): List of MD frames (num_frames, num_atoms, 3).
-        atom_types (list of str): Atom types for each atom in the structure.
-        num_samples (int): Number of randomized configurations to generate.
-        base_scale (float): Standard deviation of the Gaussian noise applied to displace each atom.
-
-    Returns:
-        np.ndarray: Array of randomized configurations (num_samples, num_atoms, 3).
-    """
-    randomized_structures = []
-
-    for i in range(num_samples):
-        # Select a random reference frame
-        start_idx = np.random.choice(len(md_positions))
-        reference_positions = md_positions[start_idx]
-
-        # Generate random displacements
-        displacement = np.random.normal(loc=0.0, scale=base_scale, size=reference_positions.shape)
-
-        # Remove net translation
-        mean_disp = np.mean(displacement, axis=0)  # Average over all atoms
-        displacement -= mean_disp  # Now no net translation
-
-        # Apply displacements to the reference positions
-        randomized_structure = reference_positions + displacement
-        randomized_structures.append(randomized_structure)
-
-        # Print progress every 100 samples or for the first sample
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"Generating sample {i + 1}/{num_samples}...")
-
-    print(f"Generated {len(randomized_structures)} randomized samples.")
-
-    # Save the randomized samples
-    save_xyz("randomized_samples.xyz", randomized_structures, atom_types)
-    print(f"Saved {len(randomized_structures)} randomized samples to 'randomized_samples.xyz'.")
-
-    return np.array(randomized_structures)
 
 def plot_generated_samples(combined_samples):
     """
