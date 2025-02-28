@@ -18,6 +18,7 @@ from sklearn.decomposition import PCA
 from mlff_qd.utils.analysis import ( compute_rmsd_matrix, plot_rmsd_histogram,
         plot_generated_samples )
 from mlff_qd.utils.cluster import cluster_trajectory
+from mlff_qd.utils.config import load_config
 from mlff_qd.utils.io import ( save_xyz, save_frequencies, save_binary,
         load_binary, reorder_xyz_trajectory, parse_positions_xyz, parse_forces_xyz,
         get_num_atoms )
@@ -30,32 +31,6 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
         bohr_to_angstrom, amu_to_kg, c )
 
 np.set_printoptions(threshold=np.inf)
-
-def load_config(config_file=None):
-    """
-    Load configuration from a YAML file. Use `.get()` for defaults in the main code.
-    If config_file is not provided, defaults to 'config/preprocess_config.yaml'
-    in the project root (relative to this script).
-    """
-
-    # If no config file is specified, use a default path relative to this script.
-    # Example: go up 3 or 4 levels to reach the project root, then into config/preprocess_config.yaml.
-    if config_file is None:
-        # Adjust parents[...] as necessary based on your directory structure
-        default_path = Path(__file__).resolve().parents[3] / "config" / "preprocess_config.yaml"
-        config_file = str(default_path)  # convert Path object to string if needed
-
-    try:
-        # Load user-defined configuration
-        with open(config_file, "r") as file:
-            user_config = yaml.safe_load(file)
-            if user_config is None:
-                user_config = {}
-    except FileNotFoundError:
-        print(f"Configuration file '{config_file}' not found. Using only default settings.")
-        user_config = {}
-
-    return user_config
 
 if __name__ == "__main__":
     # Load configuration
