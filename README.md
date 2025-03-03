@@ -59,7 +59,7 @@ pip install .
 ## Installation of the mlff_qd package
 One can install the platform using pip in the following way:
 ```bash
-git checkout https://github.com/nlesc-nano/MLFF_QD.git
+git clone https://github.com/nlesc-nano/MLFF_QD.git
 cd MLFF_QD  
 pip install -e .
 ```
