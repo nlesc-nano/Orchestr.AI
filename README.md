@@ -1,7 +1,10 @@
 # MLFF_QD
 Machine Learning Force Fields for Quantum Dots platform.
 
-## Installation for the preprocessing
+## Installation
+Some packages are required to be installed before starting using our MLFF_QD platform.
+
+## Installation for the preprocessing tools
 Some packages are requiered for running the preprocessing. Below we explain what is requiered and how to install it:
 
 ### Install PLAMS
@@ -53,21 +56,18 @@ cd schnetpack
 pip install .
 ```
 
-### Visualization tools
-SchNetPack supports multiple logging backends via PyTorch Lightning. The default logger is Tensorboard.
-
-## Getting started
-The current version of the platform is developped for being run in a cluster. Thus, in this repository one can find the necessary code, a bash script example for submitting jobs in a slurm queue system and an input file example.
-
-This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
-
-### Installation of the mlff_qd package
+## Installation of the mlff_qd package
 One can install the platform using pip in the following way:
 ```bash
 git checkout https://github.com/nlesc-nano/MLFF_QD.git
 cd MLFF_QD  
 pip install -e .
 ```
+
+## Getting started
+The current version of the platform is developped for being run in a cluster. Thus, in this repository one can find the necessary code, a bash script example for submitting jobs in a slurm queue system and an input file example.
+
+This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
 ### Preprocessing tools
 The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw. This tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
