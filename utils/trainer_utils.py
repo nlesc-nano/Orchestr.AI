@@ -3,6 +3,7 @@ import logging
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from utils.helpers import get_optimizer_class, get_scheduler_class
+from pytorch_lightning.loggers import CSVLogger 
 import schnetpack as spk
 
 def setup_task_and_trainer(config, nnpot, outputs, folder):
@@ -23,8 +24,9 @@ def setup_task_and_trainer(config, nnpot, outputs, folder):
                         "verbose": config['settings']['training']['scheduler']['verbose']},
         scheduler_monitor=config['settings']['logging']['monitor']
     )
-
-    logger = pl.loggers.TensorBoardLogger(save_dir=folder)
+    
+    csv_logger = CSVLogger(save_dir=folder, name="csv_logs", version="") # addd CSVLogger to store the loss and MAE
+    tensorboard_logger = pl.loggers.TensorBoardLogger(save_dir=folder)
     callbacks = [
         spk.train.ModelCheckpoint(
             model_path=os.path.join(folder, config['settings']['logging']['checkpoint_dir']),
@@ -36,7 +38,7 @@ def setup_task_and_trainer(config, nnpot, outputs, folder):
 
     trainer = pl.Trainer(
         callbacks=callbacks,
-        logger=logger,
+        logger=[tensorboard_logger, csv_logger],
         default_root_dir=folder,
         max_epochs=config['settings']['training']['max_epochs'],
         accelerator=config['settings']['training']['accelerator'],
