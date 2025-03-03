@@ -32,7 +32,7 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
 
 np.set_printoptions(threshold=np.inf)
 
-if __name__ == "__main__":
+def main():
     # Load configuration
     parser = argparse.ArgumentParser(description="MLFF Data Generation")
     parser.add_argument("--config", type=str, default=None,
@@ -202,3 +202,6 @@ if __name__ == "__main__":
                 xyz_file.write(f"{atom} {coords[0]:.6f} {coords[1]:.6f} {coords[2]:.6f}\n")
 
     print(f"Saved non-MD training dataset with {combined_sample_reshaped.shape[0]} structures.")
+
+if __name__ == "__main__":
+    main()
