@@ -40,21 +40,16 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
     - You can use 'comment' to clarify if the frames are "Aligned positions", "Aligned forces", etc.
     """
 
-    # Determine processed output directory
-    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    # Build the full path
-    output_path = processed_dir / filename
-
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
+        
     # Convert frames to a NumPy array if needed
     frames = np.asarray(positions)
     num_frames = len(frames)
     num_atoms = len(atom_types)
     has_energies = (energies is not None) and (len(energies) == num_frames)
 
-    print(f"Saving XYZ data to: {output_path}")
-    with open(output_path, "w") as f:
+    print(f"Saving XYZ data to: {filename}")
+    with open(filename, "w") as f:
         for i, frame in enumerate(frames):
             f.write(f"{num_atoms}\n")
 
@@ -69,7 +64,7 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
             for atom, (x, y, z) in zip(atom_types, frame):
                 f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
 
-    print(f"Done. Wrote {num_frames} frames to '{output_path}'.")
+    print(f"Done. Wrote {num_frames} frames to '{filename}'.")
 
 def save_frequencies(filename, frequencies):
     """
