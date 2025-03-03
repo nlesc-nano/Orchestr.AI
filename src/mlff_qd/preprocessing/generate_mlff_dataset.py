@@ -58,12 +58,9 @@ def main():
     surface_atom_types = config.get("surface_atom_types", ["Cs", "Br"])
     clustering_method = config.get("clustering_method", "KMeans")  # Options: "KMeans", "DBSCAN", "GMM"
     num_clusters = config.get("num_clusters", 100)
-    representation = config.get("representation", "rmsd")  # Change to "positions" for position-based PCA
     num_samples_pca = config.get("num_samples_pca", 600)
     num_samples_pca_surface = config.get("num_samples_pca_surface", 300)
     num_samples_randomization = config.get("num_samples_randomization", 100)
-    num_samples_dataset = config.get("num_samples_dataset", 2000)
-    sampling_fractions = {"PCA": 0.6, "PCA_Surface": 0.3, "Randomized": 0.1}
 
     # Print the configuration for confirmation
     print(f"Using configuration:")
