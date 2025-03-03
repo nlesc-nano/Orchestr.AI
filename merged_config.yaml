@@ -25,8 +25,8 @@ model_architecture:
 # ========================= Training Parameters Settings =========================
 # Settings related to training dataset sizes and splits.
 training_parameters:
-  train_size: 2198    # Number of training samples (default, can be overridden)
-  validation_size: 549 # Number of validation samples (default, can be overridden)
+  train_size: 1600    # Number of training samples (default, can be overridden)
+  validation_size: 400 # Number of validation samples (default, can be overridden)
   # - For schnet_config: maps to settings.training.num_train and num_val
   # - For neuqip_config: maps to n_train and n_val
 
@@ -64,10 +64,7 @@ schnet_config:
 
     # --- Data handling settings ---
     data:
-      hdf5_file: 'renumbered_output_chunks_1_to_5_New.hdf5'
       dataset_path: ${dataset.dataset_file} # Using common dataset file path (from dataset)
-      output_type: 1
-      eigenvalue_labels: ['HOMO', 'LUMO', 'LUMO+1']
 
     # --- Model architecture settings ---
     model:
@@ -79,10 +76,6 @@ schnet_config:
       property_unit_dict:
         energy: 'eV'
         forces: 'eV/Ang'
-        homo: 'eV'
-        lumo: 'eV'
-        bandgap: 'eV'
-        eigenvalues_vector: 'eV'
 
     # --- Output settings ---
     outputs:
@@ -91,18 +84,6 @@ schnet_config:
         metrics: "MAE"
       forces:
         loss_weight: 0.8
-        metrics: "MAE"
-      homo:
-        loss_weight: 0.5
-        metrics: "MAE"
-      lumo:
-        loss_weight: 0.5
-        metrics: "MAE"
-      gap:
-        loss_weight: 0.5
-        metrics: "MAE"
-      eigenvalues_vector:
-        loss_weight: 1.5
         metrics: "MAE"
 
     # --- Training settings ---
@@ -119,10 +100,6 @@ schnet_config:
       optimizer:
         type: 'AdamW'
         lr: ${common_settings.learning_rate} # Using common learning rate (from common_settings)
-        amsgrad: ${optimizer_settings.adam_amsgrad} # Common amsgrad
-        betas: ${optimizer_settings.adam_betas}   # Common betas
-        eps: ${optimizer_settings.adam_eps}     # Common eps
-        weight_decay: ${optimizer_settings.adam_weight_decay} # Common weight_decay
       scheduler:
         type: 'ReduceLROnPlateau'
         factor: ${scheduler_settings.lr_factor} # Common scheduler factor
@@ -145,7 +122,6 @@ schnet_config:
     resume_training:
       resume_checkpoint_dir: ${output_folder_settings.root_folder}/schnet # Using common root output folder + schnet subdir
 
-
 # ========================= Neuqip Configuration =========================
 # Settings specific to the Neuqip platform.
 neuqip_config:
@@ -153,7 +129,7 @@ neuqip_config:
   root: ${output_folder_settings.root_folder}/neuqip # Using common root output folder + neuqip subdir
   run_name: CsPbBr3
   seed: ${common_settings.seed} # Using common seed (from common_settings)
-  dataset_seed: 123456
+  dataset_seed: ${common_settings.seed} # Using common seed (from common_settings)
   append: true
   default_dtype: float32
 
@@ -177,7 +153,7 @@ neuqip_config:
   parity: o3_full
 
   # --- Allegro layers ---
-  num_layers: 1
+  num_layers: 4
   env_embed_multiplicity: 8
   embed_initial_edge: true
 
@@ -219,14 +195,14 @@ neuqip_config:
   wandb: true
   wandb_project: allegro-tutorial
   verbose: info
-  log_batch_freq: 10
+  log_batch_freq: 8
 
   # --- training ---
   n_train: ${training_parameters.train_size} # Using common train size (from training_parameters)
   n_val: ${training_parameters.validation_size} # Using common validation size (from training_parameters)
   batch_size: ${common_settings.batch_size} # Using common batch size (from common_settings)
   max_epochs: ${common_settings.max_epochs} # Using common max epochs (from common_settings)
-  learning_rate: 0.002 # Neuqip specific LR (override common_settings)
+  learning_rate: ${common_settings.learning_rate} # Using common learning rate (from common_settings
   train_val_split: random
   shuffle: true
   metrics_key: validation_loss
@@ -265,8 +241,8 @@ neuqip_config:
 
   # --- lr scheduler ---
   lr_scheduler_name: ReduceLROnPlateau
-  lr_scheduler_patience: 50 # Neuqip specific patience (override common_settings)
-  lr_scheduler_factor: 0.5   # Neuqip specific factor (override common_settings)
+  lr_scheduler_patience: ${scheduler_settings.lr_patience} # Common scheduler patienc
+  lr_scheduler_factor: ${scheduler_settings.lr_factor} # Common scheduler factor
 
   # --- early stopping ---
   early_stopping_lower_bounds:
