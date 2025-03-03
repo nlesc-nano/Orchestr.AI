@@ -32,8 +32,8 @@ def resolve_placeholders(config, root_config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate platform-specific configuration YAML files.")
-    parser.add_argument("-p","--platform", choices=['schnet', 'neuqip'], required=True, help="Platform to generate configuration for (schnet or neuqip)")
-    parser.add_argument("-o", "--output", dest="output_file", required=True, help="Output YAML file name (e.g., schnet.yaml or neuqip.yaml)")
+    parser.add_argument("-p","--platform", choices=['schnet', 'nequip'], required=True, help="Platform to generate configuration for (schnet or nequip)")
+    parser.add_argument("-o", "--output", dest="output_file", required=True, help="Output YAML file name (e.g., schnet.yaml or nequip.yaml)")
     args = parser.parse_args()
 
     platform = args.platform
@@ -54,8 +54,7 @@ if __name__ == "__main__":
 
         print(f"Schnet configuration saved to: {output_file_name}") # Modified output for bash script to capture
 
-
-    elif platform == "neuqip":
+    elif platform == "nequip":
         neuqip_settings = merged_config['neuqip_config']
         print("\nUsing Neuqip Configuration:")
 
