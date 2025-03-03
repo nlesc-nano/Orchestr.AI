@@ -1,19 +1,8 @@
 import numpy as np
-import pickle 
-import random
-import matplotlib.pyplot as plt
-import yaml 
 import pprint
 import argparse
 from pathlib import Path
-from periodictable import elements
 from scipy.spatial.transform import Rotation as R
-from scm.plams import Molecule
-from CAT.recipes import replace_surface
-from sklearn.cluster import KMeans
-from sklearn.cluster import DBSCAN
-from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA
 
 from mlff_qd.utils.analysis import ( compute_rmsd_matrix, plot_rmsd_histogram,
         plot_generated_samples )
