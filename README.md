@@ -109,3 +109,31 @@ If an user wants to run locally the training code, one can do the following:
 python training.py --config input_file.yaml
 ```
 By default, if no input file is specified, the training code looks for a file called input.yaml.
+
+## Plotting Training Metrics for SchNet and Nequip
+
+The `analysis/plot.py` script allows you to visualize training progress for your models. It accepts several command-line options to control its behavior. Here’s what each option means:
+
+- **`--platform`**: Specifies the model platform. Use either `schnet` or `nequip`.
+- **`--file`**: Provides the path to the CSV file containing the training metrics.
+- **`--cols`**: Sets the number of columns for the subplot grid (default is 2).
+- **`--out`**: Defines the output file name for the saved plot. The name should end with `.png`.
+
+
+### Plotting SchNet Results
+
+To plot the results for SchNet, use the following command:
+```bash
+python analysis/plot.py --platform schnet --file "path/to/schnet_metrics.csv" --cols 2 --out schnet_plot.png
+```
+Replace "path/to/schnet_metrics.csv" with the actual path to your SchNet metrics CSV file. 
+
+### Plotting Nequip Results
+
+To plot the results for Nequip, use the following command:
+```bash
+python analysis/plot.py --platform nequip --file "path/to/nequip_metrics.csv" --cols 2 --out nequip_plot.png
+```
+Replace "path/to/nequip_metrics.csv" with the actual path to your Nequip metrics CSV file.
+
+These commands will generate plots for the respective platforms and save them as PNG files in the current working directory.
