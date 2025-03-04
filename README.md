@@ -16,6 +16,22 @@ pip install PLAMS
 
 One can find more information [here](https://www.scm.com/doc/plams/started.html#installing-plams).
 
+### Install DScribe
+One can install DScribe through pip which will automatically get the latest stable release:
+
+```bash
+pip install dscribe
+```
+
+They also provide a conda package through conda-forge:
+
+
+```bash
+conda install -c conda-forge dscribe
+```
+
+One can find more information [here](https://singroup.github.io/dscribe/latest/install.html).
+
 ### Install Compound Attachment Tool (CAT), nano-CAT and auto-FOX
 To install these packages we recommend to download the latest versions from their original repositories in the links below:
 
