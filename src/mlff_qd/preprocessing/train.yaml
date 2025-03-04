@@ -1,0 +1,45 @@
+workflow:
+  distribute_single_points
+
+project_name: CdSe
+calculate_guesses: "all" 
+active_space: [20, 20]
+path_traj_xyz: "/leonardo/home/userexternal/iinfante/CP2K/CdSe/Cd16Se13/hle17/Extra_DFT_calculations/training_dataset_with_md.xyz"
+path_hdf5: "/leonardo_scratch/large/userexternal/iinfante/wrktmp_cdse/Cd16Se13.hdf5"
+scratch_path: "/leonardo_scratch/large/userexternal/iinfante/wrktmp_cdse"
+workdir: "."
+blocks: 5
+
+job_scheduler:
+  free_format: "
+  #!/bin/bash \n
+  #SBATCH --account=euhpc_r02_106 \n
+  #SBATCH --partition=dcgp_usr_prod \n
+  #SBATCH --job-name=cspbbr3 \n
+  #SBATCH --time=24:00:00 \n
+  #SBATCH --nodes 1 \n
+  #SBATCH --ntasks-per-node=112 \n
+
+  module load profile/chem-phys \n
+  module load cp2k/2024.1--intel-oneapi-mpi--2021.10.0--oneapi--2023.2.0 \n "
+
+cp2k_general_settings:
+  path_basis: "/leonardo/home/userexternal/iinfante/cp2k_basis"
+  basis_file_name: "BASIS_MOLOPT_UZH"
+  potential_file_name: "POTENTIAL_UZH"
+  basis:  "DZVP-MOLOPT-GGA-GTH"
+  potential: "GTH-GGA"
+  cell_parameters: 25.0
+  periodic: none
+  executable: cp2k.popt
+  wfn_restart_file_name: "/leonardo/home/userexternal/iinfante/CP2K/CdSe/Cd16Se13/hle17/Extra_DFT_calculations/CdSe-RESTART.wfn"
+
+  cp2k_settings_main:
+    specific:
+      template: 
+         train_hle17_main
+
+  cp2k_settings_guess:
+    specific:
+      template:
+         train_hle17_guess
