@@ -81,6 +81,27 @@ However, if an user wants to specify a different custom configuration file for t
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
 ```
+## YAML Generation for SchNet and Nequip Training
+
+Use the `generate_scripts.py` script to automatically create a YAML configuration file for training. The script requires two parameters: the platform (`-p`) and the output file (`-o`).
+
+### Generate YAML for SchNet
+
+To generate a configuration file for SchNet, run:
+
+```bash
+python generate_scripts.py -p schnet -o schnet.yaml
+```
+
+This command produces `schnet.yaml` with all necessary settings for training using SchNet.
+
+### Generate YAML for Nequip
+
+```bash
+python generate_scripts.py -p nequip -o nequip.yaml
+```
+
+This generates `nequip.yaml`, which is pre-configured for Nequip training.
 
 ### Training locally
 If an user wants to run locally the training code, one can do the following:
