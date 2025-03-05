@@ -7,7 +7,7 @@ settings:
   # Data handling settings
   data:
     dataset_path: './cspbbr3_newData_NEW_12-11-2024.npz'
-
+    use_last_n: 100  # current testing
   # Model architecture settings
   model:
     cutoff: 12.
@@ -63,3 +63,15 @@ settings:
   # Resume training settings
   resume_training:
     resume_checkpoint_dir: null # Path to model checkpoint file if required 
+  
+  # Fine Tuning settings
+  fine_tuning:
+  pretrained_checkpoint: # checkpoint file path
+  freeze_embedding: true
+  freeze_interactions_up_to: 2 # add no of layers
+  freeze_all_representation: true
+  lr: 0.00005
+  early_stopping_patience: 10
+  best_model_dir: fine_tuned_best_model  # Subdirectory only
+  checkpoint_dir: fine_tuned_checkpoints  # Subdirectory only
+  log_name: fine_tune_logs  # Subdirectory for TensorBoard logs
