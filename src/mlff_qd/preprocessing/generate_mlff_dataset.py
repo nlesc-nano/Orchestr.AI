@@ -31,6 +31,7 @@ from scm.plams import Molecule
 from CAT.recipes import replace_surface
 
 from mlff_qd.utils.config import load_config
+from mlff_qd.utils.io import save_xyz
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -242,20 +243,6 @@ def create_mass_dict(atom_types):
     mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
     logger.info(f"Mass dictionary: {mass_dict}")
     return mass_dict
-
-def save_xyz(filename, positions, atom_types, energies=None):
-    """Save positions to an XYZ file."""
-    logger.info(f"Saving XYZ file to {filename}...")
-    with open(filename, "w") as f:
-        for i, frame in enumerate(positions):
-            f.write(f"{len(atom_types)}\n")
-            if energies and energies[i] is not None:
-                f.write(f"Frame {i+1}, Energy = {energies[i]:.6f}\n")
-            else:
-                f.write(f"Frame {i+1}\n")
-            for atom, (x, y, z) in zip(atom_types, frame):
-                f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
-    logger.info(f"Saved XYZ file: {filename}")
 
 def save_positions_xyz(filename, positions, atom_types, energies=None):
     """Alias for save_xyz for positions."""
@@ -789,19 +776,23 @@ if __name__ == "__main__":
     reorder_xyz_trajectory(frc_file_path, "reordered_forces.xyz", num_atoms)
     positions, atom_types, energies_hartree = parse_positions_xyz("reordered_positions.xyz", num_atoms)
     forces = parse_forces_xyz("reordered_forces.xyz", num_atoms)  # using global parse_forces_xyz if defined
+
+    # Preprocessing
     centered_positions = center_positions(positions, masses)
     aligned_positions, rotations, _ = iterative_alignment_fixed(centered_positions)
     aligned_forces = rotate_forces(forces, rotations)
     medoid_structure, rep_idx = find_medoid_structure(aligned_positions)
+    
     save_xyz("medoid_structure.xyz", medoid_structure[np.newaxis,:,:], atom_types)
-    save_positions_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree)
+    save_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree, comment="Aligned positions")
     save_forces_xyz("aligned_forces.xyz", aligned_forces, atom_types)
     energies_ev = [e * hartree_to_eV if e is not None else None for e in energies_hartree]
     aligned_forces_ev = aligned_forces * hartree_bohr_to_eV_angstrom
     save_positions_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev)
     save_forces_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types)
 
-    md_positions, atom_types, _ = parse_positions_xyz("aligned_positions.xyz", num_atoms)
+    aligned_positions_path = PROJECT_ROOT / "data" / "processed" / "aligned_positions.xyz"
+    md_positions, atom_types, _ = parse_positions_xyz(aligned_positions_path, num_atoms)
     md_forces = parse_forces_xyz("aligned_forces.xyz", num_atoms)
     species = sorted(list(set(atom_types)))
     soap = SOAP(
