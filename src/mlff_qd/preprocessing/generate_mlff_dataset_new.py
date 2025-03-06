@@ -16,6 +16,7 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
+from pathlib import Path
 
 from scipy.spatial.distance import cdist
 from dscribe.descriptors import SOAP
@@ -754,10 +755,18 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None,
                         help="Path to the YAML config file.")
     args = parser.parse_args()
+    
+    # Load yaml config
     config = load_config(config_file=args.config)
-    # Default parameters from config.
-    pos_file = config.get("pos_file", "trajectory_pos.xyz")
-    frc_file = config.get("frc_file", "trajectory_frc.xyz")
+
+    PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+    # Extract config values
+    pos_file_name = config.get("pos_file", "trajectory_pos.xyz")
+    frc_file_name = config.get("frc_file", "trajectory_frc.xyz")
+    pos_file_path = PROJECT_ROOT / pos_file_name
+    frc_file_path = PROJECT_ROOT / frc_file_name
+
     max_random_displacement = config.get("max_random_displacement", 0.25)
     scaling_factor = config.get("scaling_factor", 0.40)
     scaling_surf = config.get("scaling_surf", 0.60)
@@ -772,12 +781,12 @@ if __name__ == "__main__":
     logger.info("Configuration:")
     pprint.pprint(config, indent=4, width=80)
 
-    num_atoms = get_num_atoms(pos_file)
-    positions, atom_types, energies_hartree = parse_positions_xyz(pos_file, num_atoms)
+    num_atoms = get_num_atoms(pos_file_path)
+    positions, atom_types, energies_hartree = parse_positions_xyz(pos_file_path, num_atoms)
     mass_dict = create_mass_dict(atom_types)
     masses = np.array([mass_dict[atom] for atom in atom_types])
-    reorder_xyz_trajectory(pos_file, "reordered_positions.xyz", num_atoms)
-    reorder_xyz_trajectory(frc_file, "reordered_forces.xyz", num_atoms)
+    reorder_xyz_trajectory(pos_file_path, "reordered_positions.xyz", num_atoms)
+    reorder_xyz_trajectory(frc_file_path, "reordered_forces.xyz", num_atoms)
     positions, atom_types, energies_hartree = parse_positions_xyz("reordered_positions.xyz", num_atoms)
     forces = parse_forces_xyz("reordered_forces.xyz", num_atoms)  # using global parse_forces_xyz if defined
     centered_positions = center_positions(positions, masses)

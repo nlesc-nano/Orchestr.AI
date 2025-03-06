@@ -1,5 +1,5 @@
-pos_file: "mean_md-pos-1.xyz"
-frc_file: "mean_md-frc-1.xyz"
+pos_file: "data/raw/mean_md-pos-1.xyz"
+frc_file: "data/raw/mean_md-frc-1.xyz"
 scaling_factor: 0.4
 scaling_surf: 0.6
 scaling_core: 0.4
