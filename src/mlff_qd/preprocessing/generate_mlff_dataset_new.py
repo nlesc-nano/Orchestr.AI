@@ -15,6 +15,7 @@ import pprint
 import logging
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 
 from scipy.spatial.distance import cdist
 from dscribe.descriptors import SOAP
@@ -27,6 +28,8 @@ from sklearn.preprocessing import StandardScaler
 from periodictable import elements
 from scm.plams import Molecule
 from CAT.recipes import replace_surface
+
+from mlff_qd.utils.config import load_config
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -745,19 +748,13 @@ def plot_generated_samples_extended(combined_samples, atom_types, soap):
     logger.info("Saved extended PCA plots to 'extended_pca_plots.png'")
     plt.close()
 
-def load_config(config_file="input.yaml"):
-    """Load configuration from YAML file."""
-    try:
-        with open(config_file, "r") as file:
-            cfg = yaml.safe_load(file) or {}
-    except FileNotFoundError:
-        logger.warning(f"Config file {config_file} not found; using defaults.")
-        cfg = {}
-    return cfg
-
 # --- Main Execution ---
 if __name__ == "__main__":
-    config = load_config()
+    parser = argparse.ArgumentParser(description="MLFF Data Generation")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to the YAML config file.")
+    args = parser.parse_args()
+    config = load_config(config_file=args.config)
     # Default parameters from config.
     pos_file = config.get("pos_file", "trajectory_pos.xyz")
     frc_file = config.get("frc_file", "trajectory_frc.xyz")
