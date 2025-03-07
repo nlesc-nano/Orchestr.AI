@@ -490,7 +490,8 @@ def generate_surface_core_pca_samples(
     representative_md,
     num_samples, 
     scaling_surf=0.6, 
-    scaling_core=0.4 
+    scaling_core=0.4,
+    medoid_structure_file="medoid_structure.xyz"
 ):
     """
     Generate PCA-based samples for surface and core atoms separately,
@@ -503,7 +504,7 @@ def generate_surface_core_pca_samples(
         surface_atom_types (list): Atom types considered as surface.
         representative_md (list): Subset of frames used as seeds.
         num_samples (int): Number of PCA-based samples to generate.
-        max_displacement (float): Maximum allowed displacement in PCA space.
+        medoid_structure_file (str): Path to the structure used to identify surface atoms (default "medoid_structure.xyz").
 
     Returns:
         np.ndarray: Array of shape (num_samples, num_atoms, 3) with new perturbed structures.
@@ -514,7 +515,7 @@ def generate_surface_core_pca_samples(
     logger.info("Identifying surface vs. core atoms...")
     surface_repl_file = "surface_replaced.xyz"
     surface_indices, _ = compute_surface_indices_with_replace_surface_dynamic(
-        "medoid_structure.xyz", surface_atom_types, f=1.0, surface_replaced_file=surface_repl_file
+        medoid_structure_file, surface_atom_types, f=1.0, surface_replaced_file=surface_repl_file
     )
     num_atoms = md_positions.shape[1]  # simpler: shape => (num_frames, num_atoms, 3)
     core_indices = np.setdiff1d(np.arange(num_atoms), surface_indices)
@@ -810,8 +811,12 @@ if __name__ == "__main__":
     representative_md = cluster_trajectory(precomputed_soap, clustering_method, num_clusters, md_positions, atom_types)
     pca_samples = generate_structures_from_pca(md_positions, md_forces, representative_md, atom_types, 
                                                num_samples_pca, scaling_factor, pca_variance_threshold=0.90)
+    
+    medoid_structure_path = PROJECT_ROOT / "data" / "processed" / "medoid_structure.xyz"
     pca_surface_samples = generate_surface_core_pca_samples(md_positions, md_forces, atom_types, surface_atom_types,
-                                                             representative_md, num_samples_pca_surface, scaling_surf, scaling_core) 
+            representative_md, num_samples_pca_surface, scaling_surf, scaling_core,
+            medoid_structure_path) 
+    
     randomized_samples = generate_randomized_samples(representative_md, atom_types, num_samples_randomization,
                                                      max_random_displacement)
 
