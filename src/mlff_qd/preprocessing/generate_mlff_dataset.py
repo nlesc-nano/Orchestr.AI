@@ -743,10 +743,14 @@ if __name__ == "__main__":
     positions, atom_types, energies_hartree = parse_positions_xyz(pos_file_path, num_atoms)
     mass_dict = create_mass_dict(atom_types)
     masses = np.array([mass_dict[atom] for atom in atom_types])
-    reorder_xyz_trajectory(pos_file_path, "reordered_positions.xyz", num_atoms)
-    reorder_xyz_trajectory(frc_file_path, "reordered_forces.xyz", num_atoms)
-    positions, atom_types, energies_hartree = parse_positions_xyz("reordered_positions.xyz", num_atoms)
-    forces = parse_forces_xyz("reordered_forces.xyz", num_atoms)  # using global parse_forces_xyz if defined
+    
+    reordered_positions_path = PROJECT_ROOT / "data" / "processed" / "reordered_positions.xyz"
+    reordered_forces_path    = PROJECT_ROOT / "data" / "processed" / "reordered_forces.xyz"
+    reorder_xyz_trajectory(pos_file_path, reordered_positions_path, num_atoms)
+    reorder_xyz_trajectory(frc_file_path, reordered_forces_path, num_atoms)
+
+    positions, atom_types, energies_hartree = parse_positions_xyz(reordered_positions_path, num_atoms)
+    forces = parse_forces_xyz(reordered_forces_path, num_atoms)
 
     # Preprocessing
     centered_positions = center_positions(positions, masses)
@@ -765,9 +769,12 @@ if __name__ == "__main__":
     save_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types, comment="Aligned forces")
 
     aligned_positions_path = PROJECT_ROOT / "data" / "processed" / "aligned_positions.xyz"
+    aligned_forces_path = PROJECT_ROOT / "data" / "processed" / "aligned_forces.xyz"
     md_positions, atom_types, _ = parse_positions_xyz(aligned_positions_path, num_atoms)
-    md_forces = parse_forces_xyz("aligned_forces.xyz", num_atoms)
+    md_forces = parse_forces_xyz(aligned_forces_path, num_atoms)
+    
     species = sorted(list(set(atom_types)))
+    
     soap = SOAP(
         species=species,
         r_cut=soap_params["r_cut"],
