@@ -31,7 +31,7 @@ from scm.plams import Molecule
 from CAT.recipes import replace_surface
 
 from mlff_qd.utils.config import load_config
-from mlff_qd.utils.io import save_xyz
+from mlff_qd.utils.io import save_xyz, reorder_xyz_trajectory
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -223,20 +223,6 @@ def get_num_atoms(filename):
         num = int(f.readline().strip())
     logger.info(f"Number of atoms: {num}")
     return num
-
-def reorder_xyz_trajectory(input_file, output_file, num_atoms):
-    """Reorder atoms in an XYZ trajectory by atom type."""
-    logger.info(f"Reordering {input_file} -> {output_file}")
-    with open(input_file, "r") as infile, open(output_file, "w") as outfile:
-        lines = infile.readlines()
-        step = num_atoms + 2
-        for i in range(0, len(lines), step):
-            header = lines[i:i+2]
-            atoms = lines[i+2:i+2+num_atoms]
-            atoms_sorted = sorted(atoms, key=lambda x: x.split()[0])
-            outfile.writelines(header)
-            outfile.writelines(atoms_sorted)
-    logger.info(f"Reordered trajectory saved to {output_file}")
 
 def create_mass_dict(atom_types):
     """Return a dict mapping atom types to their masses."""
