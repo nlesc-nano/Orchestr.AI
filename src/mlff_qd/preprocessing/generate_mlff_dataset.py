@@ -32,6 +32,7 @@ from CAT.recipes import replace_surface
 
 from mlff_qd.utils.config import load_config
 from mlff_qd.utils.io import save_xyz, reorder_xyz_trajectory
+from mlff_qd.utils.pca import generate_surface_core_pca_samples
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
