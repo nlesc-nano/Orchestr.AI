@@ -196,127 +196,142 @@ def generate_structures_from_pca(
 
 def generate_surface_core_pca_samples(
     md_positions,
+    md_forces,
     atom_types,
     surface_atom_types,
-    rmsd_md_internal,
     representative_md,
-    num_samples,
-    temperature,
-    temperature_target,
-    temperature_target_surface,
-    max_displacement,
-    mean_structure_file,     # absolute path to mean_structure.xyz
-    surface_replaced_file    # absolute path to surface_replaced.xyz
+    num_samples, 
+    scaling_surf=0.6, 
+    scaling_core=0.4,
+    medoid_structure_file="medoid_structure.xyz"
 ):
-    # Compute RMSD-based scaling factor
-    rmsd_values = np.mean(rmsd_md_internal, axis=1)  # Mean RMSD of each frame to all others
-    print(f"rmsd mean of each from to all others : {rmsd_values}")
-    rmsd_scaling_factor = np.mean(rmsd_values)
-    print(f"RMSD-based scaling factor: {rmsd_scaling_factor:.2f}")
+    """
+    Generate PCA-based samples for surface and core atoms separately,
+    but WITHOUT SOAP. Only positions + forces are used.
+    
+    Parameters:
+        md_positions (np.ndarray): MD frames, shape (num_frames, num_atoms, 3).
+        md_forces (np.ndarray): MD forces, shape (num_frames, num_atoms, 3).
+        atom_types (list): List of atom types (for saving structures).
+        surface_atom_types (list): Atom types considered as surface.
+        representative_md (list): Subset of frames used as seeds.
+        num_samples (int): Number of PCA-based samples to generate.
+        medoid_structure_file (str): Path to the structure used to identify surface atoms (default "medoid_structure.xyz").
 
-    # Identify surface and core atoms
-    mean_positions = np.mean(md_positions, axis=0)
-    save_xyz(mean_structure_file, mean_positions[np.newaxis, :, :], atom_types)
-    surface_indices, replaced_atom_types = compute_surface_indices_with_replace_surface_dynamic(
-            mean_structure_file,
-            surface_atom_types,
-            surface_replaced_file,
-            f=1.0,
+    Returns:
+        np.ndarray: Array of shape (num_samples, num_atoms, 3) with new perturbed structures.
+    """
+    logger.info("Generating PCA-based surface-core samples (positions+forces only, no SOAP)...")
+
+    # 1) Identify surface and core indices
+    logger.info("Identifying surface vs. core atoms...")
+    surface_repl_file = "surface_replaced.xyz"
+    surface_indices, _ = compute_surface_indices_with_replace_surface_dynamic(
+        medoid_structure_file, surface_atom_types, f=1.0, surface_replaced_file=surface_repl_file
     )
-    num_atoms = mean_positions.shape[0]
+    num_atoms = md_positions.shape[1]  # simpler: shape => (num_frames, num_atoms, 3)
     core_indices = np.setdiff1d(np.arange(num_atoms), surface_indices)
-
-    # Convert indices to arrays for compatibility
     surface_indices = np.array(surface_indices)
     core_indices = np.array(core_indices)
+    logger.info(f"surface_indices length={len(surface_indices)}, core_indices length={len(core_indices)}")
 
-    # Flatten MD trajectory frames
-    flattened_md_positions = np.array([frame.flatten() for frame in md_positions])
+    # 2) Build surface and core descriptors using POS+FORCES ONLY
+    #    Each descriptor = [positions for those atoms, forces for those atoms]
+    surf_desc = []
+    core_desc = []
+    for pos, frc in zip(md_positions, md_forces):
+        surf_d = np.concatenate([pos[surface_indices].flatten(), frc[surface_indices].flatten()])
+        core_d = np.concatenate([pos[core_indices].flatten(), frc[core_indices].flatten()])
+        surf_desc.append(surf_d)
+        core_desc.append(core_d)
+    surf_desc = np.array(surf_desc)  # shape => (num_frames, (surface_atoms*3)*2)
+    core_desc = np.array(core_desc)  # shape => (num_frames, (core_atoms*3)*2)
+    logger.info(f"Surface descriptor shape={surf_desc.shape}, Core descriptor shape={core_desc.shape}")
 
-    # Convert atom indices (surface_indices) to coordinate indices
-    surface_coordinate_indices = []
-    for atom_idx in surface_indices:
-        surface_coordinate_indices.extend([3 * atom_idx, 3 * atom_idx + 1, 3 * atom_idx + 2])
-    surface_coordinate_indices = np.array(surface_coordinate_indices)
+    # 3) Normalize each descriptor set
+    scaler_surf = StandardScaler()
+    scaler_core = StandardScaler()
+    surf_desc_norm = scaler_surf.fit_transform(surf_desc)
+    core_desc_norm = scaler_core.fit_transform(core_desc)
 
-    # Convert atom indices (core_indices) to coordinate indices
-    core_coordinate_indices = []
-    for atom_idx in core_indices:
-        core_coordinate_indices.extend([3 * atom_idx, 3 * atom_idx + 1, 3 * atom_idx + 2])
-    core_coordinate_indices = np.array(core_coordinate_indices)
+    # 4) PCA on each
+    pca_surf_final = PCA()
+    pca_surf_final.fit(surf_desc_norm)
+    cum_var_s = np.cumsum(pca_surf_final.explained_variance_ratio_)
+    opt_s = np.argmax(cum_var_s >= 0.90) + 1
+    logger.info(f"Optimal surface PCA components: {opt_s} (captures {cum_var_s[opt_s-1]*100:.2f}% variance)")
+    pca_surf_final = PCA(n_components=opt_s)
+    pca_surf_final.fit(surf_desc_norm)
 
-    # Separate atomic positions into surface and core
-    surface_positions = flattened_md_positions[:, surface_coordinate_indices]
-    print(f"surface positions shape {surface_positions.shape}")
-    core_positions = flattened_md_positions[:, core_coordinate_indices]
+    pca_core_final = PCA()
+    pca_core_final.fit(core_desc_norm)
+    cum_var_c = np.cumsum(pca_core_final.explained_variance_ratio_)
+    opt_c = np.argmax(cum_var_c >= 0.90) + 1
+    logger.info(f"Optimal core PCA components: {opt_c} (captures {cum_var_c[opt_c-1]*100:.2f}% variance)")
+    pca_core_final = PCA(n_components=opt_c)
+    pca_core_final.fit(core_desc_norm)
 
-    # Perform PCA for surface atoms
-    pca_surface = PCA()
-    pca_surface.fit(surface_positions)
-    explained_variance_surface = np.cumsum(pca_surface.explained_variance_ratio_)
-    optimal_components_surface = np.argmax(explained_variance_surface >= 0.90) + 1
-    pca_surface = PCA(n_components=optimal_components_surface)
-    pca_surface.fit(surface_positions)
+    # 5) Decide on scaling factors for surface/core
+    #    We'll just do something simple like:
+    #    scaling_surf = min(1.0 * sqrt(Tsurf/T), max_disp)
+    #    scaling_core = min(1.0 * sqrt(Tcore/T), max_disp)
+    distance_flucts = compute_global_distance_fluctuation_cdist(md_positions)
+    mean_dist_fluct = np.mean(distance_flucts)
+    max_dist_fluct  = np.max(distance_flucts)
+    scaling_surf = 0.6
+    scaling_core = 0.4 
+    logger.info(f"Surface scaling: {scaling_surf:.2f}, Core scaling: {scaling_core:.2f}")
 
-    # Perform PCA for core atoms
-    pca_core = PCA()
-    pca_core.fit(core_positions)
-    explained_variance_core = np.cumsum(pca_core.explained_variance_ratio_)
-    optimal_components_core = np.argmax(explained_variance_core >= 0.90) + 1
-    pca_core = PCA(n_components=optimal_components_core)
-    pca_core.fit(core_positions)
-
-    # Compute RMSD-based scaling factors for surface and core
-    scaling_factors_surface = rmsd_scaling_factor * np.sqrt(temperature_target_surface / temperature)
-    scaling_factors_core = rmsd_scaling_factor * np.sqrt(temperature_target / temperature)
-
-    scaling_factors_surface = min(scaling_factors_surface, max_displacement)
-    print(f"Scaling factors surface for PCA components (adjusted for T={temperature_target_surface}K): {scaling_factors_surface}")
-
-    scaling_factors_core = min(scaling_factors_core, max_displacement)
-    print(f"Scaling factors core for PCA components (adjusted for T={temperature_target}K): {scaling_factors_core}")
-
-    # Generate PCA-based samples for surface and core
-    print(f"Generating {num_samples} PCA-based samples for surface and core atoms...")
-    combined_samples = []
+    new_structures = []
     for i in range(num_samples):
-        start_idx = np.random.choice(len(representative_md))  # Choose random frame from representative_md
-        reference_structure = representative_md[start_idx]
+        idx = random.choice(range(len(representative_md)))
+        ref_struct = representative_md[idx]
+        # find the corresponding index in the full array
+        ref_index = np.where(np.all(md_positions == ref_struct, axis=(1,2)))[0][0]
+        ref_pos = md_positions[ref_index]
+        ref_frc = md_forces[ref_index]
 
-        # Flatten the surface positions and generate perturbations
-        reference_surface_flat = reference_structure[surface_indices].flatten()
-        perturbed_surface_flat = generate_pca_samples(
-            reference_surface_flat,
-            pca_surface,
-            1,
-            scaling_factor=scaling_factors_surface
-        )[0]
-        perturbed_surface = perturbed_surface_flat.reshape(len(surface_indices), 3)
+        # Build surface & core descriptors (pos+forces only)
+        ref_s_desc = np.concatenate([ref_pos[surface_indices].flatten(), ref_frc[surface_indices].flatten()])
+        ref_c_desc = np.concatenate([ref_pos[core_indices].flatten(), ref_frc[core_indices].flatten()])
 
-        # Flatten the core positions and generate perturbations
-        reference_core_flat = reference_structure[core_indices].flatten()
-        perturbed_core_flat = generate_pca_samples(
-            reference_core_flat,
-            pca_core,
-            1,
-            scaling_factor=scaling_factors_core
-        )[0]
-        perturbed_core = perturbed_core_flat.reshape(len(core_indices), 3)
+        # Normalize, transform -> PCA space, add random noise
+        ref_s_norm = scaler_surf.transform(ref_s_desc.reshape(1, -1))[0]
+        ref_c_norm = scaler_core.transform(ref_c_desc.reshape(1, -1))[0]
 
-        # Combine perturbed surface and core atoms into one structure
-        combined_structure = np.zeros_like(reference_structure)
-        combined_structure[surface_indices] = perturbed_surface
-        combined_structure[core_indices] = perturbed_core
+        # convert to PCA space
+        ref_s_pca = pca_surf_final.transform(ref_s_norm.reshape(1, -1))[0]
+        ref_c_pca = pca_core_final.transform(ref_c_norm.reshape(1, -1))[0]
 
-        combined_samples.append(combined_structure)
+        # add random noise
+        perturb_s = np.random.normal(scale=scaling_surf, size=ref_s_pca.shape)
+        perturb_c = np.random.normal(scale=scaling_core, size=ref_c_pca.shape)
+        new_s_pca = ref_s_pca + perturb_s
+        new_c_pca = ref_c_pca + perturb_c
 
-        # Print progress every 100 samples or for the first sample
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"Generating sample {i + 1}/{num_samples}...")
+        # inverse PCA
+        new_s_norm = pca_surf_final.inverse_transform(new_s_pca.reshape(1, -1))[0]
+        new_c_norm = pca_core_final.inverse_transform(new_c_pca.reshape(1, -1))[0]
 
-    # Save combined structures
-    combined_samples = np.array(combined_samples)
-    save_xyz("pca_surface_core_combined_samples.xyz", combined_samples, atom_types)
-    print(f"Saved {len(combined_samples)} PCA-based samples to 'pca_surface_core_combined_samples.xyz'.")
+        # un-normalize
+        new_s = scaler_surf.inverse_transform(new_s_norm.reshape(1, -1))[0]
+        new_c = scaler_core.inverse_transform(new_c_norm.reshape(1, -1))[0]
 
-    return combined_samples
+        # extract new positions
+        num_s_atoms = len(surface_indices)
+        new_s_pos = new_s[:num_s_atoms*3].reshape(-1, 3)
+        new_c_pos = new_c[:(len(core_indices))*3].reshape(-1, 3)
+
+        # assemble
+        combined = ref_struct.copy()
+        combined[surface_indices] = new_s_pos
+        combined[core_indices] = new_c_pos
+
+        new_structures.append(combined)
+        if (i+1) % 100 == 0 or i == 0:
+            logger.info(f"Generated {i+1}/{num_samples} surface-core samples...")
+
+    new_structures = np.array(new_structures)
+    save_xyz("pca_surface_core_combined_samples_no_soap.xyz", new_structures, atom_types)
+    logger.info("Saved PCA-based surface-core samples (no SOAP) to 'pca_surface_core_combined_samples_no_soap.xyz'")
+    return new_structures
