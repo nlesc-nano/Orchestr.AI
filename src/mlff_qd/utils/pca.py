@@ -8,16 +8,23 @@ import argparse
 from pathlib import Path
 from periodictable import elements
 from scipy.spatial.transform import Rotation as R
+
 from scm.plams import Molecule
 from CAT.recipes import replace_surface
+
 from sklearn.cluster import KMeans
 from sklearn.cluster import DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
-from mlff_qd.utils.analysis import compute_rmsd_matrix, plot_rmsd_histogram
+from mlff_qd.utils.analysis import ( compute_rmsd_matrix, plot_rmsd_histogram,
+        compute_global_distance_fluctuation_cdist )
 from mlff_qd.utils.io import save_xyz
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
+
+import logging
+logger = logging.getLogger(__name__)
 
 def generate_pca_samples(reference_structure, pca_model, num_samples, scaling_factor=1.0):
     """

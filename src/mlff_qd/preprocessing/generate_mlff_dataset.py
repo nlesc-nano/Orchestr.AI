@@ -18,10 +18,8 @@ import matplotlib.pyplot as plt
 import argparse
 from pathlib import Path
 
-from scipy.spatial.distance import cdist
 from dscribe.descriptors import SOAP
 from ase import Atoms
-from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
@@ -30,6 +28,7 @@ from periodictable import elements
 from scm.plams import Molecule
 from CAT.recipes import replace_surface
 
+from mlff_qd.utils.analysis import compute_global_distance_fluctuation_cdist
 from mlff_qd.utils.config import load_config
 from mlff_qd.utils.io import save_xyz, reorder_xyz_trajectory
 from mlff_qd.utils.pca import generate_surface_core_pca_samples
@@ -49,33 +48,6 @@ amu_to_kg = 1.66053906660e-27
 c = 2.99792458e10
 
 # --- Utility Functions ---
-def compute_global_distance_fluctuation_cdist(md_positions):
-    """
-    Compute the standard deviation of interatomic distances for each frame using scipy's cdist.
-    Returns an array of shape (num_frames,) where each entry is the std. dev. for that frame.
-    
-    Parameters:
-        md_positions (np.ndarray): shape (num_frames, num_atoms, 3)
-                                   Each frame is (num_atoms, 3)
-
-    Returns:
-        np.ndarray: shape (num_frames,) with distance fluctuation for each frame
-    """
-    fluctuations = []
-    for frame in md_positions:
-        # cdist computes pairwise distances among points
-        dists = cdist(frame, frame)  # shape => (num_atoms, num_atoms)
-        
-        # Extract upper triangle to skip diagonal (0) and duplicates
-        tri_idx = np.triu_indices(dists.shape[0], k=1)
-        upper_dists = dists[tri_idx]
-        
-        # Compute standard deviation
-        std_dev = np.std(upper_dists)
-        fluctuations.append(std_dev)
-    
-    return np.array(fluctuations)
-
 def generate_pca_samples_in_pca_space(ref_descriptor, pca, n_samples, scaling_factor):
     """
     Given a descriptor in the *normalized* space (the same dimension PCA was fit on),
