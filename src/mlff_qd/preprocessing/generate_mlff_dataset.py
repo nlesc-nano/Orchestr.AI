@@ -244,22 +244,6 @@ def create_mass_dict(atom_types):
     logger.info(f"Mass dictionary: {mass_dict}")
     return mass_dict
 
-def save_positions_xyz(filename, positions, atom_types, energies=None):
-    """Alias for save_xyz for positions."""
-    save_xyz(filename, positions, atom_types, energies)
-
-def save_forces_xyz(filename, forces, atom_types):
-    """Save forces to an XYZ-like file."""
-    logger.info(f"Saving forces to {filename}...")
-    num_frames, num_atoms, _ = forces.shape
-    with open(filename, "w") as f:
-        for i in range(num_frames):
-            f.write(f"{num_atoms}\n")
-            f.write(f"Frame {i+1}: Aligned forces\n")
-            for atom, (fx, fy, fz) in zip(atom_types, forces[i]):
-                f.write(f"{atom} {fx:.6f} {fy:.6f} {fz:.6f}\n")
-    logger.info(f"Saved forces to {filename}")
-
 def center_positions(positions, masses):
     """Center positions by subtracting the center-of-mass."""
     num_frames, num_atoms, _ = positions.shape
@@ -786,11 +770,13 @@ if __name__ == "__main__":
     
     save_xyz("medoid_structure.xyz", medoid_structure[np.newaxis,:,:], atom_types)
     save_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree, comment="Aligned positions")
-    save_forces_xyz("aligned_forces.xyz", aligned_forces, atom_types)
+    save_xyz("aligned_forces.xyz", aligned_forces, atom_types, comment="Aligned forces")
+
     energies_ev = [e * hartree_to_eV if e is not None else None for e in energies_hartree]
     aligned_forces_ev = aligned_forces * hartree_bohr_to_eV_angstrom
-    save_positions_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev)
-    save_forces_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types)
+    
+    save_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev, comment="Aligned positions")
+    save_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types, comment="Aligned forces")
 
     aligned_positions_path = PROJECT_ROOT / "data" / "processed" / "aligned_positions.xyz"
     md_positions, atom_types, _ = parse_positions_xyz(aligned_positions_path, num_atoms)
