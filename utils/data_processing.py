@@ -61,12 +61,18 @@ def setup_logging_and_dataset(config, atoms_list, property_list):
     
     return new_dataset, property_units
 
-def prepare_transformations(config):
-    transformations = [
-        trn.ASENeighborList(cutoff=config['settings']['model']['cutoff']),
-        trn.RemoveOffsets("energy", remove_mean=True, remove_atomrefs=False),
-        trn.CastTo32()
-    ]
+def prepare_transformations(config, task_type):
+    
+    cutoff = config['settings']['model']['cutoff']
+    transformations = [trn.ASENeighborList(cutoff=cutoff)]
+    
+    if task_type == "train":
+        transformations.append(trn.RemoveOffsets("energy", remove_mean=True, remove_atomrefs=False))
+    elif task_type != "infer":
+        raise ValueError(f"Unsupported task type: {task_type}")
+    
+    transformations.append(trn.CastTo32())
+    
     return transformations
     
     

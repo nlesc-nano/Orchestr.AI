@@ -24,7 +24,7 @@ def main(args):
     # Show dataset information
     show_dataset_info(new_dataset)
     
-    transformations = prepare_transformations(config)
+    transformations = prepare_transformations(config,"train")
     custom_data = setup_data_module(config, os.path.join(config['settings']['logging']['folder'], config['settings']['general']['database_name']), transformations, property_units)
     
     nnpot, outputs = setup_model(config)

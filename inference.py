@@ -12,6 +12,9 @@ from utils.logging_utils import timer, setup_logging
 from utils.data_processing import load_data, preprocess_data, setup_logging_and_dataset, prepare_transformations, setup_data_module, show_dataset_info
 from utils.model import setup_model
 from utils.helpers import load_config, parse_args
+from schnetpack.data import ASEAtomsData
+import schnetpack as spk
+import schnetpack.transform as trn
 
 def convert_units(value, from_unit, to_unit):
     """Convert energy or force values between different unit systems."""
@@ -69,13 +72,13 @@ def save_forces(all_actual_forces_flat,all_predicted_forces_flat, dataset_type):
         print(f"Forces data saved to {forces_pkl_file_path}")
     except Exception as e:
         print(f"Error saving force results: {e}")
-    
+
 def run_inference(loader, dataset_type, best_model, device, property_units, new_dataset):
     all_actual_energy = []
     all_predicted_energy = []
     all_actual_forces = []
     all_predicted_forces = []
-
+    
     for batch in tqdm(loader, desc=f"Running inference on {dataset_type} data"):
         batch = {key: value.to(device) for key, value in batch.items()}
         batch['positions'] = batch['_positions']
@@ -89,6 +92,7 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
         # Collect energies
         actual_energy = batch['energy'].detach().cpu().numpy()
         predicted_energy = result['energy'].detach().cpu().numpy()
+        
         all_actual_energy.append(actual_energy)
         all_predicted_energy.append(predicted_energy)
 
@@ -97,7 +101,7 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
         predicted_forces = result['forces'].detach().cpu().numpy()
         all_actual_forces.append(actual_forces)
         all_predicted_forces.append(predicted_forces)
-      
+     
     # Save results for this dataset
     save_energies(all_actual_energy,all_predicted_energy, dataset_type)
 
@@ -148,23 +152,27 @@ def main():
 
     trained_model_path = config['settings']['testing']['trained_model_path']
     print(f"Trained model path: {trained_model_path}")
-
-    # Load and preprocess data
-    data = load_data(config)
-    atoms_list, property_list = preprocess_data(data)
-    new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list)
-    
-    # Show dataset information
-    show_dataset_info(new_dataset)
-    
-    # Prepare transformations and data module
-    transformations = prepare_transformations(config)
+    db_path = os.path.join(trained_model_path, config['settings']['general']['database_name'])
+    property_units = {
+        'energy': config['settings']['model']['property_unit_dict']['energy'],
+        'forces': config['settings']['model']['property_unit_dict']['forces']
+    }
+    # Prepare transformations and data module   
+    transformations = prepare_transformations(config,"infer")
+           
     custom_data = setup_data_module(
         config,
-        os.path.join(config['settings']['logging']['folder'], config['settings']['general']['database_name']),
+        db_path,
         transformations,
         property_units
     )
+    
+    new_dataset = ASEAtomsData(db_path)
+    # Show dataset information
+    show_dataset_info(new_dataset)
+
+    train_loader = custom_data.train_dataloader()
+    validation_loader = custom_data.val_dataloader()
     
     # Setup model
     nnpot, outputs = setup_model(config)
@@ -184,10 +192,10 @@ def main():
     best_model.eval()
 
     # Run inference on both datasets
-    run_inference(custom_data.train_dataloader(), "train", best_model, device, property_units, new_dataset)
-    run_inference(custom_data.val_dataloader(), "validation", best_model, device, property_units, new_dataset)
+    run_inference(train_loader, "train", best_model, device, property_units, new_dataset)
+    run_inference(validation_loader, "validation", best_model, device, property_units, new_dataset)
 
 if __name__ == '__main__':
     setup_logging()  # Initialize logging before main
-    logging.info(f"{'*' * 30} Started {'*' * 30}")
+    logging.info(f"{'*' * 30} Started... {'*' * 30}")
     main()
