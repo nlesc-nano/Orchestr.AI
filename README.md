@@ -110,6 +110,25 @@ python training.py --config input_file.yaml
 ```
 By default, if no input file is specified, the training code looks for a file called input.yaml.
 
+## Extract Training Metrics from TensorBoard Event Files
+
+This script, `analysis/extract_metrics.py`,  extracts scalar training metrics from TensorBoard event files and saves them to a CSV file.
+
+- **`-p/--path`**:  Path to the TensorBoard event file. **(Required)**.
+- **`-o/--output_file`**: Provides the path to the CSV file containing the training metrics.
+*   Prerequisites **Required Python Packages**:
+    *   `tensorboard`
+    You can install these using pip:
+    ```bash
+    pip install tensorboard
+    ```
+### Command-Line Usage:
+To run the script use the following command:
+
+```bash
+python analysis/extract_metrics.py -p <event_file_path> [-o <output_file_name>]
+```
+
 ## Plotting Training Metrics for SchNet and Nequip
 
 The `analysis/plot.py` script allows you to visualize training progress for your models. It accepts several command-line options to control its behavior. Here’s what each option means:
