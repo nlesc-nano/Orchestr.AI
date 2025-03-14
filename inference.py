@@ -13,8 +13,6 @@ from utils.data_processing import load_data, preprocess_data, setup_logging_and_
 from utils.model import setup_model
 from utils.helpers import load_config, parse_args
 from schnetpack.data import ASEAtomsData
-import schnetpack as spk
-import schnetpack.transform as trn
 
 def convert_units(value, from_unit, to_unit):
     """Convert energy or force values between different unit systems."""
