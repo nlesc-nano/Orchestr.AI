@@ -1,0 +1,252 @@
+platform: "schnet"  # Choose between "schnet" or "neuqip" - VERY IMPORTANT: Change this to select platform
+
+# ========================= Common Settings =========================
+# These settings are either shared directly or serve as defaults for both platforms.
+common_settings:
+  seed: 42        # Random seed for reproducibility (default for both)
+  batch_size: 8     # Batch size for training (default for both)
+  max_epochs: 100   # Maximum training epochs (default for both)
+  learning_rate: 0.0001 # Learning rate for optimizer (default for both - Schnet default)
+
+# ========================= Dataset Settings =========================
+# Settings related to the dataset file and paths.
+dataset:
+  dataset_file: "./cspbbr3_newData_NEW_12-11-2024.npz"  # Path to the dataset file (default, can be overridden)
+  # - For schnet_config: maps to settings.data.dataset_path
+  # - For neuqip_config: maps to dataset_file_name
+
+# ========================= Model Architecture Settings =========================
+# Settings related to the core model architecture parameters.
+model_architecture:
+  cutoff_radius: 12.0  # Cutoff radius for interactions (default, can be overridden)
+  # - For schnet_config: maps to settings.model.cutoff
+  # - For neuqip_config: maps to r_max
+
+# ========================= Training Parameters Settings =========================
+# Settings related to training dataset sizes and splits.
+training_parameters:
+  train_size: 1600    # Number of training samples (default, can be overridden)
+  validation_size: 400 # Number of validation samples (default, can be overridden)
+  # - For schnet_config: maps to settings.training.num_train and num_val
+  # - For neuqip_config: maps to n_train and n_val
+
+# ========================= Optimizer Settings =========================
+# Settings related to the optimizer (Adam/AdamW parameters)
+optimizer_settings:
+  adam_amsgrad: false    # amsgrad parameter for Adam/AdamW (default)
+  adam_betas: [0.9, 0.999] # betas for Adam/AdamW (default)
+  adam_eps: 1.0e-08     # eps for Adam/AdamW (default)
+  adam_weight_decay: 0.0 # weight_decay for Adam/AdamW (default)
+
+# ========================= Learning Rate Scheduler Settings =========================
+# Settings for the ReduceLROnPlateau learning rate scheduler
+scheduler_settings:
+  lr_factor: 0.8      # Factor to reduce LR by (Schnet default, Neuqip overrides)
+  lr_patience: 30     # Patience for LR reduction (Schnet default, Neuqip overrides)
+  lr_verbose: true     # Verbose LR scheduler output (Schnet default)
+
+# ========================= Output Folder Settings =========================
+# Settings related to output folder locations
+output_folder_settings:
+  root_folder: './results' # Root folder for all outputs (default, can be overridden)
+  # - For schnet_config: maps to settings.logging.folder
+  # - For neuqip_config: maps to root
+
+
+# ========================= Schnet Configuration =========================
+# Settings specific to the Schnet platform.
+schnet_config:
+  settings:
+    # --- General settings ---
+    general:
+      seed: ${common_settings.seed}  # Using common seed (from common_settings)
+      database_name: 'cspbbr3.db'
+
+    # --- Data handling settings ---
+    data:
+      dataset_path: ${dataset.dataset_file} # Using common dataset file path (from dataset)
+
+    # --- Model architecture settings ---
+    model:
+      cutoff: ${model_architecture.cutoff_radius} # Using common cutoff radius (from model_architecture)
+      n_rbf: 20
+      n_atom_basis: 128
+      n_interactions: 8
+      distance_unit: 'Ang'
+      property_unit_dict:
+        energy: 'eV'
+        forces: 'eV/Ang'
+
+    # --- Output settings ---
+    outputs:
+      energy:
+        loss_weight: 0.2
+        metrics: "MAE"
+      forces:
+        loss_weight: 0.8
+        metrics: "MAE"
+
+    # --- Training settings ---
+    training:
+      accelerator: 'gpu'
+      devices: 1
+      precision: 32
+      batch_size: ${common_settings.batch_size} # Using common batch size (from common_settings)
+      num_train: ${training_parameters.train_size} # Using common train size (from training_parameters)
+      num_val: ${training_parameters.validation_size} # Using common validation size (from training_parameters)
+      max_epochs: ${common_settings.max_epochs} # Using common max epochs (from common_settings)
+      num_workers: 24
+      pin_memory: true
+      optimizer:
+        type: 'AdamW'
+        lr: ${common_settings.learning_rate} # Using common learning rate (from common_settings)
+      scheduler:
+        type: 'ReduceLROnPlateau'
+        factor: ${scheduler_settings.lr_factor} # Common scheduler factor
+        patience: ${scheduler_settings.lr_patience} # Common scheduler patience
+        verbose: ${scheduler_settings.lr_verbose} # Common scheduler verbose
+
+    # --- Logging and checkpoint settings ---
+    logging:
+      folder: ${output_folder_settings.root_folder}/schnet # Using common root output folder + schnet subdir
+      log_dir: "lightning_logs"
+      checkpoint_dir: "best_inference_model"
+      monitor: "val_loss"
+
+    # --- Testing settings ---
+    testing:
+      trained_model_path: ${output_folder_settings.root_folder}/schnet # Using common root output folder + schnet subdir
+      csv_file_name: 'actual_vs_predicted_enrgforc.csv'
+
+    # --- Resume training settings ---
+    resume_training:
+      resume_checkpoint_dir: ${output_folder_settings.root_folder}/schnet # Using common root output folder + schnet subdir
+
+# ========================= Neuqip Configuration =========================
+# Settings specific to the Neuqip platform.
+neuqip_config:
+  # --- general ---
+  root: ${output_folder_settings.root_folder}/neuqip # Using common root output folder + neuqip subdir
+  run_name: CsPbBr3
+  seed: ${common_settings.seed} # Using common seed (from common_settings)
+  dataset_seed: ${common_settings.seed} # Using common seed (from common_settings)
+  append: true
+  default_dtype: float32
+
+  # --- network ---
+  model_builders:
+    - allegro.model.Allegro
+    - PerSpeciesRescale
+    - ForceOutput
+    - RescaleEnergyEtc
+
+  # --- cutoffs ---
+  r_max: ${model_architecture.cutoff_radius} # Using common cutoff radius (from model_architecture)
+  avg_num_neighbors: auto
+
+  # --- radial basis ---
+  BesselBasis_trainable: true
+  PolynomialCutoff_p: 6
+
+  # --- symmetry ---
+  l_max: 1
+  parity: o3_full
+
+  # --- Allegro layers ---
+  num_layers: 4
+  env_embed_multiplicity: 8
+  embed_initial_edge: true
+
+  two_body_latent_mlp_latent_dimensions: [32, 64, 128]
+  two_body_latent_mlp_nonlinearity: silu
+  two_body_latent_mlp_initialization: uniform
+
+  latent_mlp_latent_dimensions: [128]
+  latent_mlp_nonlinearity: silu
+  latent_mlp_initialization: uniform
+  latent_resnet: true
+
+  env_embed_mlp_latent_dimensions: []
+  env_embed_mlp_nonlinearity: null
+  env_embed_mlp_initialization: uniform
+
+  # --- Final MLP to edge energies ---
+  edge_eng_mlp_latent_dimensions: [32]
+  edge_eng_mlp_nonlinearity: null
+  edge_eng_mlp_initialization: uniform
+
+  # --- data ---
+  dataset: npz
+  dataset_file_name: ${dataset.dataset_file} # Using common dataset file path (from dataset)
+  key_mapping:
+    z: atomic_numbers
+    E: total_energy
+    F: forces
+    R: pos
+  npz_fixed_field_keys:
+    - atomic_numbers
+
+  chemical_symbols:
+    - Cs
+    - Pb
+    - Br
+
+  # --- logging ---
+  wandb: true
+  wandb_project: allegro-tutorial
+  verbose: info
+  log_batch_freq: 8
+
+  # --- training ---
+  n_train: ${training_parameters.train_size} # Using common train size (from training_parameters)
+  n_val: ${training_parameters.validation_size} # Using common validation size (from training_parameters)
+  batch_size: ${common_settings.batch_size} # Using common batch size (from common_settings)
+  max_epochs: ${common_settings.max_epochs} # Using common max epochs (from common_settings)
+  learning_rate: ${common_settings.learning_rate} # Using common learning rate (from common_settings
+  train_val_split: random
+  shuffle: true
+  metrics_key: validation_loss
+
+  # --- use EMA ---
+  use_ema: true
+  ema_decay: 0.99
+  ema_use_num_updates: true
+
+  # --- loss function ---
+  loss_coeffs:
+    forces: 1.0
+    total_energy:
+      - 1.0
+      - PerAtomMSELoss
+
+  # --- optimizer ---
+  optimizer_name: Adam
+  optimizer_params:
+    amsgrad: ${optimizer_settings.adam_amsgrad} # Common amsgrad
+    betas: ${optimizer_settings.adam_betas}   # Common betas
+    eps: ${optimizer_settings.adam_eps}     # Common eps
+    weight_decay: ${optimizer_settings.adam_weight_decay} # Common weight_decay
+
+  # --- metrics components ---
+  metrics_components:
+    - - forces
+      - mae
+    - - forces
+      - rmse
+    - - total_energy
+      - mae
+    - - total_energy
+      - mae
+      - PerAtom: True
+
+  # --- lr scheduler ---
+  lr_scheduler_name: ReduceLROnPlateau
+  lr_scheduler_patience: ${scheduler_settings.lr_patience} # Common scheduler patienc
+  lr_scheduler_factor: ${scheduler_settings.lr_factor} # Common scheduler factor
+
+  # --- early stopping ---
+  early_stopping_lower_bounds:
+    LR: 1.0e-5
+
+  early_stopping_patiences:
+    validation_loss: 100
