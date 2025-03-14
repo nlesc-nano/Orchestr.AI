@@ -97,6 +97,27 @@ However, if an user wants to specify a different custom configuration file for t
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
 ```
+## YAML Generation for SchNet and Nequip Training
+
+Use the `generate_scripts.py` script to automatically create a YAML configuration file for training. The script requires two parameters: the platform (`-p`) and the output file (`-o`).
+
+### Generate YAML for SchNet
+
+To generate a configuration file for SchNet, run:
+
+```bash
+python generate_scripts.py -p schnet -o schnet.yaml
+```
+
+This command produces `schnet.yaml` with all necessary settings for training using SchNet.
+
+### Generate YAML for Nequip
+
+```bash
+python generate_scripts.py -p nequip -o nequip.yaml
+```
+
+This generates `nequip.yaml`, which is pre-configured for Nequip training.
 
 ### Training locally
 If an user wants to run locally the training code, one can do the following:
@@ -104,3 +125,50 @@ If an user wants to run locally the training code, one can do the following:
 python training.py --config input_file.yaml
 ```
 By default, if no input file is specified, the training code looks for a file called input.yaml.
+
+## Extract Training Metrics from TensorBoard Event Files
+
+This script, `analysis/extract_metrics.py`,  extracts scalar training metrics from TensorBoard event files and saves them to a CSV file.
+
+- **`-p/--path`**:  Path to the TensorBoard event file. **(Required)**.
+- **`-o/--output_file`**: Provides the path to the CSV file containing the training metrics.
+*   Prerequisites **Required Python Packages**:
+    *   `tensorboard`
+    You can install these using pip:
+    ```bash
+    pip install tensorboard
+    ```
+### Command-Line Usage:
+To run the script use the following command:
+
+```bash
+python analysis/extract_metrics.py -p <event_file_path> [-o <output_file_name>]
+```
+
+## Plotting Training Metrics for SchNet and Nequip
+
+The `analysis/plot.py` script allows you to visualize training progress for your models. It accepts several command-line options to control its behavior. Here’s what each option means:
+
+- **`--platform`**: Specifies the model platform. Use either `schnet` or `nequip`.
+- **`--file`**: Provides the path to the CSV file containing the training metrics.
+- **`--cols`**: Sets the number of columns for the subplot grid (default is 2).
+- **`--out`**: Defines the output file name for the saved plot. The name should end with `.png`.
+
+
+### Plotting SchNet Results
+
+To plot the results for SchNet, use the following command:
+```bash
+python analysis/plot.py --platform schnet --file "path/to/schnet_metrics.csv" --cols 2 --out schnet_plot.png
+```
+Replace "path/to/schnet_metrics.csv" with the actual path to your SchNet metrics CSV file. 
+
+### Plotting Nequip Results
+
+To plot the results for Nequip, use the following command:
+```bash
+python analysis/plot.py --platform nequip --file "path/to/nequip_metrics.csv" --cols 2 --out nequip_plot.png
+```
+Replace "path/to/nequip_metrics.csv" with the actual path to your Nequip metrics CSV file.
+
+These commands will generate plots for the respective platforms and save them as PNG files in the current working directory.
