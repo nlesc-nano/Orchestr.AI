@@ -14,6 +14,9 @@ settings:
     n_rbf: 20
     n_atom_basis: 128
     n_interactions: 8
+    dropout_rate: 0.3 # Default is 0.1 but it will not work when you select only 1 layer
+    n_layers: 5  # Default is 1
+    n_neurons: null # [256, 128, 64, 32] (if null then n_neurons == n_atom_basis)
     distance_unit: 'Ang'
     property_unit_dict:
       energy: 'kcal/mol'
