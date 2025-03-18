@@ -210,7 +210,8 @@ def generate_surface_core_pca_samples(
     num_samples, 
     scaling_surf=0.6, 
     scaling_core=0.4,
-    medoid_structure_file="medoid_structure.xyz"
+    medoid_structure_file="medoid_structure.xyz",
+    surface_replaced_file="surface_replaced.xyz"
 ):
     """
     Generate PCA-based samples for surface and core atoms separately,
@@ -224,6 +225,7 @@ def generate_surface_core_pca_samples(
         representative_md (list): Subset of frames used as seeds.
         num_samples (int): Number of PCA-based samples to generate.
         medoid_structure_file (str): Path to the structure used to identify surface atoms (default "medoid_structure.xyz").
+        surface_replaced_file (str): Path to the replaced-surface structure (default is "surface_replaced.xyz").
 
     Returns:
         np.ndarray: Array of shape (num_samples, num_atoms, 3) with new perturbed structures.
@@ -234,7 +236,7 @@ def generate_surface_core_pca_samples(
     logger.info("Identifying surface vs. core atoms...")
     surface_repl_file = "surface_replaced.xyz"
     surface_indices, _ = compute_surface_indices_with_replace_surface_dynamic(
-        medoid_structure_file, surface_atom_types, f=1.0, surface_replaced_file=surface_repl_file
+        medoid_structure_file, surface_atom_types, f=1.0, surface_replaced_file=surface_replaced_file
     )
     num_atoms = md_positions.shape[1]  # simpler: shape => (num_frames, num_atoms, 3)
     core_indices = np.setdiff1d(np.arange(num_atoms), surface_indices)

@@ -559,9 +559,10 @@ if __name__ == "__main__":
                                                num_samples_pca, scaling_factor, pca_variance_threshold=0.90)
     
     medoid_structure_path = PROJECT_ROOT / "data" / "processed" / "medoid_structure.xyz"
+    surface_replaced_path = PROJECT_ROOT / "data" / "processed" / "surface_replaced.xyz"
     pca_surface_samples = generate_surface_core_pca_samples(md_positions, md_forces, atom_types, surface_atom_types,
             representative_md, num_samples_pca_surface, scaling_surf, scaling_core,
-            medoid_structure_path) 
+            medoid_structure_path, surface_replaced_path) 
     
     randomized_samples = generate_randomized_samples(representative_md, atom_types, num_samples_randomization,
                                                      max_random_displacement)
