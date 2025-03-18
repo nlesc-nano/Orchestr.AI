@@ -586,11 +586,15 @@ if __name__ == "__main__":
             combined_list.append(samples_arr)
             for i in range(len(samples)):
                 frame_titles.append(f"Frame {i+1} from {name}")
+    
     training_dataset = np.vstack(combined_list).reshape(-1, num_atoms, 3)
-    with open("training_dataset.xyz", "w") as f:
+    
+    training_dataset_path = PROJECT_ROOT / "data" / "processed" / "training_dataset.xyz"
+    with open(training_dataset_path, "w") as f:
         for i, (struct, title) in enumerate(zip(training_dataset, frame_titles)):
             f.write(f"{len(struct)}\n{title}\n")
             for atom, coords in zip(atom_types, struct):
                 f.write(f"{atom} {coords[0]:.6f} {coords[1]:.6f} {coords[2]:.6f}\n")
+    
     logger.info(f"Saved training dataset with {training_dataset.shape[0]} structures to 'training_dataset.xyz'")
 
