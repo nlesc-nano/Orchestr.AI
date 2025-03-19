@@ -29,7 +29,8 @@ from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions
         parse_forces_xyz, get_num_atoms )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
-from mlff_qd.utils.preprocessing import create_mass_dict, center_positions
+from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
+        align_to_reference )
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -39,19 +40,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def align_to_reference(positions, reference):
-    """Align each frame to the reference using SVD."""
-    num_frames = positions.shape[0]
-    aligned = np.zeros_like(positions)
-    rotations = np.zeros((num_frames, 3, 3))
-    for i, frame in enumerate(positions):
-        H = frame.T @ reference
-        U, _, Vt = np.linalg.svd(H)
-        Rmat = U @ Vt
-        rotations[i] = Rmat
-        aligned[i] = frame @ Rmat.T
-    return aligned, rotations
-
 def iterative_alignment_fixed(centered_positions, tol=1e-6, max_iter=10):
     """Iteratively align positions to a converged reference."""
     ref = centered_positions[0]

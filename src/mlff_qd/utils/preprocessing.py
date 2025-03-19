@@ -34,28 +34,20 @@ def center_positions(positions, masses):
     
     return positions - com[:, None, :]
 
-def align_to_reference(positions, reference_positions):
-    """
-    Align atomic positions of each frame to a reference structure using least-squares fitting.
-
-    Parameters:
-        positions (np.ndarray): Atomic positions (num_frames, num_atoms, 3).
-        reference_positions (np.ndarray): Reference positions (num_atoms, 3).
-
-    Returns:
-        np.ndarray: Aligned atomic positions (num_frames, num_atoms, 3).
-    """
-    aligned_positions = np.zeros_like(positions)
-    for frame_idx, frame in enumerate(positions):
-        # Calculate optimal rotation matrix
-        H = frame.T @ reference_positions
-        U, _, Vt = np.linalg.svd(H)
-        rotation_matrix = U @ Vt
-
-        # Apply rotation to align the frame
-        aligned_positions[frame_idx] = frame @ rotation_matrix.T
+def align_to_reference(positions, reference):
+    """Align each frame to the reference using SVD."""
+    num_frames = positions.shape[0]
+    aligned = np.zeros_like(positions)
+    rotations = np.zeros((num_frames, 3, 3))
     
-    return aligned_positions
+    for i, frame in enumerate(positions):
+        H = frame.T @ reference
+        U, _, Vt = np.linalg.svd(H)
+        Rmat = U @ Vt
+        rotations[i] = Rmat
+        aligned[i] = frame @ Rmat.T
+    
+    return aligned, rotations
 
 def rotate_forces(forces, rotation_matrices):
     """
