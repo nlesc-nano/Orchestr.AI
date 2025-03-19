@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Reworked MLFF dataset generation script.
-
-Key improvements:
-• Redundant functions removed.
-• All generated plots are saved to files.
-"""
 
 import os
 import pickle
@@ -30,6 +23,8 @@ from CAT.recipes import replace_surface
 
 from mlff_qd.utils.analysis import compute_global_distance_fluctuation_cdist
 from mlff_qd.utils.config import load_config
+from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
+        bohr_to_angstrom, amu_to_kg, c )
 from mlff_qd.utils.io import save_xyz, reorder_xyz_trajectory
 from mlff_qd.utils.pca import generate_surface_core_pca_samples
 
@@ -39,13 +34,6 @@ logging.basicConfig(level=logging.INFO,
                     handlers=[logging.StreamHandler(),
                               logging.FileHandler("mlff_dataset.log")])
 logger = logging.getLogger(__name__)
-
-# --- Constants ---
-hartree_bohr_to_eV_angstrom = 51.42208619083232
-hartree_to_eV = 27.211386245988
-bohr_to_angstrom = 0.529177210903
-amu_to_kg = 1.66053906660e-27
-c = 2.99792458e10
 
 # --- Utility Functions ---
 def generate_pca_samples_in_pca_space(ref_descriptor, pca, n_samples, scaling_factor):
