@@ -50,21 +50,12 @@ def align_to_reference(positions, reference):
     return aligned, rotations
 
 def rotate_forces(forces, rotation_matrices):
-    """
-    Rotate forces for each frame to match the aligned orientation.
-
-    Parameters:
-        forces (np.ndarray): Atomic forces (num_frames, num_atoms, 3).
-        rotation_matrices (np.ndarray): Rotation matrices (num_frames, 3, 3).
-
-    Returns:
-        np.ndarray: Rotated forces (num_frames, num_atoms, 3).
-    """
-    rotated_forces = np.zeros_like(forces)
-    for frame_idx, frame_forces in enumerate(forces):
-        rotated_forces[frame_idx] = frame_forces @ rotation_matrices[frame_idx]
+    """Rotate forces using the corresponding rotation matrices."""
+    rotated = np.zeros_like(forces)
+    for i, frame in enumerate(forces):
+        rotated[i] = frame @ rotation_matrices[i].T
     
-    return rotated_forces
+    return rotated
 
 def create_mass_dict(atom_types):
     """

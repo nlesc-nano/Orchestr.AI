@@ -30,7 +30,7 @@ from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
-        align_to_reference, iterative_alignment_fixed )
+        align_to_reference, iterative_alignment_fixed, rotate_forces )
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -40,13 +40,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def rotate_forces(forces, rotation_matrices):
-    """Rotate forces using the corresponding rotation matrices."""
-    rotated = np.zeros_like(forces)
-    for i, frame in enumerate(forces):
-        rotated[i] = frame @ rotation_matrices[i].T
-    return rotated
-
 def find_medoid_structure(aligned_positions):
     """Find the medoid structure from aligned positions."""
     rmsd_mat = compute_rmsd_matrix(aligned_positions)
