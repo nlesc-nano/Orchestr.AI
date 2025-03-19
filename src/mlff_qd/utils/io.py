@@ -191,6 +191,6 @@ def get_num_atoms(filename):
     with open(filename, "r") as f:
         num_atoms = int(f.readline().strip())
     
-    print(f"Number of atoms: {num_atoms}")
+    logger.info(f"Number of atoms: {num_atoms}")
     
     return num_atoms

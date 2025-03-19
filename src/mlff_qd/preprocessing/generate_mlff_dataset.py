@@ -26,7 +26,7 @@ from mlff_qd.utils.config import load_config
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
 from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz,
-        parse_forces_xyz )
+        parse_forces_xyz, get_num_atoms )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
 
@@ -38,13 +38,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def get_num_atoms(filename):
-    """Return number of atoms from the first line of an XYZ file."""
-    with open(filename, "r") as f:
-        num = int(f.readline().strip())
-    logger.info(f"Number of atoms: {num}")
-    return num
-
 def create_mass_dict(atom_types):
     """Return a dict mapping atom types to their masses."""
     mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
