@@ -25,7 +25,7 @@ from mlff_qd.utils.analysis import compute_global_distance_fluctuation_cdist
 from mlff_qd.utils.config import load_config
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
-from mlff_qd.utils.io import save_xyz, reorder_xyz_trajectory
+from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
 
@@ -37,50 +37,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def parse_positions_xyz(filename, num_atoms):
-    """
-    Parse positions from an XYZ file.
-
-    Parameters:
-        filename (str): Path to the XYZ file.
-        num_atoms (int): Number of atoms in each frame.
-
-    Returns:
-        np.ndarray: Atomic positions (num_frames, num_atoms, 3).
-        list: Atomic types.
-        list: Total energies for each frame (if available; otherwise, empty list).
-    """
-    print(f"Parsing positions XYZ file: {filename}")
-    positions = []
-    atom_types = []
-    total_energies = []
-
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2  # 2 lines for header and comment
-
-        for i in range(0, len(lines), num_lines_per_frame):
-            atom_lines = lines[i + 2:i + 2 + num_atoms]
-            comment_line = lines[i + 1]
-
-            # Try parsing the energy; otherwise, skip
-            try:
-                total_energy = float(comment_line.split("=")[-1].strip())
-                total_energies.append(total_energy)
-            except ValueError:
-                total_energies.append(None)  # Placeholder for missing energy
-
-            frame_positions = []
-            for line in atom_lines:
-                parts = line.split()
-                atom_types.append(parts[0])
-                frame_positions.append([float(x) for x in parts[1:4]])
-
-            positions.append(frame_positions)
-
-    return np.array(positions), atom_types[:num_atoms], total_energies
-
-
 def parse_forces_xyz(filename, num_atoms):
     logger.info(f"Parsing forces XYZ file: {filename}")
     forces = []

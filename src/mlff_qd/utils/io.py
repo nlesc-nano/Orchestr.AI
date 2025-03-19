@@ -2,6 +2,9 @@ import numpy as np
 import pickle 
 from pathlib import Path
 
+import logging
+logger = logging.getLogger(__name__)
+
 def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
     """
     Save atomic positions to an XYZ file in 'data/processed'.
@@ -129,7 +132,7 @@ def parse_positions_xyz(filename, num_atoms):
         list: Atomic types.
         list: Total energies for each frame (if available; otherwise, empty list).
     """
-    print(f"Parsing positions XYZ file: {filename}")
+    logger.info(f"Parsing positions XYZ file: {filename}")
     positions = []
     atom_types = []
     total_energies = []
