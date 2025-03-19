@@ -344,3 +344,26 @@ def generate_surface_core_pca_samples(
     save_xyz("pca_surface_core_combined_samples_no_soap.xyz", new_structures, atom_types)
     logger.info("Saved PCA-based surface-core samples (no SOAP) to 'pca_surface_core_combined_samples_no_soap.xyz'")
     return new_structures
+
+def generate_pca_samples_in_pca_space(ref_descriptor, pca, n_samples, scaling_factor):
+    """
+    Given a descriptor in the *normalized* space (the same dimension PCA was fit on),
+    return random samples in PCA space that we can transform back outside this function.
+
+    Steps:
+    1. transform => PCA coords
+    2. random perturbation => new PCA coords
+    3. Return the new PCA coords directly (no inverse_transform here)
+    """
+    
+    # Convert descriptor to PCA space
+    ref_coeffs = pca.transform(ref_descriptor.reshape(1, -1))[0]
+    new_samples_pca = []
+    
+    for _ in range(n_samples):
+        # Add random noise in PCA space
+        perturbation = np.random.normal(scale=scaling_factor, size=ref_coeffs.shape)
+        new_coeffs = ref_coeffs + perturbation
+        new_samples_pca.append(new_coeffs)
+    
+    return np.array(new_samples_pca)  # shape: (n_samples, pca_dim)

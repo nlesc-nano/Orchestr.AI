@@ -26,7 +26,8 @@ from mlff_qd.utils.config import load_config
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
 from mlff_qd.utils.io import save_xyz, reorder_xyz_trajectory
-from mlff_qd.utils.pca import generate_surface_core_pca_samples
+from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
+        generate_pca_samples_in_pca_space )
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -36,27 +37,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def generate_pca_samples_in_pca_space(ref_descriptor, pca, n_samples, scaling_factor):
-    """
-    Given a descriptor in the *normalized* space (the same dimension PCA was fit on),
-    return random samples in PCA space that we can transform back outside this function.
-
-    Steps:
-    1. transform => PCA coords
-    2. random perturbation => new PCA coords
-    3. Return the new PCA coords directly (no inverse_transform here)
-    """
-    # Convert descriptor to PCA space
-    ref_coeffs = pca.transform(ref_descriptor.reshape(1, -1))[0]
-    new_samples_pca = []
-    for _ in range(n_samples):
-        # Add random noise in PCA space
-        perturbation = np.random.normal(scale=scaling_factor, size=ref_coeffs.shape)
-        new_coeffs = ref_coeffs + perturbation
-        new_samples_pca.append(new_coeffs)
-    return np.array(new_samples_pca)  # shape: (n_samples, pca_dim)
-
-
 def parse_positions_xyz(filename, num_atoms):
     """
     Parse positions from an XYZ file.
