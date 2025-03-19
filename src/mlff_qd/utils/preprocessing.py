@@ -27,17 +27,12 @@ def center_positions(positions, masses):
         np.ndarray: Centered atomic positions (num_frames, num_atoms, 3).
     """
     num_frames, num_atoms, _ = positions.shape
-    com_frames = np.zeros((num_frames, 3))
-
-    # Calculate COM for each frame
-    for frame_idx in range(num_frames):
-        com_frames[frame_idx] = np.sum(
-            positions[frame_idx] * masses[:, np.newaxis], axis=0
-        ) / masses.sum()
-
-    # Subtract COM from all positions
-    centered_positions = positions - com_frames[:, np.newaxis, :]
-    return centered_positions
+    com = np.zeros((num_frames, 3))
+    
+    for i in range(num_frames):
+        com[i] = np.sum(positions[i] * masses[:, None], axis=0) / masses.sum()
+    
+    return positions - com[:, None, :]
 
 def align_to_reference(positions, reference_positions):
     """

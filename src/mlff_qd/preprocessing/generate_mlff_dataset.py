@@ -29,7 +29,7 @@ from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions
         parse_forces_xyz, get_num_atoms )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
-from mlff_qd.utils.preprocessing import create_mass_dict
+from mlff_qd.utils.preprocessing import create_mass_dict, center_positions
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -39,14 +39,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def center_positions(positions, masses):
-    """Center positions by subtracting the center-of-mass."""
-    num_frames, num_atoms, _ = positions.shape
-    com = np.zeros((num_frames, 3))
-    for i in range(num_frames):
-        com[i] = np.sum(positions[i] * masses[:, None], axis=0) / masses.sum()
-    return positions - com[:, None, :]
-
 def align_to_reference(positions, reference):
     """Align each frame to the reference using SVD."""
     num_frames = positions.shape[0]
