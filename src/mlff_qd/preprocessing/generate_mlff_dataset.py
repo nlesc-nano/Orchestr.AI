@@ -30,7 +30,7 @@ from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
-        align_to_reference )
+        align_to_reference, iterative_alignment_fixed )
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -40,19 +40,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def iterative_alignment_fixed(centered_positions, tol=1e-6, max_iter=10):
-    """Iteratively align positions to a converged reference."""
-    ref = centered_positions[0]
-    prev_ref = None
-    for _ in range(max_iter):
-        aligned, rotations = align_to_reference(centered_positions, ref)
-        new_ref = np.mean(aligned, axis=0)
-        if prev_ref is not None and np.linalg.norm(new_ref - prev_ref) < tol:
-            break
-        prev_ref = new_ref
-        ref = new_ref
-    return aligned, rotations, new_ref
-
 def rotate_forces(forces, rotation_matrices):
     """Rotate forces using the corresponding rotation matrices."""
     rotated = np.zeros_like(forces)

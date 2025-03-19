@@ -128,3 +128,18 @@ def generate_randomized_samples(
     print(f"Saved {len(randomized_structures)} randomized samples to 'randomized_samples.xyz'.")
 
     return np.array(randomized_structures)
+
+def iterative_alignment_fixed(centered_positions, tol=1e-6, max_iter=10):
+    """Iteratively align positions to a converged reference."""
+    ref = centered_positions[0]
+    prev_ref = None
+    
+    for _ in range(max_iter):
+        aligned, rotations = align_to_reference(centered_positions, ref)
+        new_ref = np.mean(aligned, axis=0)
+        if prev_ref is not None and np.linalg.norm(new_ref - prev_ref) < tol:
+            break
+        prev_ref = new_ref
+        ref = new_ref
+    
+    return aligned, rotations, new_ref
