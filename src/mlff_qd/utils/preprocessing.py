@@ -12,6 +12,9 @@ from scm.plams import Molecule
 
 from mlff_qd.utils.io import save_xyz
 
+import logging
+logger = logging.getLogger(__name__)
+
 def center_positions(positions, masses):
     """
     Center atomic positions by translating the center of mass (COM) to the origin.
@@ -86,9 +89,8 @@ def create_mass_dict(atom_types):
     Returns:
         dict: Dictionary where keys are atom types and values are atomic masses.
     """
-
     mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
-    print(f"Generated mass dictionary: {mass_dict}")
+    logger.info(f"Generated mass dictionary: {mass_dict}")
     return mass_dict
 
 def generate_randomized_samples(
