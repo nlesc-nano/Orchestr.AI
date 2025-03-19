@@ -164,7 +164,7 @@ def parse_positions_xyz(filename, num_atoms):
 
 def parse_forces_xyz(filename, num_atoms):
     """Parse forces from an XYZ file."""
-    print(f"Parsing forces XYZ file: {filename}")
+    logger.info(f"Parsing forces XYZ file: {filename}")
     forces = []
     with open(filename, "r") as f:
         lines = f.readlines()
