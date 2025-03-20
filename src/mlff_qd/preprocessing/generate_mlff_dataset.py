@@ -32,7 +32,8 @@ from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space, generate_structures_from_pca )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
-        align_to_reference, iterative_alignment_fixed, rotate_forces, find_medoid_structure )
+        align_to_reference, iterative_alignment_fixed, rotate_forces, find_medoid_structure,
+        generate_randomized_samples )
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -42,20 +43,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def generate_randomized_samples(md_positions, atom_types, num_samples=100, base_scale=0.1):
-    """Generate random structures by Gaussian perturbation."""
-    randomized = []
-    for i in range(num_samples):
-        ref = random.choice(md_positions)
-        disp = np.random.normal(0, base_scale, size=ref.shape)
-        disp -= np.mean(disp, axis=0)
-        randomized.append(ref + disp)
-        if (i+1) % 100 == 0 or i==0:
-            logger.info(f"Generated {i+1}/{num_samples} randomized samples...")
-    save_xyz("randomized_samples.xyz", randomized, atom_types)
-    logger.info("Saved randomized samples to 'randomized_samples.xyz'")
-    return np.array(randomized)
-
 def plot_generated_samples_extended(combined_samples, atom_types, soap):
     """
     Plot PCA visualizations using:

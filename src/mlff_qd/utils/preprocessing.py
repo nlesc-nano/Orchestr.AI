@@ -72,54 +72,24 @@ def create_mass_dict(atom_types):
     logger.info(f"Generated mass dictionary: {mass_dict}")
     return mass_dict
 
-def generate_randomized_samples(
-    md_positions,
-    atom_types,
-    num_samples=100,
-    base_scale=0.1
-):
-    """
-    Generate random configurations by applying Gaussian perturbations to atomic positions.
-    The displacements are fixed in scale and not adjusted to match any RMSD target.
-
-    Parameters:
-        md_positions (list of np.ndarray): List of MD frames (num_frames, num_atoms, 3).
-        atom_types (list of str): Atom types for each atom in the structure.
-        num_samples (int): Number of randomized configurations to generate.
-        base_scale (float): Standard deviation of the Gaussian noise applied to displace each atom.
-
-    Returns:
-        np.ndarray: Array of randomized configurations (num_samples, num_atoms, 3).
-    """
-    randomized_structures = []
-
+def generate_randomized_samples(md_positions, atom_types, num_samples=100, base_scale=0.1):
+    """Generate random structures by Gaussian perturbation."""
+    randomized = []
+    
     for i in range(num_samples):
-        # Select a random reference frame
-        start_idx = np.random.choice(len(md_positions))
-        reference_positions = md_positions[start_idx]
-
-        # Generate random displacements
-        displacement = np.random.normal(loc=0.0, scale=base_scale, size=reference_positions.shape)
-
-        # Remove net translation
-        mean_disp = np.mean(displacement, axis=0)  # Average over all atoms
-        displacement -= mean_disp  # Now no net translation
-
-        # Apply displacements to the reference positions
-        randomized_structure = reference_positions + displacement
-        randomized_structures.append(randomized_structure)
-
-        # Print progress every 100 samples or for the first sample
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"Generating sample {i + 1}/{num_samples}...")
-
-    print(f"Generated {len(randomized_structures)} randomized samples.")
-
-    # Save the randomized samples
-    save_xyz("randomized_samples.xyz", randomized_structures, atom_types)
-    print(f"Saved {len(randomized_structures)} randomized samples to 'randomized_samples.xyz'.")
-
-    return np.array(randomized_structures)
+        ref = random.choice(md_positions)
+        disp = np.random.normal(0, base_scale, size=ref.shape)
+        disp -= np.mean(disp, axis=0)
+        randomized.append(ref + disp)
+    
+        if (i+1) % 100 == 0 or i==0:
+            logger.info(f"Generated {i+1}/{num_samples} randomized samples...")
+    
+    save_xyz("randomized_samples.xyz", randomized, atom_types)
+    
+    logger.info("Saved randomized samples to 'randomized_samples.xyz'")
+    
+    return np.array(randomized)
 
 def iterative_alignment_fixed(centered_positions, tol=1e-6, max_iter=10):
     """Iteratively align positions to a converged reference."""
