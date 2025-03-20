@@ -41,20 +41,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def plot_rmsd_histogram(rmsd_matrix, bins=50, title="RMSD Histogram", xlabel="RMSD (Å)", ylabel="Frequency", savefile="rmsd_histogram.png"):
-    """Plot and save RMSD histogram."""
-    rmsd_vals = rmsd_matrix[np.triu_indices_from(rmsd_matrix, k=1)]
-    plt.figure(figsize=(8, 6))
-    plt.hist(rmsd_vals, bins=bins, edgecolor="black", alpha=0.75)
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.grid(axis="y", linestyle="--", alpha=0.7)
-    plt.tight_layout()
-    plt.savefig(savefile)
-    logger.info(f"Saved RMSD histogram plot to {savefile}")
-    plt.close()
-
 def compute_soap_descriptors(md_positions, atom_types, soap):
     """Compute a global (averaged) SOAP descriptor for each MD frame."""
     descriptors = []

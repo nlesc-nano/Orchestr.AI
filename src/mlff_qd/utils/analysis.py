@@ -67,7 +67,7 @@ def compute_rmsd_matrix(structures1, structures2=None):
 
     return rmsd_matrix
 
-def plot_rmsd_histogram(rmsd_matrix, bins=50, title="RMSD Histogram", xlabel="RMSD (Å)", ylabel="Frequency"):
+def plot_rmsd_histogram(rmsd_matrix, bins=50, title="RMSD Histogram", xlabel="RMSD (Å)", ylabel="Frequency", savefile="rmsd_histogram.png"):
     """
     Plot a histogram of RMSD values from an RMSD matrix.
 
@@ -89,7 +89,10 @@ def plot_rmsd_histogram(rmsd_matrix, bins=50, title="RMSD Histogram", xlabel="RM
     plt.ylabel(ylabel)
     plt.grid(axis="y", linestyle="--", alpha=0.7)
     plt.tight_layout()
-    plt.show()
+    # Save the histogram
+    plt.savefig(savefile)
+    logger.info(f"Saved RMSD histogram plot to {savefile}")
+    plt.close()
 
 def plot_generated_samples(combined_samples):
     """
