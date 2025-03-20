@@ -21,7 +21,8 @@ from periodictable import elements
 from scm.plams import Molecule
 from CAT.recipes import replace_surface
 
-from mlff_qd.utils.analysis import compute_global_distance_fluctuation_cdist
+from mlff_qd.utils.analysis import ( compute_global_distance_fluctuation_cdist,
+        compute_rmsd_matrix )
 from mlff_qd.utils.config import load_config
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
@@ -40,29 +41,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def compute_rmsd_matrix(structures1, structures2=None):
-    """Compute RMSD matrix between two sets of structures."""
-    structures1 = np.array(structures1)
-    if structures2 is None:
-        structures2 = structures1
-        symmetric = True
-    else:
-        structures2 = np.array(structures2)
-        symmetric = False
-    N1, A, _ = structures1.shape
-    N2 = structures2.shape[0]
-    if symmetric:
-        rmsd_mat = np.zeros((N1, N2))
-        for i in range(N1):
-            diff = structures1[i:] - structures1[i]
-            rmsd_vals = np.sqrt(np.sum(diff**2, axis=(1,2)) / A)
-            rmsd_mat[i, i:] = rmsd_vals
-            rmsd_mat[i:, i] = rmsd_vals
-    else:
-        diff = structures1[:, None, :, :] - structures2[None, :, :, :]
-        rmsd_mat = np.sqrt(np.sum(diff**2, axis=(2,3)) / A)
-    return rmsd_mat
-
 def plot_rmsd_histogram(rmsd_matrix, bins=50, title="RMSD Histogram", xlabel="RMSD (Å)", ylabel="Frequency", savefile="rmsd_histogram.png"):
     """Plot and save RMSD histogram."""
     rmsd_vals = rmsd_matrix[np.triu_indices_from(rmsd_matrix, k=1)]
