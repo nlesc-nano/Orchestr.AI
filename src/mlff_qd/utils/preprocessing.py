@@ -10,6 +10,7 @@ from periodictable import elements
 from scipy.spatial.transform import Rotation as R
 from scm.plams import Molecule
 
+from mlff_qd.utils.analysis import compute_rmsd_matrix
 from mlff_qd.utils.io import save_xyz
 
 import logging
@@ -134,3 +135,10 @@ def iterative_alignment_fixed(centered_positions, tol=1e-6, max_iter=10):
         ref = new_ref
     
     return aligned, rotations, new_ref
+
+def find_medoid_structure(aligned_positions):
+    """Find the medoid structure from aligned positions."""
+    rmsd_mat = compute_rmsd_matrix(aligned_positions)
+    mean_rmsd = np.mean(rmsd_mat, axis=1)
+    idx = np.argmin(mean_rmsd)
+    return aligned_positions[idx], idx

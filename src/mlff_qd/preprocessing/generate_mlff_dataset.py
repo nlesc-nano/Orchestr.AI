@@ -30,7 +30,7 @@ from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
         generate_pca_samples_in_pca_space )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
-        align_to_reference, iterative_alignment_fixed, rotate_forces )
+        align_to_reference, iterative_alignment_fixed, rotate_forces, find_medoid_structure )
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO,
@@ -40,13 +40,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def find_medoid_structure(aligned_positions):
-    """Find the medoid structure from aligned positions."""
-    rmsd_mat = compute_rmsd_matrix(aligned_positions)
-    mean_rmsd = np.mean(rmsd_mat, axis=1)
-    idx = np.argmin(mean_rmsd)
-    return aligned_positions[idx], idx
-
 def compute_rmsd_matrix(structures1, structures2=None):
     """Compute RMSD matrix between two sets of structures."""
     structures1 = np.array(structures1)
