@@ -23,6 +23,7 @@ from CAT.recipes import replace_surface
 
 from mlff_qd.utils.analysis import ( compute_global_distance_fluctuation_cdist,
         compute_rmsd_matrix )
+from mlff_qd.utils.cluster import compute_soap_descriptors
 from mlff_qd.utils.config import load_config
 from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
         bohr_to_angstrom, amu_to_kg, c )
@@ -41,15 +42,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def compute_soap_descriptors(md_positions, atom_types, soap):
-    """Compute a global (averaged) SOAP descriptor for each MD frame."""
-    descriptors = []
-    for pos in md_positions:
-        atoms = Atoms(symbols=atom_types, positions=pos)
-        soap_desc = soap.create(atoms)
-        descriptors.append(np.mean(soap_desc, axis=0))
-    return np.array(descriptors)
-
 def cluster_trajectory(descriptor_matrix, method, num_clusters, md_positions, atom_types):
     """Cluster the MD trajectory using the provided descriptor matrix and return representative structures."""
     logger.info("Clustering MD trajectory based on SOAP descriptors...")
@@ -207,7 +199,6 @@ def plot_generated_samples_extended(combined_samples, atom_types, soap):
         atom_types (list): List of atom type labels.
         soap: DScribe SOAP descriptor object.
     """
-    from ase import Atoms
     from sklearn.decomposition import PCA
     import matplotlib.pyplot as plt
     import numpy as np

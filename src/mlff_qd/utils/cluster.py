@@ -14,6 +14,7 @@ from sklearn.cluster import KMeans
 from sklearn.cluster import DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
+from ase import Atoms
 
 from mlff_qd.utils.io import save_xyz
 
@@ -75,3 +76,14 @@ def cluster_trajectory(rmsd_md_internal, clustering_method, num_clusters, md_pos
     save_xyz("clustered_md_sample.xyz", clustered_md, atom_types)
 
     return clustered_md
+
+def compute_soap_descriptors(md_positions, atom_types, soap):
+    """Compute a global (averaged) SOAP descriptor for each MD frame."""
+    descriptors = []
+    
+    for pos in md_positions:
+        atoms = Atoms(symbols=atom_types, positions=pos)
+        soap_desc = soap.create(atoms)
+        descriptors.append(np.mean(soap_desc, axis=0))
+    
+    return np.array(descriptors)
