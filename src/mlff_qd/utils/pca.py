@@ -113,93 +113,103 @@ def perform_pca_and_plot(datasets, num_components=2, labels=None, ax=None):
         plt.show()
 
 def generate_structures_from_pca(
-    rmsd_md_internal,
     md_positions,
+    md_forces,
     representative_md,
     atom_types,
     num_samples,
-    max_displacement,
-    temperature,
-    temperature_target
+    scaling_factor=0.4,
+    pca_variance_threshold=0.90
 ):
     """
-    Generate PCA-based structures from a given MD trajectory and save them to "pca_generated_samples.xyz".
+    Generate PCA-based structures using combined descriptors of positions and forces ONLY.
+    Skips SOAP entirely.
 
     Parameters:
-        rmsd_md_internal (np.ndarray): RMSD matrix of the MD trajectory (N x N).
-        md_positions (list of np.ndarray): Aligned MD frames, each frame is (num_atoms, 3).
-        representative_md (list of np.ndarray): A subset of MD frames used as reference frames.
-        atom_types (list of str): Atom types for each atom in the structure.
-        num_samples (int): Number of PCA-based samples to generate.
-        generate_pca_samples (function): Function to generate samples given a reference structure and PCA model.
-        max_displacement (float): Maximum displacement cap to apply to the scaling factors.
-        temperature (float): Temperature at which the MD was performed.
-        temperature_target (float): Target temperature for scaling.
+        md_positions (np.ndarray): MD frames, shape (num_frames, num_atoms, 3)
+        md_forces (np.ndarray): MD forces, shape (num_frames, num_atoms, 3)
+        representative_md (list of np.ndarray): Subset of frames used as "reference" seeds
+        atom_types (list): Atom types
+        num_samples (int): How many new structures to generate
+        pca_variance_threshold (float): Fraction of variance to keep (e.g. 0.90)
 
     Returns:
-        np.ndarray: Array of PCA-generated structures with shape (num_samples, num_atoms, 3).
+        np.ndarray: Array of shape (num_samples, num_atoms, 3) with the new generated structures.
     """
-    print("Computing RMSD-based scaling factor...")
-    rmsd_values = np.mean(rmsd_md_internal, axis=1)  # Mean RMSD of each frame to all others
-    rmsd_scaling_factor = np.mean(rmsd_values)
-    print(f"RMSD-based scaling factor: {rmsd_scaling_factor:.2f}")
+    logger.info("Generating PCA-based structures from positions+forces only (no SOAP).")
 
-    # Perform PCA on the full aligned MD trajectory
-    flattened_md_positions = np.array([frame.flatten() for frame in md_positions])  # (N_frames, num_atoms*3)
+    # 1) Build descriptors (positions and forces flattened)
+    #    shape => (num_frames, 6*num_atoms)
+    descriptors = []
+    for pos, frc in zip(md_positions, md_forces):
+        pf = np.concatenate([pos.flatten(), frc.flatten()])  # shape => (6*num_atoms,)
+        descriptors.append(pf)
+    descriptors = np.array(descriptors)
+    logger.info(f"Built descriptor matrix of shape: {descriptors.shape}")
+
+    # 2) Normalize (standardize) each feature
+    scaler = StandardScaler()
+    descriptors_norm = scaler.fit_transform(descriptors)
+
+    # 3) PCA on normalized descriptors
     pca = PCA()
-    pca.fit(flattened_md_positions)
+    pca.fit(descriptors_norm)
+    cumvar = np.cumsum(pca.explained_variance_ratio_)
+    opt_comp = np.argmax(cumvar >= pca_variance_threshold) + 1
+    logger.info(f"Optimal PCA components: {opt_comp} (captures {cumvar[opt_comp-1]*100:.2f}% variance)")
+    pca = PCA(n_components=opt_comp)
+    pca.fit(descriptors_norm)
 
-    # Determine the number of components to capture at least 90% variance
-    explained_variance = np.cumsum(pca.explained_variance_ratio_)
-    optimal_components = np.argmax(explained_variance >= 0.90) + 1
-    print(
-        f"Optimal number of PCA components: {optimal_components} "
-        f"(captures {explained_variance[optimal_components - 1] * 100:.2f}% variance)"
-    )
+    # 4) We'll just set scaling_factor = max_displacement directly
+    #    If you prefer a distance-based approach, do that here.
+    distance_flucts = compute_global_distance_fluctuation_cdist(md_positions)
+    mean_dist_fluct = np.mean(distance_flucts)
+    max_dist_fluct  = np.max(distance_flucts)
+    print(f"Mean distance fluctuation = {mean_dist_fluct:.3f}")
+    print(f"Max distance fluctuation  = {max_dist_fluct:.3f}")
+    logger.info(f"Sampling amplitude (scaling_factor) set to {scaling_factor:.2f}")
 
-    # Refit PCA with the optimal number of components
-    pca = PCA(n_components=optimal_components)
-    pca.fit(flattened_md_positions)
-
-    # Compute adjusted scaling factor based on target temperature
-    scaling_factors_temp_adjusted = rmsd_scaling_factor * np.sqrt(temperature_target / temperature)
-    print(f"Scaling factors for PCA components (adjusted for T={temperature_target}K): {scaling_factors_temp_adjusted}")
-
-    # Apply a cap to the scaling factors for maximum displacement
-    scaling_factors_temp_adjusted = min(scaling_factors_temp_adjusted, max_displacement)
-    print(f"Scaled and capped scaling factors: {scaling_factors_temp_adjusted}")
-
-    # Generate PCA-based samples by applying displacements to representative frames
-    print(f"Generating {num_samples} PCA-based samples...")
-    pca_samples = []
+    # 5) Loop over representative frames, generate new structures
+    new_structures = []
     for i in range(num_samples):
-        start_idx = np.random.choice(len(representative_md))  # Choose random frame from representative_md
-        reference_structure = representative_md[start_idx]
+        idx = random.choice(range(len(representative_md)))
+        ref_struct = representative_md[idx]
+        ref_index = np.where(np.all(md_positions == ref_struct, axis=(1, 2)))[0][0]
 
-        # Generate a new structure by applying PCA perturbations
-        pca_sample = generate_pca_samples(
-            reference_structure,
-            pca,
-            1,
-            scaling_factor=scaling_factors_temp_adjusted
-        )[0]
-        pca_samples.append(pca_sample)
+        # Build the reference descriptor (pos + frc), skipping SOAP
+        ref_pos = md_positions[ref_index].flatten()
+        ref_frc = md_forces[ref_index].flatten()
+        ref_desc = np.concatenate([ref_pos, ref_frc])  # shape => (6*num_atoms,)
 
-        # Print progress every 100 samples or for the first sample
+        # Transform to normalized, PCA space
+        ref_desc_norm = scaler.transform(ref_desc.reshape(1, -1))[0]          # shape => (6*N,)
+        ref_desc_pca = pca.transform(ref_desc_norm.reshape(1, -1))[0]         # shape => (opt_comp,)
+
+        # Perturb in PCA space
+        perturbation = np.random.normal(scale=scaling_factor, size=ref_desc_pca.shape)
+        new_desc_pca = ref_desc_pca + perturbation
+
+        # Inverse transform: PCA -> normalized descriptor space
+        new_desc_norm = pca.inverse_transform(new_desc_pca.reshape(1, -1))[0] # shape => (6*N,)
+
+        # Un-normalize => original scale
+        new_desc = scaler.inverse_transform(new_desc_norm.reshape(1, -1))[0]  # shape => (6*N,)
+
+        # Extract new positions from the first 3*N
+        n_atoms = ref_struct.shape[0]
+        new_pos = new_desc[:n_atoms * 3].reshape(n_atoms, 3)
+        new_structures.append(new_pos)
+
+        # Log progress
         if (i + 1) % 100 == 0 or i == 0:
-            print(f"Generating sample {i + 1}/{num_samples}...")
+            logger.info(f"Generated {i+1}/{num_samples} PCA samples...")
 
-    pca_samples = np.array(pca_samples)
-    print(f"Generated {len(pca_samples)} PCA-based samples with shape {pca_samples.shape}.")
+    # 6) Convert to NumPy array and save
+    new_structures = np.array(new_structures)
+    save_xyz("pca_samples_no_soap.xyz", new_structures, atom_types)
+    logger.info("Saved PCA-based samples (no SOAP) to 'pca_samples_no_soap.xyz'")
 
-    pca_samples_rmsd = compute_rmsd_matrix(pca_samples)
-    plot_rmsd_histogram(pca_samples_rmsd, bins=50, title="RMSD Histogram PCA", xlabel="RMSD (Å)", ylabel="Frequency")
-
-    # Write the PCA-based samples directly to "pca_generated_samples.xyz"
-    save_xyz("pca_samples.xyz", pca_samples, atom_types)
-    print(f"Saved {len(pca_samples)} PCA-based samples to 'pca_samples.xyz'.")
-
-    return pca_samples
+    return new_structures
 
 def generate_surface_core_pca_samples(
     md_positions,

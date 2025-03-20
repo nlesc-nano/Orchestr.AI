@@ -30,7 +30,7 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
 from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz,
         parse_forces_xyz, get_num_atoms )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
-        generate_pca_samples_in_pca_space )
+        generate_pca_samples_in_pca_space, generate_structures_from_pca )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
         align_to_reference, iterative_alignment_fixed, rotate_forces, find_medoid_structure )
 
@@ -42,105 +42,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def generate_structures_from_pca(
-    md_positions,
-    md_forces,
-    representative_md,
-    atom_types,
-    num_samples,
-    scaling_factor=0.4,
-    pca_variance_threshold=0.90
-):
-    """
-    Generate PCA-based structures using combined descriptors of positions and forces ONLY.
-    Skips SOAP entirely.
-
-    Parameters:
-        md_positions (np.ndarray): MD frames, shape (num_frames, num_atoms, 3)
-        md_forces (np.ndarray): MD forces, shape (num_frames, num_atoms, 3)
-        representative_md (list of np.ndarray): Subset of frames used as "reference" seeds
-        atom_types (list): Atom types
-        num_samples (int): How many new structures to generate
-        pca_variance_threshold (float): Fraction of variance to keep (e.g. 0.90)
-
-    Returns:
-        np.ndarray: Array of shape (num_samples, num_atoms, 3) with the new generated structures.
-    """
-    logger.info("Generating PCA-based structures from positions+forces only (no SOAP).")
-
-    # 1) Build descriptors (positions and forces flattened)
-    #    shape => (num_frames, 6*num_atoms)
-    descriptors = []
-    for pos, frc in zip(md_positions, md_forces):
-        pf = np.concatenate([pos.flatten(), frc.flatten()])  # shape => (6*num_atoms,)
-        descriptors.append(pf)
-    descriptors = np.array(descriptors)
-    logger.info(f"Built descriptor matrix of shape: {descriptors.shape}")
-
-    # 2) Normalize (standardize) each feature
-    scaler = StandardScaler()
-    descriptors_norm = scaler.fit_transform(descriptors)
-
-    # 3) PCA on normalized descriptors
-    pca = PCA()
-    pca.fit(descriptors_norm)
-    cumvar = np.cumsum(pca.explained_variance_ratio_)
-    opt_comp = np.argmax(cumvar >= pca_variance_threshold) + 1
-    logger.info(f"Optimal PCA components: {opt_comp} (captures {cumvar[opt_comp-1]*100:.2f}% variance)")
-    pca = PCA(n_components=opt_comp)
-    pca.fit(descriptors_norm)
-
-    # 4) We'll just set scaling_factor = max_displacement directly
-    #    If you prefer a distance-based approach, do that here.
-    distance_flucts = compute_global_distance_fluctuation_cdist(md_positions)
-    mean_dist_fluct = np.mean(distance_flucts)
-    max_dist_fluct  = np.max(distance_flucts)
-    print(f"Mean distance fluctuation = {mean_dist_fluct:.3f}")
-    print(f"Max distance fluctuation  = {max_dist_fluct:.3f}")
-    logger.info(f"Sampling amplitude (scaling_factor) set to {scaling_factor:.2f}")
-
-    # 5) Loop over representative frames, generate new structures
-    new_structures = []
-    for i in range(num_samples):
-        idx = random.choice(range(len(representative_md)))
-        ref_struct = representative_md[idx]
-        ref_index = np.where(np.all(md_positions == ref_struct, axis=(1, 2)))[0][0]
-
-        # Build the reference descriptor (pos + frc), skipping SOAP
-        ref_pos = md_positions[ref_index].flatten()
-        ref_frc = md_forces[ref_index].flatten()
-        ref_desc = np.concatenate([ref_pos, ref_frc])  # shape => (6*num_atoms,)
-
-        # Transform to normalized, PCA space
-        ref_desc_norm = scaler.transform(ref_desc.reshape(1, -1))[0]          # shape => (6*N,)
-        ref_desc_pca = pca.transform(ref_desc_norm.reshape(1, -1))[0]         # shape => (opt_comp,)
-
-        # Perturb in PCA space
-        perturbation = np.random.normal(scale=scaling_factor, size=ref_desc_pca.shape)
-        new_desc_pca = ref_desc_pca + perturbation
-
-        # Inverse transform: PCA -> normalized descriptor space
-        new_desc_norm = pca.inverse_transform(new_desc_pca.reshape(1, -1))[0] # shape => (6*N,)
-
-        # Un-normalize => original scale
-        new_desc = scaler.inverse_transform(new_desc_norm.reshape(1, -1))[0]  # shape => (6*N,)
-
-        # Extract new positions from the first 3*N
-        n_atoms = ref_struct.shape[0]
-        new_pos = new_desc[:n_atoms * 3].reshape(n_atoms, 3)
-        new_structures.append(new_pos)
-
-        # Log progress
-        if (i + 1) % 100 == 0 or i == 0:
-            logger.info(f"Generated {i+1}/{num_samples} PCA samples...")
-
-    # 6) Convert to NumPy array and save
-    new_structures = np.array(new_structures)
-    save_xyz("pca_samples_no_soap.xyz", new_structures, atom_types)
-    logger.info("Saved PCA-based samples (no SOAP) to 'pca_samples_no_soap.xyz'")
-
-    return new_structures
-
 def generate_randomized_samples(md_positions, atom_types, num_samples=100, base_scale=0.1):
     """Generate random structures by Gaussian perturbation."""
     randomized = []
