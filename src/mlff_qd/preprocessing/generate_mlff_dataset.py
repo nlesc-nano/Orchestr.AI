@@ -12,7 +12,6 @@ import argparse
 from pathlib import Path
 
 from dscribe.descriptors import SOAP
-from ase import Atoms
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
@@ -30,7 +29,8 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
 from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz,
         parse_forces_xyz, get_num_atoms )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples,
-        generate_pca_samples_in_pca_space, generate_structures_from_pca )
+        generate_pca_samples_in_pca_space, generate_structures_from_pca,
+        plot_generated_samples_extended )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
         align_to_reference, iterative_alignment_fixed, rotate_forces, find_medoid_structure,
         generate_randomized_samples )
@@ -41,104 +41,6 @@ logging.basicConfig(level=logging.INFO,
                     handlers=[logging.StreamHandler(),
                               logging.FileHandler("mlff_dataset.log")])
 logger = logging.getLogger(__name__)
-
-# --- Utility Functions ---
-def plot_generated_samples_extended(combined_samples, atom_types, soap):
-    """
-    Plot PCA visualizations using:
-      - Positions (flattened)
-      - SOAP descriptors (averaged over atoms)
-      - Global distance fluctuation (rotationally invariant metric)
-    
-    Saves the figure to a file.
-    
-    Parameters:
-        combined_samples (dict): Dictionary with dataset names as keys and
-          position arrays as values (shape: (num_samples, num_atoms, 3)).
-        atom_types (list): List of atom type labels.
-        soap: DScribe SOAP descriptor object.
-    """
-    from sklearn.decomposition import PCA
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    logger.info("Preparing extended PCA plots for positions, SOAP, and global distance fluctuation...")
-    
-    # --- Panel 1: Positions PCA ---
-    flattened_pos = {}
-    for name, samples in combined_samples.items():
-        samples = np.array(samples)
-        if samples.ndim == 3:
-            flattened_pos[name] = samples.reshape(samples.shape[0], -1)
-        elif samples.ndim == 2:
-            flattened_pos[name] = samples
-        else:
-            raise ValueError(f"Unexpected shape for {name}: {samples.shape}")
-    all_pos = np.concatenate(list(flattened_pos.values()), axis=0)
-    pos_labels = sum([[name]*len(data) for name, data in flattened_pos.items()], [])
-    pca_positions = PCA(n_components=2).fit_transform(all_pos)
-    
-    # --- Panel 2: SOAP PCA ---
-    soap_desc = {}
-    for name, samples in combined_samples.items():
-        samples = np.array(samples)
-        if samples.ndim == 3:
-            desc_list = []
-            for pos in samples:
-                atoms = Atoms(symbols=atom_types, positions=pos)
-                d = soap.create(atoms)
-                desc_list.append(np.mean(d, axis=0))
-            soap_desc[name] = np.array(desc_list)
-        else:
-            soap_desc[name] = samples
-    all_soap = np.concatenate(list(soap_desc.values()), axis=0)
-    soap_labels = sum([[name]*len(data) for name, data in soap_desc.items()], [])
-    pca_soap = PCA(n_components=2).fit_transform(all_soap)
-    
-    # --- Panel 3: Global Distance Fluctuation ---
-    fluct_dict = {}
-    for name, samples in combined_samples.items():
-        samples = np.array(samples)
-        fluct_dict[name] = compute_global_distance_fluctuation_cdist(samples)
-    
-    # --- Plotting ---
-    unique_labels = sorted(set(pos_labels))
-    cmap = {label: plt.cm.tab10(i/len(unique_labels)) for i, label in enumerate(unique_labels)}
-    
-    fig, axes = plt.subplots(1, 3, figsize=(24, 8))
-    
-    # Positions PCA
-    for label in unique_labels:
-        idxs = [i for i, l in enumerate(pos_labels) if l == label]
-        axes[0].scatter(pca_positions[idxs, 0], pca_positions[idxs, 1],
-                        label=label, color=cmap[label], alpha=0.7)
-    axes[0].set_title("PCA: Positions")
-    axes[0].set_xlabel("PC1")
-    axes[0].set_ylabel("PC2")
-    axes[0].legend()
-    axes[0].grid(True)
-    
-    # SOAP PCA
-    for label in unique_labels:
-        idxs = [i for i, l in enumerate(soap_labels) if l == label]
-        axes[1].scatter(pca_soap[idxs, 0], pca_soap[idxs, 1],
-                        label=label, color=cmap[label], alpha=0.7)
-    axes[1].set_title("PCA: SOAP Descriptor")
-    axes[1].set_xlabel("PC1")
-    axes[1].set_ylabel("PC2")
-    axes[1].legend()
-    axes[1].grid(True)
-    
-    # Global Distance Fluctuation: boxplot per dataset.
-    data_to_plot = [fluct_dict[label] for label in unique_labels]
-    axes[2].boxplot(data_to_plot, labels=unique_labels)
-    axes[2].set_title("Global Distance Fluctuation")
-    axes[2].set_ylabel("Std. deviation of interatomic distances")
-    
-    plt.tight_layout()
-    plt.savefig("extended_pca_plots.png")
-    logger.info("Saved extended PCA plots to 'extended_pca_plots.png'")
-    plt.close()
 
 # --- Main Execution ---
 if __name__ == "__main__":
