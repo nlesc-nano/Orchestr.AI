@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 
-import os
-import pickle
-import random
-import yaml
 import pprint
-import logging
 import numpy as np
-import matplotlib.pyplot as plt
 import argparse
 from pathlib import Path
 
@@ -36,6 +30,7 @@ from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
         generate_randomized_samples )
 
 # --- Set up logging ---
+import logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(message)s',
                     handlers=[logging.StreamHandler(),
