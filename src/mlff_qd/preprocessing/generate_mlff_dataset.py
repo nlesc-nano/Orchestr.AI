@@ -6,13 +6,6 @@ import argparse
 from pathlib import Path
 
 from dscribe.descriptors import SOAP
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-from periodictable import elements
-from scm.plams import Molecule
-from CAT.recipes import replace_surface
 
 from mlff_qd.utils.analysis import ( compute_global_distance_fluctuation_cdist,
         compute_rmsd_matrix )
