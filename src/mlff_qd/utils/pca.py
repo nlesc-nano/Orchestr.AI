@@ -19,8 +19,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from mlff_qd.utils.analysis import ( compute_rmsd_matrix, plot_rmsd_histogram,
-        compute_global_distance_fluctuation_cdist )
+from mlff_qd.utils.analysis import compute_rmsd_matrix, compute_global_distance_fluctuation_cdist
 from mlff_qd.utils.io import save_xyz
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 

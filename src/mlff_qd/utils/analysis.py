@@ -67,33 +67,6 @@ def compute_rmsd_matrix(structures1, structures2=None):
 
     return rmsd_matrix
 
-def plot_rmsd_histogram(rmsd_matrix, bins=50, title="RMSD Histogram", xlabel="RMSD (Å)", ylabel="Frequency", savefile="rmsd_histogram.png"):
-    """
-    Plot a histogram of RMSD values from an RMSD matrix.
-
-    Parameters:
-        rmsd_matrix (np.ndarray): A symmetric RMSD matrix (shape: num_samples x num_samples).
-        bins (int): Number of bins for the histogram.
-        title (str): Title of the plot.
-        xlabel (str): Label for the x-axis.
-        ylabel (str): Label for the y-axis.
-    """
-    # Extract the upper triangle of the RMSD matrix (excluding the diagonal)
-    rmsd_values = rmsd_matrix[np.triu_indices_from(rmsd_matrix, k=1)]
-
-    # Plot the histogram
-    plt.figure(figsize=(8, 6))
-    plt.hist(rmsd_values, bins=bins, edgecolor="black", alpha=0.75)
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.grid(axis="y", linestyle="--", alpha=0.7)
-    plt.tight_layout()
-    # Save the histogram
-    plt.savefig(savefile)
-    logger.info(f"Saved RMSD histogram plot to {savefile}")
-    plt.close()
-
 def plot_generated_samples(combined_samples):
     """
     Plot PCA visualizations of the combined samples dataset for both "positions" and "RMSD" representations,
