@@ -14,7 +14,7 @@ from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV
 from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz,
         parse_forces_xyz, get_num_atoms )
 from mlff_qd.utils.pca import ( generate_surface_core_pca_samples, generate_structures_from_pca,
-        plot_generated_samples_extended )
+        plot_generated_samples )
 from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
         iterative_alignment_fixed, rotate_forces, find_medoid_structure,
         generate_randomized_samples )
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     for name, samples in combined_samples.items():
         logger.info(f"{name}: {np.array(samples).shape}")
 
-    plot_generated_samples_extended(combined_samples, atom_types, soap)
+    plot_generated_samples(combined_samples, atom_types, soap)
 
     # Combine non-MD samples for training dataset.
     combined_list = []

@@ -19,7 +19,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from mlff_qd.utils.analysis import compute_rmsd_matrix, compute_global_distance_fluctuation_cdist
+from mlff_qd.utils.analysis import compute_global_distance_fluctuation_cdist
 from mlff_qd.utils.io import save_xyz
 from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_dynamic
 
@@ -378,7 +378,7 @@ def generate_pca_samples_in_pca_space(ref_descriptor, pca, n_samples, scaling_fa
     
     return np.array(new_samples_pca)  # shape: (n_samples, pca_dim)
 
-def plot_generated_samples_extended(combined_samples, atom_types, soap):
+def plot_generated_samples(combined_samples, atom_types, soap):
     """
     Plot PCA visualizations using:
       - Positions (flattened)
