@@ -1,3 +1,4 @@
+# extract_metrics.py
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 import pandas as pd
 import argparse
@@ -6,7 +7,11 @@ import os
 def extract_metrics_data(event_file):
     """
     Extracts metrics data (scalars) from a TensorBoard event file and returns it as a Pandas DataFrame.
+    Raises exceptions on errors.
     """
+    if not os.path.exists(event_file):
+        raise FileNotFoundError(f"Event file not found at path: {event_file}")
+    
     try:
         event_acc = EventAccumulator(event_file)
         event_acc.Reload()
@@ -21,14 +26,13 @@ def extract_metrics_data(event_file):
         df = pd.DataFrame(metrics_data, columns=['Step', 'Metric', 'Value'])
         return df
     except Exception as e:
-        print(f"Error processing event file {event_file}: {e}")
-        return pd.DataFrame(columns=['Step', 'Metric', 'Value'])
+        raise RuntimeError(f"Error processing event file {event_file}: {e}")
 
 def parse_command_line_arguments():
     """Parses command line arguments for the script."""
-    parser = argparse.ArgumentParser(description='Extract metrics data from a TensorBoard event file and save to CSV in "results" folder.')
-    parser.add_argument('-p', '--path', type=str, required=True, help='Path to the TensorBoard event file') # -p for path
-    parser.add_argument('-o', '--output_file', type=str, default='metrics_output.csv', help='Base name for the output CSV file (will be saved in "results" folder, default: metrics_output.csv)') # -o for output_file
+    parser = argparse.ArgumentParser(description='Extract metrics data from a TensorBoard event file and save to CSV.')
+    parser.add_argument('-p', '--path', type=str, required=True, help='Path to the TensorBoard event file')
+    parser.add_argument('-o', '--output_file', type=str, default='metrics_output.csv', help='Output CSV file path (default: metrics_output.csv)')
     return parser.parse_args()
 
 def save_metrics_to_csv(df, output_csv_file):
@@ -46,23 +50,14 @@ def main():
     """Main function to execute the script."""
     args = parse_command_line_arguments()
     event_file = args.path
-    output_base_filename = args.output_file
+    output_csv_file = args.output_file
 
-    results_folder = os.path.join("analysis", "results")  # Results folder INSIDE analysis
-
-    if not os.path.exists(results_folder):
-        os.makedirs(results_folder)
-        print(f"Created folder: {results_folder}")
-
-    output_csv_file = os.path.join(results_folder, output_base_filename)
-
-    if not os.path.exists(event_file):
-        print(f"Error: Event file not found at path: {event_file}")
-        return  # Exit if event file is not found
-
-    print(f"Processing event file: {event_file}")
-    metrics_df = extract_metrics_data(event_file)
-    save_metrics_to_csv(metrics_df, output_csv_file)
+    try:
+        print(f"Processing event file: {event_file}")
+        metrics_df = extract_metrics_data(event_file)
+        save_metrics_to_csv(metrics_df, output_csv_file)
+    except Exception as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
