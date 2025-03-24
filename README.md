@@ -110,7 +110,7 @@ python training.py --config input_file.yaml
 ```
 By default, if no input file is specified, the training code looks for a file called input.yaml.
 
-## Extract Training Metrics from TensorBoard Event Files
+## CLI Mode - Extract Training Metrics from TensorBoard Event Files
 
 This script, `analysis/extract_metrics.py`,  extracts scalar training metrics from TensorBoard event files and saves them to a CSV file.
 
@@ -129,7 +129,7 @@ To run the script use the following command:
 python analysis/extract_metrics.py -p <event_file_path> [-o <output_file_name>]
 ```
 
-## Plotting Training Metrics for SchNet and Nequip
+## CLI Mode - Plotting Training Metrics for SchNet and Nequip
 
 The `analysis/plot.py` script allows you to visualize training progress for your models. It accepts several command-line options to control its behavior. Here’s what each option means:
 
@@ -156,3 +156,17 @@ python analysis/plot.py --platform nequip --file "path/to/nequip_metrics.csv" --
 Replace "path/to/nequip_metrics.csv" with the actual path to your Nequip metrics CSV file.
 
 These commands will generate plots for the respective platforms and save them as PNG files in the current working directory.
+
+## GUI Mode: Interactive Metrics Extraction and Plotting with Streamlit
+
+The `analysis/app.py` script offers a Streamlit GUI to extract metrics from TensorBoard event files and visualize SchNet/NequIP training progress with static (Matplotlib, saveable) or interactive (Plotly, display-only) plots. 
+
+####  Prerequisites:  -  `streamlit`, `plotly`
+  ```bash
+  pip install streamlit plotly
+  ```
+  
+### Launching the GUI:
+  ```bash
+  streamlit run analysis/app.py
+  ```
