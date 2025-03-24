@@ -14,92 +14,6 @@ from mlff_qd.utils.surface import compute_surface_indices_with_replace_surface_d
 import logging
 logger = logging.getLogger(__name__)
 
-def generate_pca_samples(reference_structure, pca_model, num_samples, scaling_factor=1.0):
-    """
-    Generate new structures by perturbing along PCA components.
-
-    Parameters:
-        reference_structure (np.ndarray): Atomic positions of the reference structure (num_atoms, 3).
-        pca_model (PCA): Precomputed PCA model.
-        num_samples (int): Number of new structures to generate.
-        scaling_factor (float): Scaling factor for perturbations.
-
-    Returns:
-        np.ndarray: Array of generated structures (num_samples, num_atoms, 3).
-    """
-    flattened_ref = reference_structure.flatten()  # Flatten the reference structure
-    num_features = pca_model.components_.shape[1]  # Number of features used in PCA
-
-    # Validate that the reference structure matches PCA components
-    if flattened_ref.size != num_features:
-        raise ValueError(
-            f"Mismatch in size: flattened_ref ({flattened_ref.size}) does not match PCA components ({num_features})"
-        )
-
-    generated_structures = []
-
-    for _ in range(num_samples):
-        perturbation = np.zeros_like(flattened_ref)
-        for pc_idx in range(pca_model.n_components_):
-            perturbation += (
-                scaling_factor
-                * np.random.uniform(-1, 1)
-                * pca_model.components_[pc_idx]
-            )
-        new_structure = flattened_ref + perturbation
-        generated_structures.append(new_structure.reshape(-1, 3))
-
-    return np.array(generated_structures)
-
-def perform_pca_and_plot(datasets, num_components=2, labels=None, ax=None):
-    """
-    Perform PCA and plot the results.
-
-    Parameters:
-        datasets (dict): A dictionary of dataset names and their corresponding samples.
-        num_components (int): Number of PCA components.
-        labels (list): List of sample labels (optional).
-        ax (matplotlib.axes.Axes): Pre-created axis for plotting (optional).
-    """
-
-    print(f"Performing PCA for {len(datasets)} datasets...")
-    combined_data = np.concatenate(list(datasets.values()))
-    combined_labels = labels if labels else sum([[name] * len(data) for name, data in datasets.items()], [])
-
-    # Perform PCA
-    pca = PCA(n_components=num_components)
-    pca_transformed = pca.fit_transform(combined_data)
-
-    # Plot results
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 6))
-
-    unique_labels = sorted(set(combined_labels))
-    colors = plt.cm.get_cmap("tab10", len(unique_labels))
-    for idx, label in enumerate(unique_labels):
-        label_indices = [i for i, lbl in enumerate(combined_labels) if lbl == label]
-        ax.scatter(
-            pca_transformed[label_indices, 0],
-            pca_transformed[label_indices, 1],
-            label=label,
-            alpha=0.7,
-            color=colors(idx),
-        )
-
-    explained_variance = pca.explained_variance_ratio_ * 100
-    ax.set_title(
-        f"PCA Analysis of Molecular Configurations\n"
-        f"Principal Component 1 ({explained_variance[0]:.2f}%) vs "
-        f"Principal Component 2 ({explained_variance[1]:.2f}%)"
-    )
-    ax.set_xlabel(f"Principal Component 1 ({explained_variance[0]:.2f}%)")
-    ax.set_ylabel(f"Principal Component 2 ({explained_variance[1]:.2f}%)")
-    ax.legend()
-
-    if ax is None:
-        plt.tight_layout()
-        plt.show()
-
 def generate_structures_from_pca(
     md_positions,
     md_forces,
@@ -342,29 +256,6 @@ def generate_surface_core_pca_samples(
     save_xyz("pca_surface_core_combined_samples_no_soap.xyz", new_structures, atom_types)
     logger.info("Saved PCA-based surface-core samples (no SOAP) to 'pca_surface_core_combined_samples_no_soap.xyz'")
     return new_structures
-
-def generate_pca_samples_in_pca_space(ref_descriptor, pca, n_samples, scaling_factor):
-    """
-    Given a descriptor in the *normalized* space (the same dimension PCA was fit on),
-    return random samples in PCA space that we can transform back outside this function.
-
-    Steps:
-    1. transform => PCA coords
-    2. random perturbation => new PCA coords
-    3. Return the new PCA coords directly (no inverse_transform here)
-    """
-    
-    # Convert descriptor to PCA space
-    ref_coeffs = pca.transform(ref_descriptor.reshape(1, -1))[0]
-    new_samples_pca = []
-    
-    for _ in range(n_samples):
-        # Add random noise in PCA space
-        perturbation = np.random.normal(scale=scaling_factor, size=ref_coeffs.shape)
-        new_coeffs = ref_coeffs + perturbation
-        new_samples_pca.append(new_coeffs)
-    
-    return np.array(new_samples_pca)  # shape: (n_samples, pca_dim)
 
 def plot_generated_samples(combined_samples, atom_types, soap):
     """
