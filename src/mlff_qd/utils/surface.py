@@ -19,9 +19,6 @@ def compute_surface_indices_with_replace_surface_dynamic(
         surface_indices (list): Indices of the replaced surface atoms in the structure.
         replaced_atom_types (list): Updated atom types after replacement.
     """
-    import random
-    from periodictable import elements
-
     print(f"Reading molecule from {input_file}...")
     mol_original = Molecule(input_file)  # Load the original molecule
     mol_updated = mol_original.copy()  # Create a copy to track cumulative changes
