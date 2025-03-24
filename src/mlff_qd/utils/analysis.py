@@ -1,22 +1,8 @@
 import numpy as np
-import pickle 
-import random
 import matplotlib.pyplot as plt
-import yaml 
-import pprint
-import argparse
-from pathlib import Path
-from periodictable import elements
 
-from scipy.spatial.transform import Rotation as R
 from scipy.spatial.distance import cdist
 
-from scm.plams import Molecule
-from CAT.recipes import replace_surface
-
-from sklearn.cluster import KMeans
-from sklearn.cluster import DBSCAN
-from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 
 def compute_rmsd_matrix(structures1, structures2=None):
