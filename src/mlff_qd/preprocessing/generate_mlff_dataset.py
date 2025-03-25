@@ -113,8 +113,8 @@ if __name__ == "__main__":
     pca_samples = generate_structures_from_pca(md_positions, md_forces, representative_md, atom_types, 
                                                num_samples_pca, scaling_factor, pca_variance_threshold=0.90)
     
-    medoid_structure_path = PROJECT_ROOT / "data" / "processed" / "medoid_structure.xyz"
-    surface_replaced_path = PROJECT_ROOT / "data" / "processed" / "surface_replaced.xyz"
+    medoid_structure_path = processed_dir / "medoid_structure.xyz"
+    surface_replaced_path = processed_dir / "surface_replaced.xyz"
     pca_surface_samples = generate_surface_core_pca_samples(md_positions, md_forces, atom_types, surface_atom_types,
             representative_md, num_samples_pca_surface, scaling_surf, scaling_core,
             medoid_structure_path, surface_replaced_path) 
@@ -145,7 +145,7 @@ if __name__ == "__main__":
     
     training_dataset = np.vstack(combined_list).reshape(-1, num_atoms, 3)
     
-    training_dataset_path = PROJECT_ROOT / "data" / "processed" / "training_dataset.xyz"
+    training_dataset_path = processed_dir / "training_dataset.xyz"
     with open(training_dataset_path, "w") as f:
         for i, (struct, title) in enumerate(zip(training_dataset, frame_titles)):
             f.write(f"{len(struct)}\n{title}\n")
