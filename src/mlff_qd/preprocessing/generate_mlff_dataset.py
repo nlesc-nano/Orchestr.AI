@@ -37,13 +37,15 @@ if __name__ == "__main__":
     # Load yaml config
     config = load_config(config_file=args.config)
 
-    PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
     # Extract config values
-    pos_file_name = config.get("pos_file", "trajectory_pos.xyz")
-    frc_file_name = config.get("frc_file", "trajectory_frc.xyz")
-    pos_file_path = PROJECT_ROOT / pos_file_name
-    frc_file_path = PROJECT_ROOT / frc_file_name
+    pos_file_path = Path(config["pos_file"]).resolve()
+    frc_file_path = Path(config["frc_file"]).resolve()
+
+    # Define output directory
+    processed_dir = Path.cwd() / "processed_data"
+    processed_dir.mkdir(exist_ok=True)
+
+    logger.info(f"Processing data from {pos_file_path.parent} and saving to {processed_dir}")
 
     max_random_displacement = config.get("max_random_displacement", 0.25)
     scaling_factor = config.get("scaling_factor", 0.40)
@@ -64,8 +66,8 @@ if __name__ == "__main__":
     mass_dict = create_mass_dict(atom_types)
     masses = np.array([mass_dict[atom] for atom in atom_types])
     
-    reordered_positions_path = PROJECT_ROOT / "data" / "processed" / "reordered_positions.xyz"
-    reordered_forces_path    = PROJECT_ROOT / "data" / "processed" / "reordered_forces.xyz"
+    reordered_positions_path = processed_dir / "reordered_positions.xyz"
+    reordered_forces_path    = processed_dir / "reordered_forces.xyz"
     reorder_xyz_trajectory(pos_file_path, reordered_positions_path, num_atoms)
     reorder_xyz_trajectory(frc_file_path, reordered_forces_path, num_atoms)
 
@@ -88,8 +90,8 @@ if __name__ == "__main__":
     save_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev, comment="Aligned positions")
     save_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types, comment="Aligned forces")
 
-    aligned_positions_path = PROJECT_ROOT / "data" / "processed" / "aligned_positions.xyz"
-    aligned_forces_path = PROJECT_ROOT / "data" / "processed" / "aligned_forces.xyz"
+    aligned_positions_path = processed_dir / "aligned_positions.xyz"
+    aligned_forces_path = processed_dir / "aligned_forces.xyz"
     md_positions, atom_types, _ = parse_positions_xyz(aligned_positions_path, num_atoms)
     md_forces = parse_forces_xyz(aligned_forces_path, num_atoms)
     

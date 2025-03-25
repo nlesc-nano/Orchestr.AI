@@ -24,14 +24,13 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
 
     Notes
     -----
-    - This function always writes to 'data/processed/filename'.
+    - This function always writes to 'processed_data/filename'.
     - If 'energies' is provided, each frame's comment line includes that frame's energy.
     - You can use 'comment' to clarify if the frames are "Aligned positions", "Aligned forces", etc.
     """
 
     # Determine processed output directory
-    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir = Path.cwd() / "processed_data"
 
     # Build the full path
     output_path = processed_dir / filename
