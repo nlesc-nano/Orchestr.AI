@@ -86,9 +86,9 @@ The current version of the platform is developped for being run in a cluster. Th
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
 ### Preprocessing tools
-The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw. This tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
+An input file example for the preprocessing of the data can be found in config_files/preprocess_config.yaml. The initial data for being processed should be placed in a consistent way to the paths indicated in the input file. This preprocessing tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
 
-By default, the preprocessing code assumes that the input file is config/preprocess_config.yaml. If that is the case, it can be run as:
+By default, the preprocessing code assumes that the input file is preprocess_config.yaml. If that is the case, it can be run as:
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset
 ```
