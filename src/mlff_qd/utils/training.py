@@ -1,11 +1,13 @@
-import logging
-import os
-from utils.data_processing import load_data, preprocess_data, setup_logging_and_dataset, prepare_transformations, setup_data_module, show_dataset_info
-from utils.model import setup_model
-from utils.trainer_utils import setup_task_and_trainer
-from utils.helpers import load_config
 import numpy as np
 import torch
+import logging
+import os
+
+from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+        prepare_transformations, setup_data_module, show_dataset_info )
+from mlff_qd.utils.model import setup_model
+from mlff_qd.utils.trainer_utils import setup_task_and_trainer
+from mlff_qd.utils.helpers import load_config
 
 def set_seed(seed):
     np.random.seed(seed)
