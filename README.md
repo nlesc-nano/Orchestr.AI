@@ -119,12 +119,15 @@ python generate_scripts.py -p nequip -o nequip.yaml
 
 This generates `nequip.yaml`, which is pre-configured for Nequip training.
 
-### Training locally
+### Training
 If an user wants to run locally the training code, one can do the following:
 ```bash
-python training.py --config input_file.yaml
+python -m mlff_qd.training.main
 ```
-By default, if no input file is specified, the training code looks for a file called input.yaml.
+By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
+```bash
+python -m mlff_qd.training.main --config input_file.yaml
+```
 
 ## Extract Training Metrics from TensorBoard Event Files
 
