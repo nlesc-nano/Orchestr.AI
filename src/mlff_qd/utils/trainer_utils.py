@@ -2,8 +2,9 @@ import os
 import logging
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from utils.helpers import get_optimizer_class, get_scheduler_class 
 import schnetpack as spk
+
+from mlff_qd.utils.helpers import get_optimizer_class, get_scheduler_class 
 
 def setup_task_and_trainer(config, nnpot, outputs, folder):
     optimizer_name = config['settings']['training']['optimizer']['type']
