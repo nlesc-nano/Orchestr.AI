@@ -1,0 +1,815 @@
+"""
+active_learning.py
+
+This module implements two active learning strategies for ML force-fields:
+  1. An influence-based strategy (adaptive_learning_influence_calibrated)
+  2. A traditional strategy using HDBSCAN clustering (adaptive_learning)
+
+It also includes helper functions to normalize data, compute similarity matrices,
+perform greedy selection balancing score and diversity, and compute average pairwise
+similarity.
+"""
+import numpy as np
+import os
+import shutil
+import heapq
+import traceback
+import matplotlib.pyplot as plt
+import scipy.optimize
+import torch
+from sklearn.isotonic import IsotonicRegression
+from sklearn.decomposition import PCA
+from scipy.special import erfinv
+from scipy.stats import spearmanr
+from scipy.spatial.distance import cdist
+from ase.data import chemical_symbols
+
+import scipy.linalg
+from postprocessing.plotting import plot_swapped_final_tight
+from typing import Tuple, List, Optional 
+from scipy.ndimage import gaussian_filter1d
+from kneed import KneeLocator
+
+# Check for hdbscan availability
+try:
+    import hdbscan
+    HDBSCAN_AVAILABLE = True
+except ImportError:
+    HDBSCAN_AVAILABLE = False
+    print("Warning: hdbscan not found. Traditional active_learning function will not work.")
+
+# Check for PyTorch availability
+try:
+    import torch  # Needed for pairwise distance calculations
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("Warning: PyTorch not found. Traditional active_learning's distance feature calculation will fail.")
+
+# =============================================================================
+# MIG-Based Active Learning Strategy
+# =============================================================================
+# -----------------------------------------------------------------------------
+# 1. Hyper‑parameter calibration (reg, α²) via GCV + moment‑matching
+# -----------------------------------------------------------------------------
+
+def calibrate_alpha_reg_gcv(F_eval: np.ndarray, y: np.ndarray,
+                             lambda_bounds: Tuple[float, float] = (1e-6, 1e4)):
+    n, d = F_eval.shape
+    U, s, _ = np.linalg.svd(F_eval, full_matrices=False)
+    UTy = U.T @ y
+    s2 = s**2
+
+    def gcv_obj(log_lam):
+        lam = np.exp(log_lam)
+        a = s2 / (s2 + lam)
+        df = a.sum()
+        y_hat = (a * UTy) @ U.T
+        resid = y - y_hat
+        return np.log((resid @ resid) / (n - df)**2)
+
+    res = scipy.optimize.minimize_scalar(gcv_obj, bounds=np.log(lambda_bounds), method='bounded')
+    lam_opt = np.exp(res.x)
+    # predictive variance terms
+    L = np.linalg.cholesky((F_eval.T @ F_eval) + lam_opt * np.eye(d))
+    G_eval = scipy.linalg.solve_triangular(L, F_eval.T, lower=True).T
+    terms_lat = np.sum(G_eval**2, axis=1)
+    resid_mean = np.mean((y - ((s2/(s2+lam_opt))*UTy) @ U.T) ** 2)
+    alpha_sq = resid_mean / np.mean(terms_lat)
+
+    print(f"[GCV] λ = {lam_opt:.3e}, α² = {alpha_sq:.3e}")
+    return alpha_sq, lam_opt, terms_lat, G_eval, L
+
+# -----------------------------------------------------------------------------
+# 2. FPS‑W sampler (uncertainty‑biased farthest‑point sampling)
+# -----------------------------------------------------------------------------
+
+def fps_uncertainty(
+    G_eval: np.ndarray,
+    G_ref: np.ndarray,
+    sigma_eval: np.ndarray,
+    *,
+    beta: float = 0.5,
+    drop_init: float = 0.5,
+    min_k: int = 5,
+    score_floor: Optional[float] = None,
+    verbose: bool = True
+) -> Tuple[List[int], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Farthest-point sampling with uncertainty weighting.
+
+    Stopping criteria (OR logic):
+      1) absolute floor: best_now < score_floor (after min_k)
+      2) relative drop: best_now < best_initial * (1 - drop_init) (after min_k)
+      3) exhaustion: no candidates left
+
+    Returns:
+        selected        : list of indices into eval pool
+        sel_score       : scores at the moments of selection
+        sel_dist        : distances at the moments of selection
+        score_all_start : initial FPS-W score for all eval frames
+        dist_all_start  : initial distance for all eval frames
+    """
+    # Prepare tensors
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    GE = torch.as_tensor(G_eval, device=dev)
+    GR = torch.as_tensor(G_ref, device=dev)
+    sig = torch.as_tensor(sigma_eval, device=dev)
+
+    # Initial distances and scores
+    d = torch.cdist(GE, GR).min(dim=1).values
+    s = d ** (1 - beta) * sig ** beta
+
+    # Save full arrays
+    score_all_start = s.cpu().numpy().copy()
+    dist_all_start = d.cpu().numpy().copy()
+
+    selected, sel_score, sel_dist = [], [], []
+    best_initial = s.max().item()
+    floor = score_floor if score_floor is not None else -np.inf
+
+    if verbose:
+        print(f"[FPS] pool={len(s)}, min_k={min_k}, drop_init={drop_init:.2f}, score_floor={floor:.5f}")
+
+    # Main loop
+    while True:
+        # Remaining candidate indices
+        avail = torch.nonzero(~torch.isinf(s), as_tuple=False).view(-1)
+        if avail.numel() == 0:
+            if verbose:
+                print("[FPS] stop: no candidates left")
+            break
+
+        # Choose best-scoring available
+        idx_local = torch.argmax(s[avail]).item()
+        idx = avail[idx_local].item()
+        best_now = float(s[idx].item())
+        n_sel = len(selected) + 1
+
+        # 1) Absolute floor
+        if n_sel >= min_k and best_now < floor:
+            if verbose:
+                print(f"[FPS] stop: best_now {best_now:.5f} < floor {floor:.5f}")
+            break
+
+        # 2) Relative drop
+#        if n_sel >= min_k and best_now < best_initial * (1 - drop_init):
+#            if verbose:
+#                print(f"[FPS] stop: best_now {best_now:.3e} < {best_initial * (1 - drop_init):.3e} (drop_init)")
+#            break
+
+        # Record selection
+        selected.append(idx)
+        sel_score.append(best_now)
+        sel_dist.append(float(d[idx].item()))
+
+        # Mark as used
+        s[idx] = -np.inf
+
+        # Update distances and scores
+        new_d = torch.cdist(GE, GE[idx:idx+1]).squeeze()
+        d = torch.minimum(d, new_d)
+        s = d ** (1 - beta) * sig ** beta
+
+        if verbose and n_sel % 50 == 1:
+            print(f"[FPS] step {n_sel:4d}: idx={idx:4d}, "
+                  f"score={best_now:.5f}, dist={sel_dist[-1]:.5f}, sigma={sig[idx].item():.5f}")
+
+    return (
+        selected,
+        np.array(sel_score),
+        np.array(sel_dist),
+        score_all_start,
+        dist_all_start
+    )
+
+# -----------------------------------------------------------------------------
+# 3. Main adaptive‑learning routine (v4) with RMSE‑based threshold
+# -----------------------------------------------------------------------------
+
+def adaptive_learning_mig_calibrated(
+        all_frames: List,
+        eval_mask: np.ndarray,
+        sigma_e_al: np.ndarray,
+        delta_E_frame: np.ndarray,
+        mean_l_al: np.ndarray,
+        *,
+        target_rmse_conv: float,
+        beta: float = 0.5,
+        drop_init: float = 0.5,
+        min_k: int = 5,
+        max_k: Optional[int] = None,
+        score_floor: Optional[float] = None,
+        base: str = "al_mig_v4"
+) -> Tuple[List, np.ndarray]:
+    """
+    Active learning routine with auto-inferred atom count for score_floor.
+    Prints expected RMSE, auto and used floors.
+    """
+
+    # 1) train/validation split
+    N, d = mean_l_al.shape
+    train_idx = np.where(~eval_mask)[0]
+    eval_idx  = np.where(eval_mask)[0]
+    F_train   = mean_l_al[train_idx]
+    F_eval    = mean_l_al[eval_idx]
+    y_val     = delta_E_frame[eval_idx]
+
+    # 2) calibrate alpha^2 and lambda
+    alpha_sq, lam, terms_lat, G_eval, L = calibrate_alpha_reg_gcv(F_eval, y_val)
+    G_train = scipy.linalg.solve_triangular(L, F_train.T, lower=True).T
+    sigma_eval = np.sqrt(alpha_sq * terms_lat)
+
+    # 3) compute median latent distance
+    d_lat_eval = scipy.spatial.distance.cdist(G_eval, G_train).min(axis=1)
+    median_d = float(np.median(d_lat_eval))
+    # initial score and distance for all eval frames (for logging)
+    score_all_full = (d_lat_eval ** (1 - beta)) * (sigma_eval ** beta)
+    dist_all_full  = d_lat_eval.copy()
+
+    # 4) derive auto_floor from target_rmse_conv
+    n_atoms   = len(all_frames[0])
+    rho_eV    = 0.0025 # Threshold on uncertainty per atom 
+    sigma_emp = rho_eV * np.sqrt(n_atoms) # hard limit in eV
+    q75_d      = float(np.quantile(d_lat_eval, 0.75)) 
+    beta = 0.0  
+
+    auto_floor = (q75_d ** (1 - beta)) * (sigma_emp ** beta)
+    used_floor = score_floor if score_floor is not None else auto_floor
+    drop_init = 1.0
+
+    # diagnostics -----------------------------------------------------------
+    print(f"[AL] sigma_emp (total)    : {sigma_emp:.5f} eV")
+    print(f"[AL] q75_d                : {q75_d:.5f}")
+    print(f"[AL] auto score_floor     : {auto_floor:.5f}")
+    print(f"[AL] drop_init            : {drop_init:.5f}")
+    print(f"[AL] beta                 : {beta:.5f}") 
+    if score_floor is not None:
+        print(f"[AL] user-supplied floor  : {score_floor:.5f} (overriding)")
+    print(f"[AL] *** FLOOR IN USE     : {used_floor:.5f}")
+
+    # 5) candidate selection threshold
+    cand_pos = np.where(sigma_eval > sigma_emp)[0]
+    cand_idx = eval_idx[cand_pos]
+    print(f"[Pool] thr = {sigma_emp:.5f} eV, candidates = {len(cand_idx)}")
+    # 6) FPS-W sampling
+    sel_rel_pos, fps_scores_cand, dists_cand, score_all_cand, dist_all_cand = fps_uncertainty(
+            G_eval[cand_pos], G_train, sigma_eval[cand_pos],
+            beta=beta, drop_init=drop_init, min_k=min_k, score_floor=used_floor, verbose=True
+        )
+
+    # 3) Build full-length logs:
+    fps_full  = score_all_full.copy()        # full eval-set initial scores
+    dist_full = dist_all_full.copy()        # full eval-set distances
+    # override only the candidate entries with actual FPS picks
+    sel_pos = cand_pos[sel_rel_pos]
+    fps_full[sel_pos]  = fps_scores_cand
+    dist_full[sel_pos] = dists_cand
+
+    # 4) sel_idx maps back into all_frames via:
+    sel_idx = cand_idx[sel_rel_pos]
+    print(f"[Select] picked {len(sel_idx)} out of {len(cand_idx)}")
+
+    # 5) ΔI metrics ----------------------------------------------------------
+    delta_i_lat = 0.5 * np.log1p(alpha_sq * terms_lat)
+    X_ens = sigma_e_al[eval_idx]
+    mask_val = ~np.isnan(X_ens) & ~np.isnan(y_val)
+    alpha_sq_ens = (np.mean((y_val[mask_val]**2) / (X_ens[mask_val]**2)) if mask_val.any() else 1.)
+    delta_i_ens = 0.5 * np.log1p(alpha_sq_ens * X_ens**2)
+
+    # 6) overlap logging ------------------------------------------------------
+    k = len(sel_idx)
+    top_lat = eval_idx[np.argsort(delta_i_lat)[::-1][:k]]
+    top_ens = eval_idx[np.argsort(delta_i_ens)[::-1][:k]]
+    print(f"[Overlap] Lat/Ens={len(set(top_lat)&set(top_ens))}, "
+          f"Lat/New={len(set(top_lat)&set(sel_idx))}, "
+          f"Ens/New={len(set(top_ens)&set(sel_idx))}")
+
+    # 7) log details ---------------------------------------------------------
+    log_name = f"{base}_detailed_log.txt"
+    with open(log_name, 'w') as f:
+        # Header line
+        f.write("Idx\tσ\tFPS_score\tDist\tΔI_lat\tΔI_ens\tSelected\n")
+        for i, idx in enumerate(eval_idx):
+            f.write(f"{idx}\t{sigma_eval[i]:.5f}\t{fps_full[i]:.5f}\t{dist_full[i]:.5f}\t"
+                    f"{delta_i_lat[i]:.5f}\t{delta_i_ens[i]:.5f}\t{idx in sel_idx}\n")
+    print(f"[Log] {log_name}")
+
+
+    # 8) σ vs score plot ----------------------------------------------------
+    fig, ax = plt.subplots(figsize=(6,5))
+    sel_flag = np.isin(eval_idx, sel_idx)
+    ax.scatter(sigma_eval[~sel_flag], fps_full[~sel_flag], alpha=0.3, label='not selected')
+    ax.scatter(sigma_eval[sel_flag], fps_full[sel_flag], marker='x', label='selected')
+    ax.set_xscale('log'); ax.set_yscale('log')
+    ax.set_xlabel('σ'); ax.set_ylabel('FPS score'); ax.legend()
+    plt.tight_layout(); plt.savefig(f"{base}_sigma_vs_score.png", dpi=300); plt.close()
+
+    # 9) return -------------------------------------------------------------
+
+    sel_objs = [all_frames[i - min(eval_idx)] for i in sel_idx]
+    return sel_objs, sel_idx
+
+# ======================
+# MIG For Unlabelled
+# ======================
+
+import numpy as np
+import torch
+from scipy.linalg import solve_triangular
+from postprocessing.plotting import plot_swapped_final_tight  # or wherever you keep it
+
+def predict_sigma_from_L(
+        F_new: np.ndarray,
+        L: np.ndarray,
+        alpha_sq: float,
+        batch: int | None = None
+    ) -> np.ndarray:
+    """
+    Compute calibrated σ for frames not seen in GCV.
+    L, alpha_sq from calibrate_alpha_reg_gcv().
+    """
+    if batch is None:
+        G = solve_triangular(L, F_new.T, lower=True).T
+        return np.sqrt(alpha_sq * np.sum(G**2, axis=1))
+
+    sig = np.empty(len(F_new))
+    for i in range(0, len(F_new), batch):
+        blk = F_new[i:i+batch]
+        G_blk = solve_triangular(L, blk.T, lower=True).T
+        sig[i:i+batch] = np.sqrt(alpha_sq * np.sum(G_blk**2, axis=1))
+    return sig
+
+def adaptive_learning_mig_pool(
+        pool_frames: list,
+        F_pool: np.ndarray,
+        F_train: np.ndarray,
+        alpha_sq: float,
+        L: np.ndarray,
+        mu_E_pool: np.ndarray,            # <-- new arg
+        beta: float = 0.5,
+        drop_init: float = 0.5,
+        min_k: int = 20,
+        k_select: int = 50,
+        base: str = "al_mig_pool"
+    ) -> tuple[list, list]:
+    # 1) compute force‐uncertainty for pool
+    sigma_pool = predict_sigma_from_L(F_pool, L, alpha_sq)
+
+    # 2) build G‐matrices for FPS
+    G_train = solve_triangular(L, F_train.T, lower=True).T
+    G_pool  = solve_triangular(L, F_pool.T, lower=True).T
+
+    # 3) FPS‐Uncertainty selection
+    sel_rel, fps_scores, dists = fps_uncertainty(
+        G_pool, G_train, sigma_pool,
+        beta=beta, drop_init=drop_init, min_k=min_k
+    )
+
+    # 4) pick top‐k by σ
+    sel_rel = sorted(sel_rel, key=lambda i: sigma_pool[i], reverse=True)[:k_select]
+    sel_frames = [pool_frames[i] for i in sel_rel]
+
+    # 5) write indices + μE + σ
+    idx_file = f"{base}_idxs.txt"
+    with open(idx_file, "w") as f:
+        f.write("idx\tpred_energy\tuncertainty\n")
+        for i in sel_rel:
+            f.write(f"{i}\t{mu_E_pool[i]:.6f}\t{sigma_pool[i]:.6f}\n")
+    print(f"[Pool‑AL] saved selection indices + stats to {idx_file}")
+
+    return sel_frames, sel_rel
+
+def compute_bond_thresholds(frames, neighbor_list, first_shell_cutoff=3.0, device=None):
+    cache_path = os.path.join(neighbor_list.cache_path, 'cache_0.pt')
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"Cache file {cache_path} not found")
+    cache_data = torch.load(cache_path)
+
+    idx_i = cache_data['_idx_i'].numpy()
+    idx_j = cache_data['_idx_j'].numpy()
+    offsets = cache_data['_offsets'].numpy()
+
+    bond_lengths = {}
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    n_frames = len(frames)
+    for idx, frame in enumerate(frames):
+        if idx % 50 == 0:
+            print(f"compute_bond_thresholds: processing frame {idx+1}/{n_frames}")
+        positions = frame.get_positions()
+        Z = frame.get_atomic_numbers()
+        cell = frame.get_cell()
+        for i, j, off in zip(idx_i, idx_j, offsets):
+            if j <= i:
+                continue
+            pos_i = positions[i] + np.dot(off, cell)
+            pos_j = positions[j]
+            dist = np.linalg.norm(pos_i - pos_j)
+            if dist > first_shell_cutoff:
+                continue
+            pair = tuple(sorted((Z[i], Z[j])))
+            bond_lengths.setdefault(pair, []).append(dist)
+    
+    thresholds = {
+        pair: {
+            'min': float(np.min(dists)),
+            'max': float(np.max(dists)),
+            'mean': float(np.mean(dists))
+        }
+        for pair, dists in bond_lengths.items()
+    }
+    print("Bond thresholds (pair: {min, max, mean}):")
+    for pair, stats in thresholds.items():
+        elem_pair = tuple(chemical_symbols[z] for z in pair)
+        print(f"  {elem_pair}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
+    return thresholds
+
+def filter_unrealistic_indices(frames, neighbor_list, thresholds, pct_tol=0.15, first_shell_cutoff=3.0, device=None):
+    cache_path = os.path.join(neighbor_list.cache_path, 'cache_0.pt')
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"Cache file {cache_path} not found")
+    cache_data = torch.load(cache_path)
+
+    idx_i = cache_data['_idx_i'].numpy()
+    idx_j = cache_data['_idx_j'].numpy()
+    offsets = cache_data['_offsets'].numpy()
+
+    bad = []
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    n_frames = len(frames)
+    for idx, frame in enumerate(frames):
+        if idx % 50 == 0:
+            print(f"filter_unrealistic_indices: checking frame {idx+1}/{n_frames}")
+        positions = frame.get_positions()
+        Z = frame.get_atomic_numbers()
+        cell = frame.get_cell()
+        flagged = False
+        for i, j, off in zip(idx_i, idx_j, offsets):
+            if j <= i:
+                continue
+            pos_i = positions[i] + np.dot(off, cell)
+            pos_j = positions[j]
+            dist = np.linalg.norm(pos_i - pos_j)
+            if dist > first_shell_cutoff:
+                continue
+            pair = tuple(sorted((Z[i], Z[j])))
+            if pair not in thresholds:
+                continue
+            d_min = thresholds[pair]['min']
+            d_max = thresholds[pair]['max']
+            d_mean = thresholds[pair]['mean']
+            lo = min((1 - pct_tol) * d_mean, d_min)
+            hi = max((1 + pct_tol) * d_mean, d_max)
+            if dist < lo or dist > hi:
+                elem_pair = tuple(chemical_symbols[z] for z in pair)
+                print(
+                    f"[Warning] Frame {idx+1}: bond {elem_pair} distance {dist:.3f} Å "
+                    f"outside [{lo:.3f}, {hi:.3f}] (ref mean={d_mean:.3f}, min={d_min:.3f}, max={d_max:.3f} Å)"
+                )
+                bad.append(idx)
+                flagged = True
+                break
+            if flagged:
+                break
+    return set(bad)
+
+def adaptive_learning_mig_pool_windowed(
+        pool_frames: list,
+        F_pool: np.ndarray,
+        F_train: np.ndarray,
+        alpha_sq: float,
+        L: np.ndarray,
+        mu_E_pool: np.ndarray,
+        thresholds: dict,
+        neighbor_list,
+        bad_global: set,
+        *,
+        rho_eV: float = 0.0025,
+        beta: float = 0.0,
+        drop_init: float = 1.0,
+        min_k: int = 5,
+        window_size: int = 100,
+        base: str = "al_mig_pool_v6",
+        first_shell_cutoff: float = 3.0,
+        pct_tol: float = 0.15
+    ) -> tuple[list, list]:
+    """
+    Pool-based AL with windowed FPS and bond sanity filter via precomputed bad_global.
+    """
+    sigma_pool = predict_sigma_from_L(F_pool, L, alpha_sq)
+    G_train = solve_triangular(L, F_train.T, lower=True).T
+    G_pool = solve_triangular(L, F_pool.T, lower=True).T
+
+    n_atoms = getattr(pool_frames[0], 'get_positions', lambda: pool_frames[0]).__call__().shape[0] if pool_frames else 0
+    sigma_emp = rho_eV * np.sqrt(n_atoms)
+    print(f"[Pool-AL] σ_emp = {sigma_emp:.5f} eV")
+
+    good_frames = len(pool_frames) - len(bad_global)
+    print(f"[AL] analyzing {good_frames}/{len(pool_frames)} good frames (excluded {len(bad_global)} bad frames)")
+
+    cand_global = []
+    records = []
+    n_frames = len(pool_frames)
+    for w0 in range(0, n_frames, window_size):
+        w1 = min(w0 + window_size, n_frames)
+        win = list(range(w0, w1))
+        high = [i for i in win if sigma_pool[i] > sigma_emp and i not in bad_global]
+        if not high:
+            continue
+        sub_G = G_pool[high]
+        d_lat_win = cdist(sub_G, G_train).min(axis=1)
+        floor = float(np.quantile(d_lat_win, 0.75))
+        picked, sel_score, sel_dist, *_ = fps_uncertainty(
+            sub_G, G_train, sigma_pool[high],
+            beta=beta, drop_init=drop_init, min_k=min_k,
+            score_floor=floor, verbose=False
+        )
+        picks = [high[p] for p in picked]
+        cand_global.extend(picks)
+        print(f"[Pool-AL] win {w0}-{w1}, picks {len(picks)} (filtered), score_floor={floor:.5f}")
+
+        for idx_local, idx in enumerate(picks):
+            records.append((
+                idx,
+                mu_E_pool[idx],
+                sigma_pool[idx],
+                sel_score[idx_local],
+                sel_dist[idx_local],
+                f"{w0}-{w1}"
+            ))
+
+    idx_file = f"{base}_idxs.txt"
+    with open(idx_file, "w") as fh:
+        fh.write("idx\tpred_E\tσ\tFPS_score\tdist\twindow\n")
+        for idx, pred_E, sigma, score, dist, window in records:
+            fh.write(f"{idx}\t{pred_E:.5f}\t{sigma:.5f}\t{score:.5f}\t{dist:.5f}\t{window}\n")
+    print(f"[AL] wrote log with {len(records)} entries to {idx_file}")
+
+    sel_frames = [pool_frames[i] for i in cand_global]
+    return sel_frames, cand_global
+
+
+# =============================================================================
+# Traditional Active Learning Strategy (HDBSCAN-based)
+# =============================================================================
+
+def adaptive_learning(all_frames, eval_mask, sigma_atom_all_al, force_rmse_atom_array_al,
+                        train_atom_mask, eval_atom_indices_arr_ignored, x=100,
+                        base_filename="al_traditional"):
+    """
+    Performs Traditional Active Learning using HDBSCAN clustering and combined score selection.
+
+    This function computes pairwise distance features for evaluation frames,
+    clusters them with HDBSCAN, calculates scores based on aggregated uncertainty
+    and error, and selects a set number of frames. It also saves the data needed
+    for later plotting.
+
+    Args:
+        all_frames (list): List of ASE Atoms objects.
+        eval_mask (np.ndarray): Boolean mask for evaluation frames.
+        sigma_atom_all_al (np.ndarray): Flat array of per-atom uncertainties.
+        force_rmse_atom_array_al (np.ndarray): Flat array of per-atom RMSE values.
+        train_atom_mask (np.ndarray): Boolean mask for training atoms.
+        eval_atom_indices_arr_ignored: (Ignored parameter.)
+        x (int): Number of frames to select.
+        base_filename (str): Base filename for saving plot data.
+
+    Returns:
+        tuple: (selected_frames_objects, selected_indices, plot_data_npz_path)
+    """
+    if not HDBSCAN_AVAILABLE:
+        raise ImportError("hdbscan required for traditional AL.")
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch required for traditional AL.")
+
+    print("\n--- Starting Traditional Active Learning (HDBSCAN) ---")
+    n_frames = len(all_frames)
+    atom_counts = [len(f) for f in all_frames]
+    n_total_atoms = sum(atom_counts)
+    cumulative_atoms = np.cumsum([0] + atom_counts)
+    eps = 1e-9
+
+    if len(eval_mask) != n_frames or len(sigma_atom_all_al) != n_total_atoms or \
+       len(force_rmse_atom_array_al) != n_total_atoms or len(train_atom_mask) != n_total_atoms:
+        raise ValueError("Input dimension mismatch in traditional AL.")
+
+    print("Filtering per-atom data for evaluation set...")
+    eval_frame_indices = np.where(eval_mask)[0]
+    if len(eval_frame_indices) == 0:
+        print("No eval frames.")
+        return [], [], None
+
+    atom_eval_mask = ~train_atom_mask
+    filt_unc = sigma_atom_all_al[atom_eval_mask]
+    filt_err = force_rmse_atom_array_al[atom_eval_mask]
+    atom_to_frame_map = np.concatenate([np.full(atom_counts[i], i) for i in range(n_frames)])[atom_eval_mask]
+    if len(filt_unc) == 0:
+        print("No eval atoms found.")
+        return [], [], None
+
+    print("Step 1: Computing pairwise distance features...")
+    distance_features_list = []
+    import torch
+    for i in eval_frame_indices:
+        frame_pos = torch.tensor(all_frames[i].get_positions(), dtype=torch.float32)
+        if len(frame_pos) < 2:
+            continue
+        distances = torch.cdist(frame_pos, frame_pos)
+        triu_mask = torch.triu(torch.ones_like(distances), diagonal=1).bool()
+        pairwise_distances = distances[triu_mask]
+        sorted_distances = (torch.sort(pairwise_distances)[0].numpy()
+                            if pairwise_distances.numel() > 0 else np.array([], dtype=np.float32))
+        distance_features_list.append(sorted_distances)
+    if not distance_features_list:
+        print("No distances computed.")
+        return [], [], None
+    max_pairs = max(len(feat) for feat in distance_features_list) if distance_features_list else 0
+    if max_pairs == 0:
+        distance_features = np.zeros((len(eval_frame_indices), 1), dtype=np.float32)
+    else:
+        distance_features = np.array(
+            [np.pad(f.astype(np.float32), (0, max_pairs - len(f)))
+             if len(f) < max_pairs else f[:max_pairs].astype(np.float32)
+             for f in distance_features_list], dtype=np.float32
+        )
+
+    print("Step 2: Clustering with HDBSCAN...")
+    unique_eval_frames = eval_frame_indices  # Original indices
+    num_unique_frames = len(unique_eval_frames)
+    hdbscan_cluster_labels = np.full(num_unique_frames, -1, dtype=int)
+    unique_clusters = []
+    n_noise = num_unique_frames
+
+    if distance_features.shape[0] < 5:
+        print("Warning: Too few samples for reliable clustering. Skipping HDBSCAN.")
+    else:
+        if distance_features.shape[1] > 1 and np.any(np.var(distance_features, axis=0) > eps):
+            n_pca_components = min(50, distance_features.shape[1], distance_features.shape[0] - 1)
+            n_pca_components = max(1, n_pca_components)
+            pca = PCA(n_components=n_pca_components, svd_solver='auto')
+            try:
+                distance_features_reduced = pca.fit_transform(distance_features)
+            except Exception as e_pca:
+                print(f"PCA failed: {e_pca}. Using original features.")
+                distance_features_reduced = distance_features
+        else:
+            distance_features_reduced = distance_features
+
+        print(f"Using feature shape for HDBSCAN: {distance_features_reduced.shape}")
+        min_samples_hdbscan = min(5, max(2, distance_features_reduced.shape[0] // 10))
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=min_samples_hdbscan,
+                                    metric='euclidean',
+                                    cluster_selection_method='eom',
+                                    allow_single_cluster=True)
+        try:
+            hdbscan_cluster_labels = clusterer.fit_predict(distance_features_reduced)
+        except Exception as e_hdb:
+            print(f"HDBSCAN failed: {e_hdb}. Treating all as noise.")
+        unique_clusters = np.unique(hdbscan_cluster_labels[hdbscan_cluster_labels >= 0])
+        n_noise = np.sum(hdbscan_cluster_labels == -1)
+        print(f"Clustered into {len(unique_clusters)} clusters (+ {n_noise} noise points).")
+
+    print("Step 3: Computing frame scores...")
+    atom_scores = filt_unc / (filt_err + eps)
+    agg_error = np.zeros(num_unique_frames)
+    agg_unc = np.zeros(num_unique_frames)
+    mean_score = np.zeros(num_unique_frames)
+    mean_top5_score = np.zeros(num_unique_frames)
+    frame_idx_to_pos = {frame_idx: pos for pos, frame_idx in enumerate(unique_eval_frames)}
+    for pos, f_idx in enumerate(unique_eval_frames):
+        mask = (atom_to_frame_map == f_idx)
+        if not np.any(mask):
+            continue
+        errors = filt_err[mask]
+        uncs = filt_unc[mask]
+        scores = atom_scores[mask]
+        agg_error[pos] = np.nanmean(errors)
+        agg_unc[pos] = np.nanmean(uncs)
+        mean_score[pos] = np.nanmean(scores)
+        if len(scores) > 0:
+            top_perc_val = np.percentile(scores, 95)
+            top_scores = scores[scores >= top_perc_val]
+            if len(top_scores) == 0:
+                top_scores = scores
+            mean_top5_score[pos] = np.mean(top_scores)
+        else:
+            mean_top5_score[pos] = mean_score[pos]
+
+    alpha = 0.50
+    combined_score = alpha * mean_score + (1 - alpha) * mean_top5_score
+    mean_rmse_eval = np.nanmean(agg_error)
+    error_score = agg_error / max(eps, mean_rmse_eval)
+    std_combined = np.nanstd(combined_score)
+    std_cs = ((combined_score - np.nanmean(combined_score)) / max(eps, std_combined)
+              if std_combined > eps else np.zeros_like(combined_score))
+    std_error = np.nanstd(error_score)
+    std_es = ((error_score - np.nanmean(error_score)) / max(eps, std_error)
+              if std_error > eps else np.zeros_like(error_score))
+    q_low, q_high = 0.05, 0.95
+    z_threshold_low = np.sqrt(2) * erfinv(max(-1 + eps, min(1 - eps, 2 * q_low - 1)))
+    z_threshold_high = np.sqrt(2) * erfinv(max(-1 + eps, min(1 - eps, 2 * q_high - 1)))
+    N_over = np.sum(std_cs < z_threshold_low)
+    N_under = np.sum(std_cs > z_threshold_high)
+    N_conf = N_over + N_under
+    N_high_error = np.sum(std_es > z_threshold_high)
+    lambda_ = N_conf / max(eps, N_conf + N_high_error)
+    overall_score = lambda_ * std_cs + (1 - lambda_) * std_es
+    sigma_cs = np.nanstd(combined_score)
+    av_cs = np.nanmean(combined_score)
+    lower_thr_cs = av_cs + z_threshold_low * sigma_cs if sigma_cs > eps else av_cs
+    upper_thr_cs = av_cs + z_threshold_high * sigma_cs if sigma_cs > eps else av_cs
+    frame_conf_labels = ["over" if s < lower_thr_cs else "under" if s > upper_thr_cs else "within"
+                         for s in combined_score]
+    frame_error_labels = ["high" if se > z_threshold_high else "normal" for se in std_es]
+
+    # --- Logging ---
+    log_filename = "adaptive_learning_scores_traditional.log"
+    try:
+        with open(log_filename, "w") as flog:
+            flog.write("Frame\tAggErr\tAggUnc\tCS\tTop5CS\tES\tOverall\tStdCS\tStdES\tConf\tError\n")
+            for i, f_idx in enumerate(unique_eval_frames):
+                flog.write(f"{f_idx}\t{agg_error[i]:.4f}\t{agg_unc[i]:.4f}\t{combined_score[i]:.4f}\t"
+                           f"{mean_top5_score[i]:.4f}\t{error_score[i]:.4f}\t{overall_score[i]:.4f}\t"
+                           f"{std_cs[i]:.4f}\t{std_es[i]:.4f}\t{frame_conf_labels[i]}\t{frame_error_labels[i]}\n")
+            flog.write(f"\nSummary: Over={N_over}, Under={N_under}, HighErr={N_high_error}, Lambda={lambda_:.4f}\n")
+            flog.write(f"CS Thr: Low={lower_thr_cs:.4f}, High={upper_thr_cs:.4f}\n")
+    except Exception as e:
+        print(f"Logging failed: {e}")
+
+    # --- Step 4: Select Frames ---
+    print("Step 4: Selecting frames...")
+    selected_indices = []
+    for cluster_id in unique_clusters:
+        mask = (hdbscan_cluster_labels == cluster_id)
+        cluster_orig_indices = unique_eval_frames[mask]
+        cluster_scores = overall_score[mask]
+        if len(cluster_orig_indices) > 0:
+            selected_indices.append(cluster_orig_indices[np.argmax(cluster_scores)])
+    noise_mask = (hdbscan_cluster_labels == -1)
+    noise_orig_indices = unique_eval_frames[noise_mask]
+    noise_scores = overall_score[noise_mask]
+    if len(noise_scores) > 0:
+        threshold = np.percentile(overall_score[~np.isnan(overall_score)], 95)
+        selected_noise = noise_orig_indices[noise_scores > threshold]
+        selected_indices.extend(list(selected_noise))
+    selected_indices = list(np.unique(selected_indices))
+    current_count = len(selected_indices)
+    if current_count > x:
+        scores_dict = {idx: overall_score[frame_idx_to_pos[idx]] for idx in selected_indices}
+        selected_indices = sorted(selected_indices, key=lambda idx: scores_dict.get(idx, -np.inf), reverse=True)[:x]
+    elif current_count < x:
+        needed = x - current_count
+        all_scores = [(idx, overall_score[frame_idx_to_pos[idx]]) for idx in unique_eval_frames
+                      if not np.isnan(overall_score[frame_idx_to_pos[idx]])]
+        candidates = [(idx, score) for idx, score in all_scores if idx not in selected_indices]
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        selected_indices.extend([idx for idx, _ in candidates[:needed]])
+    print(f"Selected {len(selected_indices)} frames.")
+
+    try:
+        with open(log_filename, "a") as flog:
+            flog.write("\n--- Selected Frames ---\n")
+            flog.write("Frame\tOverall\tCS\tES\tStdCS\tStdES\tConf\tError\tCluster\n")
+            for idx in selected_indices:
+                pos = frame_idx_to_pos[idx]
+                cluster_label = hdbscan_cluster_labels[pos]
+                flog.write(f"{idx}\t{overall_score[pos]:.4f}\t{combined_score[pos]:.4f}\t"
+                           f"{error_score[pos]:.4f}\t{std_cs[pos]:.4f}\t{std_es[pos]:.4f}\t"
+                           f"{frame_conf_labels[pos]}\t{frame_error_labels[pos]}\t{cluster_label}\n")
+    except Exception as e:
+        print(f"Logging selected failed: {e}")
+
+    # --- Save Plot Data ---
+    npz_filename = f"{base_filename}_plot_data.npz"
+    print(f"Saving plotting data to {npz_filename}...")
+    try:
+        save_dict = {
+            "overall_score": overall_score,
+            "agg_error": agg_error,
+            "agg_unc": agg_unc,
+            "combined_score": combined_score,
+            "error_score": error_score,
+            "frame_conf_labels": np.array(frame_conf_labels),
+            "frame_error_labels": np.array(frame_error_labels),
+            "hdbscan_cluster_labels": hdbscan_cluster_labels,
+            "unique_eval_frames": unique_eval_frames,
+            "selected_indices": np.array(selected_indices, dtype=int),
+            "lower_thr_cs": lower_thr_cs,
+            "upper_thr_cs": upper_thr_cs,
+            "av_cs": av_cs,
+            "z_threshold_high_es": z_threshold_high,
+            "mean_es": np.nanmean(error_score),
+            "std_es": np.nanstd(error_score)
+        }
+        np.savez_compressed(npz_filename, **save_dict)
+    except Exception as e_save:
+        print(f"Warning: Failed to save AL traditional plot data: {e_save}")
+        npz_filename = None
+
+    # --- Return ---
+    selected_frames_objects = [all_frames[idx].copy() for idx in selected_indices]
+    print(f"Traditional adaptive learning returning {len(selected_indices)} frames.")
+    return selected_frames_objects, selected_indices, npz_filename
+
+# End of active_learning.py
+
