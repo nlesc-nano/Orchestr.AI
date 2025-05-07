@@ -42,7 +42,18 @@ cp *.npz $SCRATCH_DIR
 
 cd $SCRATCH_DIR
 
+# Run training
 python -m mlff_qd.training.main --config "$CONFIG_FILE"
+
+# Check if training was successful and do the inference if it is possible
+if [ $? -eq 0 ]; then
+    echo "Training completed successfully. Starting inference."
+    # Run inference
+    python -m mlff_qd.training.inference --config "$CONFIG_FILE"
+else
+    echo "Training failed. Skipping inference."
+fi
+
 
 mkdir -p $CDIR/$SLURM_JOB_ID
 cp -r * $CDIR/$SLURM_JOB_ID
