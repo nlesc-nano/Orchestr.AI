@@ -129,6 +129,8 @@ By default, it will look for a input file called input.yaml. Thus, if an user wa
 python -m mlff_qd.training.main --config input_file.yaml
 ```
 
+In the running_files folder there is an example of file for running the training, and afterwards the inference, in a cluster using a slurm queue system.
+
 ### Inference code
 After the training has finished, an user can run the inference code that generates the MLFF:
 ```bash
