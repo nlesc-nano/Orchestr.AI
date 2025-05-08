@@ -74,7 +74,6 @@ def save_forces(all_actual_forces_flat,all_predicted_forces_flat, dataset_type):
     except Exception as e:
         print(f"Error saving force results: {e}")
         
-@timer
 def run_inference(loader, dataset_type, best_model, device, property_units, new_dataset):
     all_actual_energy = []
     all_predicted_energy = []
