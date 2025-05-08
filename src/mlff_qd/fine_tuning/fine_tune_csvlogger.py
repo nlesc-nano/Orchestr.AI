@@ -2,15 +2,19 @@ import os
 import logging
 import torch
 import numpy as np
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, Callback
 from pytorch_lightning.loggers import CSVLogger  # Import CSVLogger
-from utils.data_processing import load_data, preprocess_data, setup_logging_and_dataset, prepare_transformations, setup_data_module, show_dataset_info
-from utils.model import setup_model
-from utils.trainer_utils import setup_task_and_trainer
-from utils.helpers import load_config, parse_args, get_optimizer_class, get_scheduler_class
-from utils.logging_utils import setup_logging
+
 import schnetpack as spk
+
+from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+        prepare_transformations, setup_data_module, show_dataset_info )
+from mlff_qd.utils.model import setup_model
+from mlff_qd.utils.trainer_utils import setup_task_and_trainer
+from mlff_qd.utils.helpers import load_config, parse_args, get_optimizer_class, get_scheduler_class
+from mlff_qd.utils.logging_utils import setup_logging
 
 def set_seed(seed):
     np.random.seed(seed)
