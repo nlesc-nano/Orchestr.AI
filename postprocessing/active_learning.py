@@ -17,6 +17,7 @@ import traceback
 import matplotlib.pyplot as plt
 import scipy.optimize
 import torch
+from typing import List, Optional, Tuple
 from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
 from scipy.special import erfinv
@@ -25,6 +26,7 @@ from scipy.spatial.distance import cdist
 from ase.data import chemical_symbols
 
 import scipy.linalg
+import scipy.linalg, scipy.spatial.distance
 from postprocessing.plotting import plot_swapped_final_tight
 from typing import Tuple, List, Optional 
 from scipy.ndimage import gaussian_filter1d
@@ -53,13 +55,41 @@ except ImportError:
 # 1. Hyper‑parameter calibration (reg, α²) via GCV + moment‑matching
 # -----------------------------------------------------------------------------
 
-def calibrate_alpha_reg_gcv(F_eval: np.ndarray, y: np.ndarray,
-                             lambda_bounds: Tuple[float, float] = (1e-6, 1e4)):
+import numpy as np
+import scipy.optimize
+import scipy.linalg
+from typing import Tuple
+
+def calibrate_alpha_reg_gcv(
+    F_eval: np.ndarray,
+    y: np.ndarray,
+    lambda_bounds: Tuple[float, float] = (1e-6, 1e4)
+) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calibrate a ridge (GP) model via GCV and compute predictive variances.
+    Adds adaptive jitter to ensure the covariance matrix is PD for Cholesky.
+
+    Args:
+      F_eval       (n_eval x d): features for validation frames.
+      y            (n_eval,)    : target residuals for validation.
+      lambda_bounds: (lam_min, lam_max) for GCV search.
+
+    Returns:
+      alpha_sq     : estimated noise scale (α²).
+      lam_opt      : chosen ridge parameter.
+      terms_lat    : predictive variance terms per evaluation row.
+      G_eval       : whitened latent features for evaluation (n_eval x d).
+      L            : Cholesky factor (d x d) of (F^T F + lam_opt I + jitter).
+    """
+    # Dimensions
     n, d = F_eval.shape
+
+    # SVD for GCV
     U, s, _ = np.linalg.svd(F_eval, full_matrices=False)
     UTy = U.T @ y
     s2 = s**2
 
+    # GCV objective: log((||y - y_hat||^2)/(n - df)^2)
     def gcv_obj(log_lam):
         lam = np.exp(log_lam)
         a = s2 / (s2 + lam)
@@ -68,17 +98,50 @@ def calibrate_alpha_reg_gcv(F_eval: np.ndarray, y: np.ndarray,
         resid = y - y_hat
         return np.log((resid @ resid) / (n - df)**2)
 
-    res = scipy.optimize.minimize_scalar(gcv_obj, bounds=np.log(lambda_bounds), method='bounded')
+    # Find optimal lambda
+    res = scipy.optimize.minimize_scalar(
+        gcv_obj,
+        bounds=np.log(lambda_bounds),
+        method='bounded'
+    )
     lam_opt = np.exp(res.x)
-    # predictive variance terms
-    L = np.linalg.cholesky((F_eval.T @ F_eval) + lam_opt * np.eye(d))
+
+    # Build covariance matrix A = F^T F + lam_opt * I
+    A = F_eval.T @ F_eval + lam_opt * np.eye(d)
+
+    # Adaptive jitter for Cholesky stability
+    base_jitter = 1e-8 * np.trace(A) / d
+    jitter = 0.0
+    for i in range(6):  # jitter from base*10^0 up to base*10^5
+        try:
+            L = np.linalg.cholesky(A + jitter * np.eye(d))
+            if jitter > 0:
+                print(f"[GCV] added jitter={jitter:.1e} to make A PD")
+            break
+        except np.linalg.LinAlgError:
+            jitter = base_jitter * (10 ** i)
+    else:
+        raise np.linalg.LinAlgError(
+            f"A not PD even after jitter up to {jitter:.1e}" )
+
+    # Whiten evaluation features: G_eval = (L^{-1} F^T)^T
     G_eval = scipy.linalg.solve_triangular(L, F_eval.T, lower=True).T
+
+    # Predictive variance terms per evaluation row
     terms_lat = np.sum(G_eval**2, axis=1)
-    resid_mean = np.mean((y - ((s2/(s2+lam_opt))*UTy) @ U.T) ** 2)
+
+    # Compute residual mean square from SVD-based fit
+    a = s2 / (s2 + lam_opt)
+    y_hat = (a * UTy) @ U.T
+    resid_mean = np.mean((y - y_hat)**2)
+
+    # Noise scale alpha^2
     alpha_sq = resid_mean / np.mean(terms_lat)
 
     print(f"[GCV] λ = {lam_opt:.3e}, α² = {alpha_sq:.3e}")
     return alpha_sq, lam_opt, terms_lat, G_eval, L
+
+
 
 # -----------------------------------------------------------------------------
 # 2. FPS‑W sampler (uncertainty‑biased farthest‑point sampling)
@@ -190,123 +253,451 @@ def fps_uncertainty(
 def adaptive_learning_mig_calibrated(
         all_frames: List,
         eval_mask: np.ndarray,
-        sigma_e_al: np.ndarray,
         delta_E_frame: np.ndarray,
         mean_l_al: np.ndarray,
         *,
+        force_rmse_per_comp: Optional[np.ndarray] = None,
         target_rmse_conv: float,
         beta: float = 0.5,
         drop_init: float = 0.5,
         min_k: int = 5,
         max_k: Optional[int] = None,
         score_floor: Optional[float] = None,
-        base: str = "al_mig_v4"
+        base: str = "al_mig_v7"
 ) -> Tuple[List, np.ndarray]:
-    """
-    Active learning routine with auto-inferred atom count for score_floor.
-    Prints expected RMSE, auto and used floors.
+    """Active-learning: energy uncertainty *or* raw force RMSE trigger.
+
+    Frames enter FPS-W if
+        σ_E > σ_E,emp  OR  RMSE_F_raw > 0.03 eV Å⁻¹.
+
+    No force calibration is performed; the raw per-frame RMSE array is used
+    directly. FPS-W still works with latent distance and energy uncertainty only.
     """
 
-    # 1) train/validation split
-    N, d = mean_l_al.shape
+    # ---------- 1) split ----------------------------------------------------
     train_idx = np.where(~eval_mask)[0]
     eval_idx  = np.where(eval_mask)[0]
     F_train   = mean_l_al[train_idx]
     F_eval    = mean_l_al[eval_idx]
-    y_val     = delta_E_frame[eval_idx]
+    y_val_E   = delta_E_frame[eval_idx]
 
-    # 2) calibrate alpha^2 and lambda
-    alpha_sq, lam, terms_lat, G_eval, L = calibrate_alpha_reg_gcv(F_eval, y_val)
-    G_train = scipy.linalg.solve_triangular(L, F_train.T, lower=True).T
-    sigma_eval = np.sqrt(alpha_sq * terms_lat)
+    # ---------- 2) energy calibration --------------------------------------
+    alpha_sq_E, lam_E, terms_lat_E, G_eval_E, L_E = calibrate_alpha_reg_gcv(F_eval, y_val_E)
+    G_train = scipy.linalg.solve_triangular(L_E, F_train.T, lower=True).T
+    sigma_eval_E = np.sqrt(alpha_sq_E * terms_lat_E)
 
-    # 3) compute median latent distance
-    d_lat_eval = scipy.spatial.distance.cdist(G_eval, G_train).min(axis=1)
-    median_d = float(np.median(d_lat_eval))
-    # initial score and distance for all eval frames (for logging)
-    score_all_full = (d_lat_eval ** (1 - beta)) * (sigma_eval ** beta)
+    # ---------- 3) latent distances ----------------------------------------
+    d_lat_eval = scipy.spatial.distance.cdist(G_eval_E, G_train).min(axis=1)
+    score_all_full = (d_lat_eval ** (1 - beta)) * (sigma_eval_E ** beta)
     dist_all_full  = d_lat_eval.copy()
 
-    # 4) derive auto_floor from target_rmse_conv
-    n_atoms   = len(all_frames[0])
-    rho_eV    = 0.0025 # Threshold on uncertainty per atom 
-    sigma_emp = rho_eV * np.sqrt(n_atoms) # hard limit in eV
-    q75_d      = float(np.quantile(d_lat_eval, 0.75)) 
-    beta = 0.0  
+    # ---------- 4) empirical energy floor ----------------------------------
+    n_atoms     = len(all_frames[0])
+    rho_eV      = 0.002
+    sigma_emp_E = rho_eV * np.sqrt(n_atoms)
+    q75_d       = float(np.quantile(d_lat_eval, 0.75))
+    beta_floor  = beta
+    auto_floor  = (q75_d ** (1 - beta_floor)) * (sigma_emp_E ** beta_floor)
+    used_floor  = score_floor if score_floor is not None else auto_floor
 
-    auto_floor = (q75_d ** (1 - beta)) * (sigma_emp ** beta)
-    used_floor = score_floor if score_floor is not None else auto_floor
-    drop_init = 1.0
-
-    # diagnostics -----------------------------------------------------------
-    print(f"[AL] sigma_emp (total)    : {sigma_emp:.5f} eV")
-    print(f"[AL] q75_d                : {q75_d:.5f}")
-    print(f"[AL] auto score_floor     : {auto_floor:.5f}")
-    print(f"[AL] drop_init            : {drop_init:.5f}")
-    print(f"[AL] beta                 : {beta:.5f}") 
+    # Diagnostics
+    print(f"[AL] rho_eV               : {rho_eV:.5f} eV/atom")
+    print(f"[AL] sigma_emp_E (total)   : {sigma_emp_E:.5f} eV")
+    print(f"[AL] q75_d                 : {q75_d:.5f}")
+    print(f"[AL] beta (floor calc)     : {beta_floor:.5f}")
+    print(f"[AL] auto score_floor      : (q75_d^(1-beta))*(sigma_emp_E^beta) = {auto_floor:.5f}")
+    print(f"[AL] drop_init             : {drop_init:.5f}")
     if score_floor is not None:
-        print(f"[AL] user-supplied floor  : {score_floor:.5f} (overriding)")
-    print(f"[AL] *** FLOOR IN USE     : {used_floor:.5f}")
+        print(f"[AL] user-supplied floor   : {score_floor:.5f} (overriding)")
+    print(f"[AL] *** FLOOR IN USE      : {used_floor:.5f}")
 
-    # 5) candidate selection threshold
-    cand_pos = np.where(sigma_eval > sigma_emp)[0]
+    # ---------- 5) raw force RMSE (per‑component → per‑frame) -----------------
+    use_forces = force_rmse_per_comp is not None
+    print(f"shape force_rmse_per_comp: {force_rmse_per_comp.shape}")
+    if use_forces:
+        # sanity check on length
+        n_total_comp = sum(3 * len(fr) for fr in all_frames)
+        if force_rmse_per_comp.shape[0] != n_total_comp:
+            raise ValueError("force_rmse_per_comp length mismatch "
+                             f"({force_rmse_per_comp.shape[0]} ≠ {n_total_comp})")
+    
+        # reduce to one scalar per frame: max component‑wise error in that frame
+        rmse_F_per_frame = np.empty(len(all_frames))
+        flat_ptr = 0
+        for i, fr in enumerate(all_frames):
+            n_comp = 3 * len(fr)
+            rmse_F_per_frame[i] = np.max(force_rmse_per_comp[flat_ptr:flat_ptr + n_comp])
+            flat_ptr += n_comp
+    
+        # keep only the eval split
+        rmse_F_eval = rmse_F_per_frame[eval_idx]
+    else:
+        rmse_F_eval = np.full(eval_idx.shape, np.nan)
+    
+    rmse_thresh_F = 0.05      # eV / Å
+    print(f"[AL] rmse threshold (per‑component→frame max): {rmse_thresh_F:.5f}")
+    
+    # DEBUG ---------------------------------------------------------------
+    print(f"[Debug] σ_E    min / max : {np.nanmin(sigma_eval_E):.4f} / {np.nanmax(sigma_eval_E):.4f}")
+    if use_forces:
+        print(f"[Debug] RMSE_F per‑frame (max comp) min / max : "
+              f"{np.nanmin(rmse_F_eval):.4f} / {np.nanmax(rmse_F_eval):.4f}")
+        print(f"[Debug] RMSE_F sample : {rmse_F_eval[:10]} ...")
+    
+    # ---------- 6) candidate mask ---------------------------------------
+    if use_forces:
+        trig_E = sigma_eval_E > sigma_emp_E
+        trig_F = rmse_F_eval   > rmse_thresh_F
+        cand_pos = np.where(trig_E | trig_F)[0]
+    
+        # extra diagnostics
+        print(f"[Debug] candidates from σ_E only   : {np.sum(trig_E & ~trig_F)}")
+        print(f"[Debug] candidates from RMSE_F only: {np.sum(trig_F & ~trig_E)}")
+        print(f"[Debug] candidates from both       : {np.sum(trig_E &  trig_F)}")
+    else:
+        cand_pos = np.where(sigma_eval_E > sigma_emp_E)[0]
+    
+    print(f"[Debug] total candidate positions   : {len(cand_pos)}")
+
+    if len(cand_pos) == 0:
+        print("[AL] No candidates selected; returning empty.")
+        return [], np.array([], dtype=int)
     cand_idx = eval_idx[cand_pos]
-    print(f"[Pool] thr = {sigma_emp:.5f} eV, candidates = {len(cand_idx)}")
-    # 6) FPS-W sampling
-    sel_rel_pos, fps_scores_cand, dists_cand, score_all_cand, dist_all_cand = fps_uncertainty(
-            G_eval[cand_pos], G_train, sigma_eval[cand_pos],
-            beta=beta, drop_init=drop_init, min_k=min_k, score_floor=used_floor, verbose=True
-        )
 
-    # 3) Build full-length logs:
-    fps_full  = score_all_full.copy()        # full eval-set initial scores
-    dist_full = dist_all_full.copy()        # full eval-set distances
-    # override only the candidate entries with actual FPS picks
+    # ---------- 7) FPS-W sampling -----------------------------------------
+    sel_rel_pos, fps_scores_cand, dists_cand, score_all_cand, dist_all_cand = fps_uncertainty(
+        G_eval_E[cand_pos], G_train, sigma_eval_E[cand_pos],
+        beta=beta, drop_init=drop_init, min_k=min_k, score_floor=used_floor, verbose=True)
+
+    # ---------- 8) compute TI metric for latent --------------------------
+    # information-based score, useful for logging
+    delta_i_lat = 0.5 * np.log1p(alpha_sq_E * terms_lat_E)  # shape (n_eval,)
+
+    # ---------- 9) assemble logs -------------------------------------------
+    fps_full, dist_full = score_all_full.copy(), dist_all_full.copy()
     sel_pos = cand_pos[sel_rel_pos]
     fps_full[sel_pos]  = fps_scores_cand
     dist_full[sel_pos] = dists_cand
+    sel_idx  = cand_idx[sel_rel_pos]
 
-    # 4) sel_idx maps back into all_frames via:
-    sel_idx = cand_idx[sel_rel_pos]
-    print(f"[Select] picked {len(sel_idx)} out of {len(cand_idx)}")
+    print(f"[Select] picked {len(sel_idx)} / {len(cand_idx)} candidates (eval {len(eval_idx)})")
 
-    # 5) ΔI metrics ----------------------------------------------------------
-    delta_i_lat = 0.5 * np.log1p(alpha_sq * terms_lat)
-    X_ens = sigma_e_al[eval_idx]
-    mask_val = ~np.isnan(X_ens) & ~np.isnan(y_val)
-    alpha_sq_ens = (np.mean((y_val[mask_val]**2) / (X_ens[mask_val]**2)) if mask_val.any() else 1.)
-    delta_i_ens = 0.5 * np.log1p(alpha_sq_ens * X_ens**2)
-
-    # 6) overlap logging ------------------------------------------------------
-    k = len(sel_idx)
-    top_lat = eval_idx[np.argsort(delta_i_lat)[::-1][:k]]
-    top_ens = eval_idx[np.argsort(delta_i_ens)[::-1][:k]]
-    print(f"[Overlap] Lat/Ens={len(set(top_lat)&set(top_ens))}, "
-          f"Lat/New={len(set(top_lat)&set(sel_idx))}, "
-          f"Ens/New={len(set(top_ens)&set(sel_idx))}")
-
-    # 7) log details ---------------------------------------------------------
+    # ---------- logging -----------------------------------------------------
     log_name = f"{base}_detailed_log.txt"
     with open(log_name, 'w') as f:
-        # Header line
-        f.write("Idx\tσ\tFPS_score\tDist\tΔI_lat\tΔI_ens\tSelected\n")
+        f.write("Idx	σ_E	FPS_score	Dist	Δ_i_lat	RMSE_F	Selected")
         for i, idx in enumerate(eval_idx):
-            f.write(f"{idx}\t{sigma_eval[i]:.5f}\t{fps_full[i]:.5f}\t{dist_full[i]:.5f}\t"
-                    f"{delta_i_lat[i]:.5f}\t{delta_i_ens[i]:.5f}\t{idx in sel_idx}\n")
+            f.write(f"{idx}	{sigma_eval_E[i]:.5f}	{fps_full[i]:.5f}	{dist_full[i]:.5f}	"
+                    f"{delta_i_lat[i]:.5f}	{rmse_F_eval[i]:.5f}	{idx in sel_idx}")
     print(f"[Log] {log_name}")
 
-
-    # 8) σ vs score plot ----------------------------------------------------
+    # ---------- plot --------------------------------------------------------
     fig, ax = plt.subplots(figsize=(6,5))
     sel_flag = np.isin(eval_idx, sel_idx)
-    ax.scatter(sigma_eval[~sel_flag], fps_full[~sel_flag], alpha=0.3, label='not selected')
-    ax.scatter(sigma_eval[sel_flag], fps_full[sel_flag], marker='x', label='selected')
+    ax.scatter(sigma_eval_E[~sel_flag], fps_full[~sel_flag], alpha=0.3, label='not selected')
+    ax.scatter(sigma_eval_E[sel_flag], fps_full[sel_flag], marker='x', label='selected')
     ax.set_xscale('log'); ax.set_yscale('log')
-    ax.set_xlabel('σ'); ax.set_ylabel('FPS score'); ax.legend()
+    ax.set_xlabel('σ_E'); ax.set_ylabel('FPS score'); ax.legend()
     plt.tight_layout(); plt.savefig(f"{base}_sigma_vs_score.png", dpi=300); plt.close()
 
-    # 9) return -------------------------------------------------------------
+    # ---------- return ------------------------------------------------------
+    sel_objs = [all_frames[i - min(eval_idx)] for i in sel_idx]
+    return sel_objs, sel_idx
 
+# =============================================================================
+#  Ensemble‑based active learning  (n_models ≥ 2)
+# =============================================================================
+
+def adaptive_learning_ensemble_calibrated(
+        all_frames: List,
+        eval_mask: np.ndarray,
+        sigma_E_cal: np.ndarray,
+        delta_E_frame: np.ndarray,
+        mean_l_al: np.ndarray,
+        *,
+        force_rmse_per_comp: Optional[np.ndarray] = None,
+        beta: Optional[float] = 0.5,
+        drop_init: float = 1.0,
+        min_k: int = 5,
+        max_k: Optional[int] = None,
+        score_floor: Optional[float] = None,
+        base: str = "al_ens_v1",
+        **kwargs) -> Tuple[List, np.ndarray]:
+    """
+    Two-stage AL (signature unchanged):
+      1) hard gate on normalized uncertainties (σ_E + max|F|_err)
+      2) diversity FPS on raw latent distances (β=0)
+
+    Optional kwargs for tolerances:
+      rho_eV     : eV per atom for σ_E tolerance   (default 0.002)
+      rmse_tol_F : eV/Å tolerance for max|F|_err   (default 0.05)
+    """
+
+    eps = 1e-9
+    rho_eV     = kwargs.get("rho_eV", 0.002)
+    rmse_tol_F = kwargs.get("rmse_tol_F", 0.05)
+    w_E = w_F = 0.5  # equal blending weights after normalization
+
+    # 1) split train/eval
+    train_idx = np.where(~eval_mask)[0]
+    eval_idx  = np.where(eval_mask)[0]
+    print(f"[1] split: train={len(train_idx)}, eval={len(eval_idx)}")
+
+    # 2) latent whitening & raw distance
+    _, _, _, G_eval_E, L_E = calibrate_alpha_reg_gcv(
+        mean_l_al[eval_idx], delta_E_frame[eval_idx])
+    G_train = scipy.linalg.solve_triangular(
+        L_E, mean_l_al[train_idx].T, lower=True).T
+    d_lat_eval = scipy.spatial.distance.cdist(G_eval_E, G_train).min(axis=1)
+    print(f"[2] d_lat raw stats: mean={d_lat_eval.mean():.3f}, "
+          f"std={d_lat_eval.std():.3f}, min={d_lat_eval.min():.3f}, max={d_lat_eval.max():.3f}")
+
+    # 3) per-frame max-RMSE_F
+    if force_rmse_per_comp is not None:
+        comps_pf = np.array([3*len(fr) for fr in all_frames], int)
+        starts   = np.concatenate(([0], np.cumsum(comps_pf[:-1])))
+        rmse_F_pf = np.maximum.reduceat(force_rmse_per_comp, starts)[:len(all_frames)]
+        print(f"[3] computed max RMSE_F per frame")
+    else:
+        rmse_F_pf = np.zeros(len(all_frames))
+        print("[3] no force_rmse_per_comp → using zeros")
+
+    rmse_F_eval  = rmse_F_pf[eval_idx]
+    sigma_E_eval = sigma_E_cal[eval_idx]
+    print(f"[3] rmse_F_eval: mean={rmse_F_eval.mean():.3f}, std={rmse_F_eval.std():.3f}")
+    print(f"[3] sigma_E_eval: mean={sigma_E_eval.mean():.3f}, std={sigma_E_eval.std():.3f}")
+
+    # 4) normalize uncertainties (z-score)
+    z_sigma = (sigma_E_eval - sigma_E_eval.mean()) / (sigma_E_eval.std() + eps)
+    z_rmse  = (rmse_F_eval  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
+    print(f"[4] z_sigma stats: mean={z_sigma.mean():.3f}, std={z_sigma.std():.3f}, "
+          f"min={z_sigma.min():.3f}, max={z_sigma.max():.3f}")
+    print(f"[4] z_rmse  stats: mean={z_rmse.mean():.3f}, std={z_rmse.std():.3f}, "
+          f"min={z_rmse.min():.3f}, max={z_rmse.max():.3f}")
+
+    # 5) empirical anchor in same z-units
+    n_atoms     = len(all_frames[0])
+    sigma_tol_E = rho_eV * np.sqrt(n_atoms)
+    z_sigma_emp = (sigma_tol_E - sigma_E_eval.mean()) / (sigma_E_eval.std() + eps)
+    z_rmse_emp  = (rmse_tol_F  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
+    print(f"[5] σ_tol_E={sigma_tol_E:.5f} (z={z_sigma_emp:+.3f}), "
+          f"F_tol={rmse_tol_F:.5f} (z={z_rmse_emp:+.3f})")
+
+    # 6) shift so empirical anchor → 0
+    u_frame_z = w_E*z_sigma + w_F*z_rmse
+    u_emp     = w_E*z_sigma_emp + w_F*z_rmse_emp
+    u_shift   = u_frame_z - u_emp
+    print(f"[6] u_emp anchor = {u_emp:+.3f}")
+    print(f"[6] u_shift stats: mean={u_shift.mean():.3f}, std={u_shift.std():.3f}, "
+          f"min={u_shift.min():.3f}, max={u_shift.max():.3f}")
+
+    # 7) hard gate on shifted > 0, ensure at least min_k
+    keep = u_shift > 0.0
+    if keep.sum() < min_k:
+        extras = np.argsort(u_shift)[-min_k:]
+        keep[extras] = True
+        print(f"[7] softened gate to reach min_k={min_k}")
+    kept_idx = eval_idx[keep]
+    print(f"[7] gate kept {keep.sum()}/{len(keep)} frames: {kept_idx}")
+
+    eval_idx_g  = kept_idx
+    G_eval_E_g  = G_eval_E[keep]
+    d_lat_g     = d_lat_eval[keep]
+
+    # 8) prepare FPS (distance-only)
+    beta_fps    = 0.0
+    score_short = d_lat_g - d_lat_g.min() + eps
+    print(f"[8] FPS pool={len(eval_idx_g)}")
+    print(f"[8] score_short stats: min={score_short.min():.3f}, "
+          f"median={np.median(score_short):.3f}, max={score_short.max():.3f}")
+
+    # 9) early-exit floor on raw distance
+    if score_floor is None:
+        score_floor = float(np.quantile(d_lat_g, 0.75))
+        print(f"[9] auto score_floor (q75 d_lat) = {score_floor:.5f}")
+    else:
+        print(f"[9] user score_floor = {score_floor:.5f}")
+
+    # 10) run FPS
+    print(f"[10] FPS params: β={beta_fps}, drop_init={drop_init}, min_k={min_k}")
+    sel_rel, sel_score, sel_dist, score_all_start, dist_all_start = fps_uncertainty(
+        G_eval_E_g, G_train, u_shift[keep],
+        beta=beta_fps, drop_init=drop_init,
+        min_k=min_k, score_floor=score_floor, verbose=True
+    )
+    sel_idx = eval_idx_g[sel_rel]
+    print(f"[10] FPS selected {len(sel_idx)} frames: {sel_idx}")
+
+    # compute d2sel: distance to nearest selected among gate-passed
+    D = scipy.spatial.distance.cdist(G_eval_E_g, G_eval_E_g[sel_rel])
+    d2sel_g = D.min(axis=1)
+    d2sel   = np.full(len(eval_idx), np.nan)
+    d2sel[keep] = d2sel_g
+
+        # prepare sel_score_all: start with initial FPS scores for all eval frames
+    sel_score_all = score_all_start.copy()
+    # override with actual selection-time scores for selected indices
+    sel_score_all[sel_rel] = sel_score
+
+    # 11) apply max_k if given if given
+    if max_k is not None and len(sel_idx) > max_k:
+        sel_idx = sel_idx[:max_k]
+        print(f"[11] truncated to max_k={max_k}")
+    print(f"[11] final selection size = {len(sel_idx)}")
+
+    # 12) log all metrics
+    log_path = f"{base}_log.txt"
+    with open(log_path, "w") as fh:
+        fh.write("Idx\tσ_E\tmaxRMSE_F\td_lat\tz_sigma\tz_rmse\tu_shift\td2sel\tsel_score\tgate\tfps\n")
+        for i, idx in enumerate(eval_idx):
+            gate_flag = keep[i]
+            fps_flag  = idx in sel_idx
+            fh.write(
+                f"{idx}\t{sigma_E_eval[i]:.6f}\t{rmse_F_eval[i]:.6f}\t"
+                f"{d_lat_eval[i]:.6f}\t{z_sigma[i]:.3f}\t{z_rmse[i]:.3f}\t"
+                f"{u_shift[i]:.3f}\t{d2sel[i]:.6f}\t{sel_score_all[i]:.6f}\t"
+                f"{gate_flag}\t{fps_flag}\n"
+            )
+    print(f"[12] log saved to {log_path}")
+
+    # 13) return selected objects + their indices
+    sel_objs = [all_frames[i] for i in sel_idx]
+    return sel_objs, sel_idx
+
+
+def adaptive_learning_ensemble_calibrated_old(
+        all_frames: List,
+        eval_mask: np.ndarray,
+        sigma_E_cal: np.ndarray,
+        delta_E_frame: np.ndarray,
+        mean_l_al: np.ndarray,
+        *,
+        force_rmse_per_comp: Optional[np.ndarray] = None,
+        beta: float = 0.5,
+        drop_init: float = 1.0,
+        min_k: int = 5,
+        max_k: Optional[int] = None,
+        score_floor: Optional[float] = None,
+        base: str = "al_ens_v1") -> Tuple[List, np.ndarray]:
+    """Active learning driven by **calibrated ensemble σ_E** plus latent distance.
+
+    Args
+    ----
+    sigma_E_cal
+        1‑D array of per‑frame calibrated ensemble uncertainties (already scaled).
+    mean_l_al
+        Ensemble‑averaged latent feature matrix (n_frames × d).
+    beta
+        Mixing weight: 0 ⇒ pure latent distance, 1 ⇒ pure σ_E.
+    """
+
+    # 1) split indices -------------------------------------------------------
+    train_idx = np.where(~eval_mask)[0]
+    eval_idx  = np.where(eval_mask)[0]
+    F_train   = mean_l_al[train_idx]
+    F_eval    = mean_l_al[eval_idx]
+    y_val_E   = delta_E_frame[eval_idx]
+
+    # 2) latent whitening on *averaged* features ----------------------------
+    alpha_sq_E, lam_E, terms_lat_E, G_eval_E, L_E = calibrate_alpha_reg_gcv(F_eval, y_val_E)
+    G_train = scipy.linalg.solve_triangular(L_E, F_train.T, lower=True).T
+    d_lat_eval = scipy.spatial.distance.cdist(G_eval_E, G_train).min(axis=1)
+
+    # 3) combined score -----------------------------------------------------
+    score_all_full = (d_lat_eval ** (1 - beta)) * (sigma_E_cal[eval_idx] ** beta)
+
+    # 4) empirical floor ----------------------------------------------------
+    n_atoms     = len(all_frames[0])
+    rho_eV      = 0.002
+    sigma_emp_E = rho_eV * np.sqrt(n_atoms)
+    q75_d       = float(np.quantile(d_lat_eval, 0.75))
+    beta_floor  = beta 
+    auto_floor  = (q75_d ** (1 - beta)) * (sigma_emp_E ** beta)
+    used_floor  = score_floor if score_floor is not None else auto_floor
+
+    print(f"[AL-ENS] rho_eV               : {rho_eV:.5f} eV/atom")
+    print(f"[AL-ENS] sigma_emp_E (total)   : {sigma_emp_E:.5f} eV")
+    print(f"[AL-ENS] q75_d                 : {q75_d:.5f}")
+    print(f"[AL-ENS] beta (floor calc)     : {beta_floor:.5f}")
+    print(f"[AL-ENS] auto score_floor      : (q75_d^(1-beta))*(sigma_emp_E^beta) = {auto_floor:.5f}")
+    print(f"[AL-ENS] drop_init             : {drop_init:.5f}")
+    if score_floor is not None:
+        print(f"[AL-ENS] user-supplied floor   : {score_floor:.5f} (overriding)")
+    print(f"[AL-ENS] *** FLOOR IN USE      : {used_floor:.5f}")
+
+    # ---------- 5) raw force RMSE (per?~@~Qcomponent ?~F~R per?~@~Qframe) -----------------
+    use_forces = force_rmse_per_comp is not None
+    print(f"shape force_rmse_per_comp: {force_rmse_per_comp.shape}")
+    if use_forces:
+        # sanity check on length
+        n_total_comp = sum(3 * len(fr) for fr in all_frames)
+        if force_rmse_per_comp.shape[0] != n_total_comp:
+            raise ValueError("force_rmse_per_comp length mismatch "
+                             f"({force_rmse_per_comp.shape[0]} ?~I|  {n_total_comp})")
+
+        # reduce to one scalar per frame: max component?~@~Qwise error in that frame
+        rmse_F_per_frame = np.empty(len(all_frames))
+        flat_ptr = 0
+        for i, fr in enumerate(all_frames):
+            n_comp = 3 * len(fr)
+            rmse_F_per_frame[i] = np.max(force_rmse_per_comp[flat_ptr:flat_ptr + n_comp])
+            flat_ptr += n_comp
+
+        # keep only the eval split
+        rmse_F_eval = rmse_F_per_frame[eval_idx]
+    else:
+        rmse_F_eval = np.full(eval_idx.shape, np.nan)
+
+    rmse_thresh_F = 0.05      # eV / ?~E
+    print(f"[AL] rmse threshold (per?~@~Qcomponent?~F~Rframe max): {rmse_thresh_F:.5f}")
+
+    # DEBUG ---------------------------------------------------------------
+    print(f"[Debug] ?~C_E    min / max : {np.nanmin(sigma_E_cal):.4f} / {np.nanmax(sigma_E_cal):.4f}")
+    if use_forces:
+        print(f"[Debug] RMSE_F per?~@~Qframe (max comp) min / max : "
+              f"{np.nanmin(rmse_F_eval):.4f} / {np.nanmax(rmse_F_eval):.4f}")
+        print(f"[Debug] RMSE_F sample : {rmse_F_eval[:10]} ...")
+
+    # ---------- 6) candidate mask ---------------------------------------
+    if use_forces:
+        sigma_E_eval = sigma_E_cal[eval_idx]      # shape (n_val,)
+        trig_E = sigma_E_eval > sigma_emp_E
+        trig_F = rmse_F_eval   > rmse_thresh_F
+        cand_pos = np.where(trig_E | trig_F)[0]
+
+        # extra diagnostics
+        print(f"[Debug] candidates from ?~C_E only   : {np.sum(trig_E & ~trig_F)}")
+        print(f"[Debug] candidates from RMSE_F only: {np.sum(trig_F & ~trig_E)}")
+        print(f"[Debug] candidates from both       : {np.sum(trig_E &  trig_F)}")
+    else:
+        cand_pos = np.where(sigma_E_eval > sigma_emp_E)[0]
+
+    print(f"[Debug] total candidate positions   : {len(cand_pos)}")
+    cand_idx = eval_idx[cand_pos]
+
+    # 7) FPS‑W sampling -----------------------------------------------------
+    sel_rel_pos, fps_scores_cand, dists_cand, score_all_cand, dist_all_cand = fps_uncertainty(
+        G_eval_E[cand_pos], G_train, sigma_E_cal[eval_idx][cand_pos],
+        beta=beta, drop_init=drop_init, min_k=min_k, score_floor=used_floor, verbose=True)
+
+    # 8) logging ------------------------------------------------------------
+    fps_full, dist_full = score_all_full.copy(), d_lat_eval.copy()
+    sel_pos = cand_pos[sel_rel_pos]
+    fps_full[sel_pos]  = fps_scores_cand
+    dist_full[sel_pos] = dists_cand
+    sel_idx  = cand_idx[sel_rel_pos]
+
+    print(f"[AL‑ENS] picked {len(sel_idx)} / {len(cand_idx)} candidates")
+
+    log_name = f"{base}_log.txt"
+    with open(log_name, 'w') as f:
+        f.write("Idx	σ_E_cal	d_lat	FPS_score	RMSE_F	Selected")
+        for i, idx in enumerate(eval_idx):
+            f.write(f"{idx}	{sigma_E_cal[idx]:.5f}	{d_lat_eval[i]:.5f}	{fps_full[i]:.5f}	"
+                    f"{rmse_F_eval[i]:.5f}	{idx in sel_idx}")
+    print(f"[Log] {log_name}")
+
+    # 9) return -------------------------------------------------------------
     sel_objs = [all_frames[i - min(eval_idx)] for i in sel_idx]
     return sel_objs, sel_idx
 

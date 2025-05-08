@@ -20,6 +20,7 @@ import traceback
 import contextlib
 import matplotlib.pyplot as plt
 import pandas as pd
+import scipy.linalg
 
 from ase.io import read  # Needed for reading training/eval data
 
@@ -30,13 +31,13 @@ from postprocessing.stats import MLFFStats
 from postprocessing.features import compute_features
 from postprocessing.uq_models import train_uq_models, predict_uncertainties, fit_gmm_and_compute_uncertainty
 #from postprocessing.uq_metrics_calculator import calculate_uq_metrics
-from postprocessing.uq_metrics_calculator import run_uq_metrics, calculate_uq_metrics
+from postprocessing.uq_metrics_calculator import VarianceScalingCalibrator, run_uq_metrics, calculate_uq_metrics
 from postprocessing.mlff_plotting import plot_mlff_stats
 from postprocessing.plotting import (
     generate_uq_plots, 
     generate_al_influence_plots, generate_al_traditional_plots
 )
-from postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, filter_unrealistic_indices, compute_bond_thresholds 
+from postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, filter_unrealistic_indices, compute_bond_thresholds, adaptive_learning_ensemble_calibrated 
 
 
 def setup_evaluation(config):
@@ -215,7 +216,6 @@ def purge_training_structures(true_energies, eval_positions, train_energies, tra
         eval_mask.append(not is_redundant)
     return eval_mask
 
-
 def evaluate_and_cache_ensemble(frames,
                                 model_folder,
                                 device,
@@ -250,38 +250,38 @@ def evaluate_and_cache_ensemble(frames,
 
     Returns
     -------
-    tuple(np.ndarray, np.ndarray, np.ndarray, list[torch.nn.Module] | None)
-        ``(energy_preds, force_preds, latent_preds, model_list_or_None)``
-            * energy_preds : (n_models, n_frames)
-            * force_preds  : (n_models, n_atoms_total, 3)
-            * latent_preds : (n_models, n_frames, latent_dim)
-            * model_list   : list of loaded models, or ``None`` if we
-              loaded the *.npz* from disk.
+    tuple:
+        - energy_preds : np.ndarray, shape (n_models, n_frames)
+        - force_preds  : np.ndarray, shape (n_models, n_atoms_total, 3)
+        - latent_preds : np.ndarray, shape (n_models, n_frames, latent_dim)
+        - latent_atom_preds : np.ndarray, shape (n_models, n_atoms_total, latent_atom_dim)
+        - model_list   : list of loaded models, or ``None`` if loaded from cache
     """
-
     # ------------------------------------------------------------------
-    # 1. Fast‑path: load from cache
+    # 1. Fast‑path: load from cache
     # ------------------------------------------------------------------
     if os.path.isfile(npz_path):
         try:
             with np.load(npz_path, allow_pickle=True) as npz:
-                return (npz["ensemble_energy_preds"],
-                        npz["ensemble_force_preds"],
-                        npz["ensemble_latent_preds"],
-                        None)
+                return (
+                    npz["ensemble_energy_preds"],   # (n_models, n_frames)
+                    npz["ensemble_force_preds"],    # (n_models, total_atoms, 3)
+                    npz["ensemble_latent_preds"],   # (n_models, n_frames, latent_dim)
+                    npz["mean_latent_atom"],  # (total_atoms, latent_atom_dim)
+                    npz["std_latent_atom"],         # (total_atoms, latent_atom_dim)
+                    None
+                )
         except Exception as e:
             print(f"[Ensemble‑cache] Failed to load '{npz_path}': {e}. Recomputing…")
 
     # ------------------------------------------------------------------
-    # 2. Gather model files
+    # 2. Gather model files
     # ------------------------------------------------------------------
     model_files = []
-    # 1) match by pattern (now '*' picks everything)
     for pat in model_glob:
         for f in glob.glob(os.path.join(model_folder, pat)):
             if os.path.isfile(f):
                 model_files.append(f)
-    # 2) fallback: any file at all
     if not model_files:
         for entry in os.listdir(model_folder):
             fp = os.path.join(model_folder, entry)
@@ -292,21 +292,20 @@ def evaluate_and_cache_ensemble(frames,
         raise FileNotFoundError(f"No model files found in {model_folder}")
 
     n_frames = len(frames)
+    total_atoms = sum(len(fr) for fr in frames)
     print(f"[Ensemble] evaluating {len(model_files)} models on {n_frames} frames…")
 
     # ------------------------------------------------------------------
-    # 3. Run each model
+    # 3. Run each model
     # ------------------------------------------------------------------
+    energy_list        = []  # (n_frames,)
+    force_list         = []  # (n_atoms_total,3)
+    latent_list        = []  # (n_frames, latent_dim)
+    latent_atom_list   = []  # (n_atoms_total, latent_atom_dim)
+    loaded_models      = []
 
-    energy_list   = []   # each (n_frames,)
-    force_list    = []   # each (n_atoms_total,3)
-    latent_list   = []   # each (n_frames, latent_dim)
-    loaded_models = []
-
-    dummy_E = [0.0] * n_frames         # we do not need truth for inference
+    dummy_E = [0.0] * n_frames
     dummy_F = [None]  * n_frames
-
-    total_atoms = sum(len(fr) for fr in frames)
 
     for idx, mfile in enumerate(model_files, 1):
         try:
@@ -314,7 +313,8 @@ def evaluate_and_cache_ensemble(frames,
             mdl.eval()
             loaded_models.append(mdl)
 
-            pred_E, pred_F_per_frame, latent_per_frame, _, _ = evaluate_model(
+            # evaluate_model now returns latent_per_atom
+            pred_E, pred_F_per_frame, latent_per_frame, latent_per_atom, _ = evaluate_model(
                 frames,
                 dummy_E,
                 dummy_F,
@@ -329,22 +329,29 @@ def evaluate_and_cache_ensemble(frames,
                 neighbor_list,
             )
 
-            # ---- sanity & reshape -----------------------------------
-            pred_E = np.asarray(pred_E, dtype=np.float64)  # (n_frames,)
+            # ---- energy ------------------------------------------
+            pred_E = np.asarray(pred_E, dtype=np.float64)
             if pred_E.shape[0] != n_frames:
                 raise ValueError("Energy array length mismatch.")
             energy_list.append(pred_E)
 
-            # Forces: concatenate per‑frame arrays              (n_atoms_total,3)
+            # ---- forces ------------------------------------------
             flat_F = np.concatenate(pred_F_per_frame, axis=0)
             if flat_F.shape != (total_atoms, 3):
                 raise ValueError("Flattened force array has wrong shape.")
             force_list.append(flat_F)
 
-            # Latent: stack to (n_frames, latent_dim)
-            if latent_per_frame is None or len(latent_per_frame) != n_frames:
+            # ---- latent per frame -------------------------------
+            lat_arr = np.stack(latent_per_frame)
+            if lat_arr.shape[0] != n_frames:
                 raise ValueError("Latent array length mismatch.")
-            latent_list.append(np.stack(latent_per_frame))
+            latent_list.append(lat_arr)
+
+            # ---- latent per atom --------------------------------
+            flat_La = np.concatenate(latent_per_atom, axis=0)
+            if flat_La.shape[0] != total_atoms:
+                raise ValueError("Flattened atom latent array has wrong shape.")
+            latent_atom_list.append(flat_La)
 
             print(f"  [{idx:>3}/{len(model_files)}] {os.path.basename(mfile)} done")
 
@@ -356,22 +363,31 @@ def evaluate_and_cache_ensemble(frames,
         raise RuntimeError("All ensemble evaluations failed.")
 
     # ------------------------------------------------------------------
-    # 4. Stack & save
+    # 4. Stack & save (cast to float32 to shrink file size)
     # ------------------------------------------------------------------
-    arr_E = np.stack(energy_list)                  # (n_models,n_frames)
-    arr_F = np.stack(force_list)                  # (n_models,n_atoms_total,3)
-    arr_L = np.stack(latent_list)                 # (n_models,n_frames,latent_dim)
+    arr_E      = np.stack(energy_list).astype(np.float32)          # (n_models, n_frames)
+    arr_F      = np.stack(force_list).astype(np.float32)           # (n_models, total_atoms, 3)
+    arr_L      = np.stack(latent_list).astype(np.float32)          # (n_models, n_frames, latent_dim)
+    arr_L_atom = np.stack(latent_atom_list).astype(np.float32)     # (n_models, total_atoms, latent_atom_dim)
+   
+    mean_L_atom = arr_L_atom.mean(axis=0)                          # (total_atoms, latent_atom_dim)
+    std_L_atom  = arr_L_atom.std(axis=0, ddof=1)                   # (total_atoms, latent_atom_dim)
 
     try:
-        np.savez_compressed(npz_path,
-                            ensemble_energy_preds=arr_E,
-                            ensemble_force_preds=arr_F,
-                            ensemble_latent_preds=arr_L)
-        print(f"[Ensemble‑cache] saved → {npz_path}")
+        np.savez_compressed(
+            npz_path,
+            ensemble_energy_preds      = arr_E,
+            ensemble_force_preds       = arr_F,
+            ensemble_latent_preds      = arr_L,
+            mean_latent_atom     = mean_L_atom,
+            std_latent_atom      = std_L_atom
+        )
+        print(f"[Ensemble-cache] saved → {npz_path}")
     except Exception as e:
         print(f"[Warning] Could not save ensemble cache '{npz_path}': {e}")
-
-    return arr_E, arr_F, arr_L, loaded_models
+    
+    return arr_E, arr_F, arr_L, mean_L_atom, std_L_atom, loaded_models
+    
 
 def run_eval(config):
     """
@@ -523,212 +539,275 @@ def run_eval(config):
             plot_mlff_stats(stats_base, min_dists_all, "validation_results" + "_base", True, train_mask, val_mask)
 
     # 7) Ensemble UQ on labeled data
+    # --------------------------------------------------
+    # evaluate.py  —  Section 7: Ensemble UQ + Active‑Learning (FULL)
+    # --------------------------------------------------
+    
+    # 7) Ensemble UQ on labeled data
     ensemble_models = None
-    alpha_sq = None
-    L_chol = None
-    mean_L_al = None
-    if "ensemble" in uq_methods and ensemble_folder:
-        if os.path.isdir(ensemble_folder):
-            ens_E, ens_F, ens_L, ensemble_models = evaluate_and_cache_ensemble(
-                all_frames,
-                ensemble_folder,
-                device,
-                batch_size,
-                eval_log,
-                config,
-                neighbour_list,
-                npz_path="ensemble.npz"
-            )
-            n_models = ens_E.shape[0]
-            if n_models >= 2:
-                mu_E = np.mean(ens_E, axis=0)
-                sigma_E = np.std(ens_E, axis=0, ddof=1)
-                mu_F_flat = np.mean(ens_F, axis=0)
-                sigma_comp = np.std(ens_F, axis=0, ddof=1).flatten()
-                sigma_atom = np.linalg.norm(sigma_comp.reshape(-1,3), axis=1)
-                mf_list = []
-                idx = 0
-                for fr in all_frames:
-                    n = len(fr)
-                    mf_list.append(mu_F_flat[idx:idx+n])
-                    idx += n
-                stats_ens = MLFFStats(all_true_E, mu_E, all_true_F, mf_list, train_mask, val_mask)
-                if do_plot:
-                    features_all, min_dists_all, _, pca, scaler = compute_features(
-                        all_frames, config, train_xyz_path, train_mask, val_mask)
-                    plot_mlff_stats(stats_ens, min_dists_all, "validation_results_ensemble", True, train_mask, val_mask)
-                metrics_train = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom, sigma_E, "Train", "ensemble", eval_log)
-                if do_plot:
-                    generate_uq_plots(metrics_train["npz_path"], "Train", "error_model")
-                metrics_eval = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom, sigma_E, "Eval", "ensemble", eval_log)
-                if do_plot:
-                    generate_uq_plots(metrics_eval["npz_path"], "Eval", "error_model")
-                mean_L_al = np.mean(ens_L, axis=0)
-                F_train_lat = mean_L_al[~val_mask]
-                F_val_lat   = mean_L_al[val_mask]
-                y_val       = stats_ens.delta_E_frame[val_mask]
-                # calibrate
-                alpha_sq, lam, terms_lat, G_eval, L_chol = calibrate_alpha_reg_gcv(F_val_lat, y_val)
-                # validation AL if no pool
-                if al_val_flag and al_val_flag.lower() in ["influence","traditional"]:
-                    if al_val_flag.lower() == "influence":
-                        sel_objs, sel_idx = adaptive_learning_mig_calibrated(
-                            all_frames, val_mask, sigma_E, stats_ens.delta_E_frame, mean_L_al,
-                            target_rmse_conv=0.015,      # ← 10 meV / atom
-                            beta=0.5,
-                            drop_init=0.6,
-                            min_k=5,
-                            max_k=250,                  # hard upper limit
-                            score_floor=None,           # let the code compute it
-                            base="al_mig_val")
-                    else:
-                        train_atom_mask = stats_ens._get_atom_mask(train_mask)
-                        sel_objs, sel_idx, _ = adaptive_learning(
-                            all_frames, val_mask,
-                            sigma_atom, stats_ens.force_rmse_per_atom,
-                            train_atom_mask, None,
-                            eval_cfg.get("num_active_frames",50),
-                            base_filename="al_traditional_val"
-                        )
-                    train_mask[sel_idx] = True
-                    val_mask[sel_idx]   = False
-                     # Save selected validation frames using save_stacked_xyz
-                    if sel_idx is not None and len(sel_idx) > 0:
-                        val_positions = np.array([all_frames[i].get_positions() for i in sel_idx])
-                        val_forces_arr = np.stack([all_true_F[i] for i in sel_idx])
-                        val_energies = all_true_E[sel_idx]
-                        atom_types = all_frames[sel_idx[0]].get_chemical_symbols() if hasattr(all_frames[sel_idx[0]], 'get_chemical_symbols') else []
-                        save_stacked_xyz("to_label_from_val.xyz", val_energies, val_positions, val_forces_arr, atom_types)
-                        print(f"Saved {len(sel_idx)} validation frames for labeling to 'to_label_from_val.xyz'.")
-                    else:
-                        print("No validation frames selected; nothing to save.")
+    mean_L_al       = None
+    alpha_sq = L_chol = None
+    
+    if "ensemble" in uq_methods and ensemble_folder and os.path.isdir(ensemble_folder):
+    
+        ens_E, ens_F, ens_L_frame, mean_L_atom, std_L_atom, ensemble_models = evaluate_and_cache_ensemble(
+            all_frames, ensemble_folder, device, batch_size, eval_log,
+            config, neighbour_list, npz_path="ensemble.npz")
 
-                # 8) Unlabeled pool AL
-                # 8) Unlabeled pool AL
-                # Unlabeled pool AL
-                if pool_xyz_path and os.path.exists(pool_xyz_path):
-                    print(f"[Pool-AL] parsing unlabeled pool from {pool_xyz_path}")
-                    pool_E, pool_F, pool_pos = parse_extxyz(pool_xyz_path, "unlabeled_pool")
-                    pool_frames = read(pool_xyz_path, index=":", format="extxyz")
+        available = ens_E.shape[0]
+        # honor user-configured ensemble_size (fallback to available models)
+        n_models = min(eval_cfg.get("ensemble_size", available), available)
+        print(f"n_models = {n_models}") 
+        # consider only the first `n_models` ensembles as per config
+        ens_E_sel       = ens_E[:n_models]
+        ens_F_sel       = ens_F[:n_models]
+        ens_L_frame_sel = ens_L_frame[:n_models]
+ 
+        mu_E          = np.mean(ens_E_sel, axis=0)
+        mu_F_flat     = np.mean(ens_F_sel, axis=0)
+        mean_L_frame  = np.mean(ens_L_frame_sel, axis=0)   # (n_frames, d_frame)
+
+        # build MLFFStats ----------------------------------------------------
+        mf_list, idx = [], 0
+        for fr in all_frames:
+            n = len(fr)
+            mf_list.append(mu_F_flat[idx:idx+n])
+            idx += n
+        stats_ens = MLFFStats(all_true_E, mu_E, all_true_F, mf_list, train_mask, val_mask)
+        # ---- bookkeeping -------------------------------------------------
+        atom_counts     = stats_ens.atom_counts              # shape (n_frames,)
+        total_comp      = 3 * atom_counts.sum()
+        comp_mask       = np.repeat(val_mask, atom_counts * 3)   # shape (total_comp,)
+        latents_comp    = np.repeat(mean_L_atom, 3, axis=0)
+
+        force_res_flat = stats_ens.all_force_residuals.flatten()      # shape (3*N_tot_atoms,)
+        abs_force_res  = np.abs(force_res_flat).astype(float)
+        rmse_force_comp = abs_force_res
+
+        if n_models > 1:
+            # Ensemble-based spreads
+            sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
+            sigma_comp  = np.std(ens_F_sel, axis=0, ddof=1).flatten()
+        else:
+            # Energy uncertainty from GP calibration
+            F_val_lat    = mean_L_frame[val_mask]
+            y_val_E      = stats_ens.delta_E_frame[val_mask]
+            print(f"Calibrating energy uncertainty on single model")
+            alpha_sq_E, _, terms_lat_E, _, _ = calibrate_alpha_reg_gcv(F_val_lat, y_val_E)
+            sigma_val_E  = np.sqrt(alpha_sq_E * terms_lat_E)
+            sigma_E_raw  = np.full_like(all_true_E, np.nan)
+            sigma_E_raw[val_mask] = sigma_val_E
+    
+            # -------- NEW: latent‑GP for forces -------------------------------
+            F_val_lat_F = latents_comp[comp_mask]              # (n_val_comp, d_atom)
+            y_val_F     = abs_force_res[comp_mask]             # (n_val_comp,)
+            print(f"Calibrating force uncertainty on single model")
+            alpha_sq_F, _, _, _, L_F = calibrate_alpha_reg_gcv(F_val_lat_F, y_val_F)
+            G_all_F     = scipy.linalg.solve_triangular(L_F, latents_comp.T, lower=True).T
+            terms_lat_F_all = np.sum(G_all_F**2, axis=1)          # (total_comp,)
+            sigma_comp_full = np.sqrt(alpha_sq_F * terms_lat_F_all)   # (total_comp,)
+            sigma_comp = sigma_comp_full 
             
-                    # Ensemble evaluation
-                    ens_E_pool, ens_F_pool, ens_L_pool, _ = evaluate_and_cache_ensemble(
-                        pool_frames, ensemble_folder, device, batch_size,
-                        eval_log, config, neighbour_list,
-                        npz_path="ensemble_unlabel.npz"
-                    )
-                    mu_L_pool = np.mean(ens_L_pool, axis=0)
-                    mu_E_pool = np.mean(ens_E_pool, axis=0)
-                    sigma_E_pool = np.std(ens_E_pool, axis=0)
-            
-                    # Plot smoothed energy ± uncertainty
-                    steps = np.arange(len(mu_E_pool))
-                    window = 50
-                    df = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
-                    sm = df.rolling(window, center=True, min_periods=1).mean()
-            
-                    plt.figure(figsize=(6,4))
-                    plt.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
-                    plt.fill_between(
-                        steps,
-                        sm["mu"] - 2 * sm["sigma"],
-                        sm["mu"] + 2 * sm["sigma"],
-                        alpha=0.3,
-                        label="σ (smoothed)"
-                    )
-            
-                    # Compute bond thresholds from training set
-                    train_idx = np.where(train_mask)[0]
-                    train_frames = [all_frames[i] for i in train_idx]
-                    thresholds = compute_bond_thresholds(
-                        train_frames,
-                        neighbour_list,
-                        first_shell_cutoff=3.4
-                    )
-            
-                    # Decimate for AL
-                    pool_stride = eval_cfg.get("pool_stride", 50)
-                    all_idx = np.arange(len(mu_E_pool))
-                    thin_idx = all_idx[::pool_stride]
-                    pool_frames_thin = [pool_frames[i] for i in thin_idx]
-                    F_pool_thin = mu_L_pool[thin_idx]
-                    mu_E_pool_thin = mu_E_pool[thin_idx]
-            
-                    # Identify bad frames by bond-lengths
-                    bad_global = filter_unrealistic_indices(pool_frames, neighbour_list, thresholds)
-                    bad_thin = bad_global.intersection(set(thin_idx))
-                    bad_mask = np.isin(steps, list(bad_thin))
-                    plt.scatter(
-                        steps[bad_mask],
-                        sm["mu"][bad_mask],
-                        marker='x',
-                        label='bond outlier'
-                    )
-                    plt.legend()
-            
-                    plt.xlabel("Pool frame index")
-                    plt.ylabel("Predicted energy")
-                    plt.title("Pool energy ± uncertainty with bond outliers")
-                    plt.tight_layout()
-                    plt.savefig("pool_energy_uncertainty.png", dpi=200)
-                    plt.close()
-            
-                    # Compute σ on training set (for AL sigmacap)
-                    F_train = mean_L_al[~val_mask]
-                    L_chol = L_chol
-                    alpha_sq = alpha_sq
-            
-                    # Windowed pool AL with precomputed bad_global
-                    Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
-                        pool_frames_thin,
-                        F_pool_thin,
-                        F_train,
-                        alpha_sq,
-                        L_chol,
-                        mu_E_pool=mu_E_pool_thin,
-                        thresholds=thresholds,
-                        neighbor_list=neighbour_list,
-                        bad_global=bad_thin,  # Pass bad_thin as bad_global
-                        rho_eV=0.0025,
-                        beta=0.0,
-                        drop_init=1.0,
-                        min_k=5,
-                        window_size=eval_cfg.get("pool_window", 100),
-                        base="al_mig_pool_v3"
-                    )
-            
-                    # Window stats
-                    n_thin = len(thin_idx)
-                    w_size = eval_cfg.get("pool_window", 100)
-                    n_win = (n_thin + w_size - 1) // w_size
-                    with open("pool_window_log.txt", "w") as fh:
-                        fh.write(f"total_frames_original\t{len(pool_frames)}\n")
-                        fh.write(f"thin_stride\t{pool_stride}\n")
-                        fh.write(f"frames_after_thin\t{n_thin}\n")
-                        fh.write(f"window_size\t{w_size}\n")
-                        fh.write(f"num_windows\t{n_win}\n")
-                    print("[Pool-AL] wrote pool_window_log.txt")
-            
-                    # Map back and extend
-                    sel_rel = thin_idx[sel_rel_thin].tolist()
-                    sel_objs = [pool_frames[i] for i in sel_rel]
-                    offset = len(all_frames)
-                    sel_global = [offset + i for i in sel_rel]
-                    all_frames.extend(sel_objs)
-                    all_true_E = np.concatenate([all_true_E, np.full(len(sel_objs), np.nan)])
-                    all_true_F.extend([None]*len(sel_objs))
-                    train_mask = np.concatenate([train_mask, np.ones(len(sel_objs), dtype=bool)])
-                    val_mask = np.concatenate([val_mask, np.zeros(len(sel_objs), dtype=bool)])
-            
-                    if sel_objs:
-                        pool_positions = np.array([frame.get_positions() for frame in sel_objs])
-                        pool_forces_arr = np.full(pool_positions.shape, np.nan)
-                        pool_energies = np.full(len(sel_objs), np.nan)
-                        atom_types = sel_objs[0].get_chemical_symbols() if hasattr(sel_objs[0], 'get_chemical_symbols') else []
-                        save_stacked_xyz("to_label_from_pool.xyz", pool_energies, pool_positions, pool_forces_arr, atom_types)
-                        print(f"Saved {len(sel_objs)} pool frames for labeling to 'to_label_from_pool.xyz'.")
-                    else:
-                        print("No pool frames selected; nothing to save.")
+        sigma_atom = np.linalg.norm(sigma_comp.reshape(-1,3), axis=1)  
+    
+    
+        # plotting & metrics -------------------------------------------------
+        if do_plot:
+            features_all, min_dists_all, _, pca, scaler = compute_features(
+                all_frames, config, train_xyz_path, train_mask, val_mask)
+            plot_mlff_stats(stats_ens, min_dists_all,
+                            "validation_results_ensemble", True, train_mask, val_mask)
+
+        metrics_train = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom,
+                                             sigma_E_raw, "Train", "ensemble", eval_log)
+        if do_plot:
+            generate_uq_plots(metrics_train["npz_path"], "Train", "error_model")
+
+        metrics_eval  = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom,
+                                             sigma_E_raw, "Eval", "ensemble", eval_log)
+        if do_plot:
+            generate_uq_plots(metrics_eval["npz_path"], "Eval", "error_model")
+    
+        # averaged latents across ensemble ----------------------------------
+    
+        if al_val_flag and al_val_flag.lower() in ["influence", "traditional"]:
+    
+            if n_models >= 2:
+                calib      = VarianceScalingCalibrator().fit(
+                                stats_ens.delta_E_frame[val_mask],
+                                sigma_E_raw[val_mask])
+                sigma_E_cal = calib.transform(sigma_E_raw)
+                sel_objs, sel_idx = adaptive_learning_ensemble_calibrated(
+                    all_frames            = all_frames,
+                    eval_mask             = val_mask,
+                    sigma_E_cal           = sigma_E_cal,
+                    delta_E_frame         = stats_ens.delta_E_frame,
+                    mean_l_al             = mean_L_frame,
+                    force_rmse_per_comp   = rmse_force_comp,
+                    beta                  = 0,
+                    drop_init             = 1.0,
+                    min_k                 = 5,
+                    max_k                 = 500,
+                    score_floor           = None,
+                    base                  = "al_ens_val")
+                # latent α², L not used in this path
+                alpha_sq = L_chol = None
+            else:
+                # single‑model path uses latent‑based uncertainty
+                sel_objs, sel_idx = adaptive_learning_mig_calibrated(
+                    all_frames            = all_frames,
+                    eval_mask             = val_mask,
+                    delta_E_frame         = stats_ens.delta_E_frame,
+                    mean_l_al             = mean_L_frame,
+                    force_rmse_per_comp   = rmse_force_comp,
+                    target_rmse_conv      = 0.015,
+                    beta                  = 0.0,
+                    drop_init             = 1.0,
+                    min_k                 = 5,
+                    max_k                 = 500,
+                    score_floor           = None,
+                    base                  = "al_mig_val")
+                # save α² and L_chol for pool‑AL
+                F_train_lat = mean_L_frame[~val_mask]
+                F_val_lat   = mean_L_frame[val_mask]
+                y_val       = stats_ens.delta_E_frame[val_mask]
+                alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_val_lat, y_val)
+    
+            # optional “traditional” AL -------------------------------------
+            if al_val_flag.lower() == "traditional":
+                train_atom_mask = stats_ens._get_atom_mask(train_mask)
+                sel_objs, sel_idx, _ = adaptive_learning(
+                    all_frames, val_mask,
+                    sigma_atom, stats_ens.force_rmse_per_atom,
+                    train_atom_mask, None,
+                    eval_cfg.get("num_active_frames", 50),
+                    base_filename="al_traditional_val")
+    
+            # update masks ---------------------------------------------------
+            train_mask[sel_idx] = True
+            val_mask[sel_idx]   = False
+    
+            # save to XYZ ----------------------------------------------------
+            if len(sel_idx):
+                val_positions  = np.array([all_frames[i].get_positions() for i in sel_idx])
+                val_forces_arr = np.stack([all_true_F[i] for i in sel_idx])
+                val_energies   = all_true_E[sel_idx]
+                atom_types     = all_frames[sel_idx[0]].get_chemical_symbols() \
+                                   if hasattr(all_frames[sel_idx[0]], 'get_chemical_symbols') else []
+                save_stacked_xyz("to_label_from_val.xyz",
+                                 val_energies, val_positions, val_forces_arr, atom_types)
+                print(f"Saved {len(sel_idx)} validation frames to 'to_label_from_val.xyz'.")
+            else:
+                print("No validation frames selected; nothing to save.")
+    
+        if pool_xyz_path and os.path.exists(pool_xyz_path):
+            print(f"[Pool‑AL] parsing unlabeled pool from {pool_xyz_path}")
+            _pool_E, _pool_F, _pool_pos = parse_extxyz(pool_xyz_path, "unlabeled_pool")
+            pool_frames = read(pool_xyz_path, index=":", format="extxyz")
+    
+            # ensemble eval on pool -----------------------------------------
+            ens_E_pool, ens_F_pool, ens_L_pool, _ = evaluate_and_cache_ensemble(
+                pool_frames, ensemble_folder, device, batch_size, eval_log,
+                config, neighbour_list, npz_path="ensemble_unlabel.npz")
+            mu_L_pool    = np.mean(ens_L_pool, axis=0)
+            mu_E_pool    = np.mean(ens_E_pool, axis=0)
+            sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
+    
+            # rolling average plot (unchanged) ------------------------------
+            steps  = np.arange(len(mu_E_pool))
+            window = 50
+            df     = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
+            sm     = df.rolling(window, center=True, min_periods=1).mean()
+            plt.figure(figsize=(6,4))
+            plt.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
+            plt.fill_between(steps, sm["mu"]-2*sm["sigma"], sm["mu"]+2*sm["sigma"],
+                             alpha=0.3, label="σ (smoothed)")
+    
+            # bond‑length thresholds ----------------------------------------
+            train_idx     = np.where(train_mask)[0]
+            train_frames  = [all_frames[i] for i in train_idx]
+            thresholds    = compute_bond_thresholds(train_frames, neighbour_list,
+                                                    first_shell_cutoff=3.4)
+            bad_global    = filter_unrealistic_indices(pool_frames, neighbour_list, thresholds)
+    
+            # thin for AL ----------------------------------------------------
+            pool_stride   = eval_cfg.get("pool_stride", 50)
+            thin_idx      = np.arange(len(pool_frames))[::pool_stride]
+            pool_frames_thin  = [pool_frames[i] for i in thin_idx]
+            F_pool_thin       = mu_L_pool[thin_idx]
+            mu_E_pool_thin    = mu_E_pool[thin_idx]
+    
+            # highlight bond outliers on plot -------------------------------
+            bad_thin = bad_global.intersection(set(thin_idx))
+            bad_mask = np.isin(steps, list(bad_thin))
+            plt.scatter(steps[bad_mask], sm["mu"][bad_mask], marker='x', label='bond outlier')
+            plt.legend(); plt.xlabel("Pool frame index"); plt.ylabel("Predicted energy")
+            plt.title("Pool energy ± uncertainty"); plt.tight_layout()
+            plt.savefig("pool_energy_uncertainty.png", dpi=200); plt.close()
+    
+            # uncertainty for pool path -------------------------------------
+            if n_models >= 2:
+                calib_pool = VarianceScalingCalibrator().fit(
+                                stats_ens.delta_E_frame[train_mask],
+                                sigma_E_raw[train_mask])
+                sigma_E_pool_cal = calib_pool.transform(sigma_E_pool)
+            else:
+                sigma_E_pool_cal = None  # latent path will compute its own σ
+    
+            # windowed pool AL ----------------------------------------------
+            Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
+                pool_frames_thin,
+                F_pool_thin,
+                mean_L_al[~val_mask],
+                alpha_sq,
+                L_chol,
+                mu_E_pool    = mu_E_pool_thin,
+                sigma_E_pool = sigma_E_pool_cal,
+                thresholds   = thresholds,
+                neighbor_list= neighbour_list,
+                bad_global   = bad_thin,
+                rho_eV       = 0.002,
+                beta         = 0.0,
+                drop_init    = 1.0,
+                min_k        = 5,
+                window_size  = eval_cfg.get("pool_window", 100),
+                base         = "al_pool_v1")
+    
+                    # pool window log -----------------------------------------------
+            n_thin = len(thin_idx)
+            w_size = eval_cfg.get("pool_window", 100)
+            n_win  = (n_thin + w_size - 1) // w_size
+            with open("pool_window_log.txt", "w") as fh:
+                fh.write(f"total_frames_original	{len(pool_frames)}")
+                fh.write(f"thin_stride	{pool_stride}")
+                fh.write(f"frames_after_thin	{n_thin}")
+                fh.write(f"window_size	{w_size}")
+                fh.write(f"num_windows	{n_win}")
+            print("[Pool‑AL] wrote pool_window_log.txt")
+    
+            # Map thin indices back to original pool indices ----------------
+            sel_global_idx = thin_idx[sel_rel_thin]
+            sel_objs       = [pool_frames[i] for i in sel_global_idx]
+    
+            # Extend master data structures ---------------------------------
+            if sel_objs:
+                offset = len(all_frames)
+                all_frames.extend(sel_objs)
+                all_true_E  = np.concatenate([all_true_E, np.full(len(sel_objs), np.nan)])
+                all_true_F.extend([None] * len(sel_objs))
+                train_mask  = np.concatenate([train_mask, np.ones(len(sel_objs), dtype=bool)])
+                val_mask    = np.concatenate([val_mask,   np.zeros(len(sel_objs), dtype=bool)])
+    
+                pool_positions  = np.array([fr.get_positions() for fr in sel_objs])
+                pool_forces_arr = np.full(pool_positions.shape, np.nan)
+                pool_energies   = np.full(len(sel_objs), np.nan)
+                atom_types      = sel_objs[0].get_chemical_symbols() if hasattr(sel_objs[0], 'get_chemical_symbols') else []
+                save_stacked_xyz("to_label_from_pool.xyz",
+                                 pool_energies, pool_positions, pool_forces_arr, atom_types)
+                print(f"Saved {len(sel_objs)} pool frames to 'to_label_from_pool.xyz'.")
+            else:
+                print("No pool frames selected; nothing to save.")
+
 
 
     # 9) GMM UQ
