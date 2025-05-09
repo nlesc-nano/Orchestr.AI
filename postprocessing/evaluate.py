@@ -612,6 +612,70 @@ def run_eval(config):
     
     
         # plotting & metrics -------------------------------------------------
+        # ——— ensemble summary statistics ———
+        # per-frame energy slices
+        mu_E_frame  = mu_E                           # (n_frames,)
+        std_E_frame = np.std(ens_E_sel, axis=0)     # (n_frames,)
+        min_E_frame = np.min(ens_E_sel, axis=0)     # (n_frames,)
+        max_E_frame = np.max(ens_E_sel, axis=0)     # (n_frames,)
+    
+        # per-component force slices (flattened)
+        mu_F_comp   = mu_F_flat                      # (total_components,)
+        std_F_comp  = np.std(ens_F_sel, axis=0).flatten()
+        min_F_comp  = np.min(ens_F_sel, axis=0).flatten()
+        max_F_comp  = np.max(ens_F_sel, axis=0).flatten()
+    
+        # overall summaries
+        print("=== Ensemble summary ===")
+        print(f"Energy: mean={mu_E_frame.mean():.4f}, "
+              f"std={mu_E_frame.std():.4f}, "
+              f"min={min_E_frame.min():.4f}, "
+              f"max={max_E_frame.max():.4f}")
+        print(f"Force : mean={mu_F_comp.mean():.4f},  "
+              f"std={mu_F_comp.std():.4f},  "
+              f"min={min_F_comp.min():.4f},  "
+              f"max={max_F_comp.max():.4f}")
+    
+        # histograms if plotting
+        do_plot = True 
+        if do_plot:
+            import matplotlib.pyplot as plt
+    
+            # Energy histograms
+            plt.figure()
+            plt.hist(mu_E_frame, bins=50)
+            plt.xlabel("Frame-wise Mean Energy")
+            plt.ylabel("Count")
+            plt.title("Ensemble: Mean Energy per Frame")
+            plt.savefig("ensemble_energy_mean_hist.png")
+    
+            plt.figure()
+            plt.hist(std_E_frame, bins=50)
+            plt.xlabel("Frame-wise Energy Std")
+            plt.ylabel("Count")
+            plt.title("Ensemble: Energy Std Dev per Frame")
+            plt.savefig("ensemble_energy_std_hist.png")
+    
+            # Force histograms
+            plt.figure()
+            plt.hist(mu_F_comp, bins=100)
+            plt.xlabel("Comp-wise Mean Force")
+            plt.ylabel("Count")
+            plt.title("Ensemble: Mean Force per Component")
+            plt.savefig("ensemble_force_mean_hist.png")
+    
+            plt.figure()
+            plt.hist(std_F_comp, bins=100)
+            plt.xlabel("Comp-wise Force Std")
+            plt.ylabel("Count")
+            plt.title("Ensemble: Force Std Dev per Component")
+            plt.savefig("ensemble_force_std_hist.png")
+    
+            plt.show()
+        # ——— end ensemble summary ———
+
+
+        do_plot = False 
         if do_plot:
             features_all, min_dists_all, _, pca, scaler = compute_features(
                 all_frames, config, train_xyz_path, train_mask, val_mask)

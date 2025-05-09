@@ -436,7 +436,8 @@ def adaptive_learning_ensemble_calibrated(
     eps = 1e-9
     rho_eV     = kwargs.get("rho_eV", 0.002)
     rmse_tol_F = kwargs.get("rmse_tol_F", 0.05)
-    w_E = w_F = 0.5  # equal blending weights after normalization
+    n_atoms     = len(all_frames[0])
+    sigma_tol_E = rho_eV * np.sqrt(n_atoms)
 
     # 1) split train/eval
     train_idx = np.where(~eval_mask)[0]
@@ -464,9 +465,19 @@ def adaptive_learning_ensemble_calibrated(
 
     rmse_F_eval  = rmse_F_pf[eval_idx]
     sigma_E_eval = sigma_E_cal[eval_idx]
-    print(f"[3] rmse_F_eval: mean={rmse_F_eval.mean():.3f}, std={rmse_F_eval.std():.3f}")
-    print(f"[3] sigma_E_eval: mean={sigma_E_eval.mean():.3f}, std={sigma_E_eval.std():.3f}")
+    print(f"[3] rmse_F_eval: mean={rmse_F_eval.mean():.3f}, std={rmse_F_eval.std():.3f}, min={rmse_F_eval.min():.3f}, max={rmse_F_eval.max():.3f}")
+    print(f"[3] sigma_E_eval: mean={sigma_E_eval.mean():.3f}, std={sigma_E_eval.std():.3f}, min={sigma_E_eval.min():.3f}, max={sigma_E_eval.max():.3f}")
+  
+    norm_E = sigma_E_eval / sigma_tol_E          # σ_E   in “tolerance units”
+    norm_F = rmse_F_eval  / rmse_tol_F           # RMSE_F in “tolerance units”
 
+    std_E = norm_E.std() + eps
+    std_F = norm_F.std()  + eps
+    w_E = std_E / (std_E + std_F)
+    w_F = 1.0  - w_E            # keeps w_E + w_F = 1
+    
+    print(f"[3] dynamic weights: w_E={w_E:.3f}, w_F={w_F:.3f}")
+    
     # 4) normalize uncertainties (z-score)
     z_sigma = (sigma_E_eval - sigma_E_eval.mean()) / (sigma_E_eval.std() + eps)
     z_rmse  = (rmse_F_eval  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
@@ -476,8 +487,6 @@ def adaptive_learning_ensemble_calibrated(
           f"min={z_rmse.min():.3f}, max={z_rmse.max():.3f}")
 
     # 5) empirical anchor in same z-units
-    n_atoms     = len(all_frames[0])
-    sigma_tol_E = rho_eV * np.sqrt(n_atoms)
     z_sigma_emp = (sigma_tol_E - sigma_E_eval.mean()) / (sigma_E_eval.std() + eps)
     z_rmse_emp  = (rmse_tol_F  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
     print(f"[5] σ_tol_E={sigma_tol_E:.5f} (z={z_sigma_emp:+.3f}), "
@@ -513,8 +522,10 @@ def adaptive_learning_ensemble_calibrated(
 
     # 9) early-exit floor on raw distance
     if score_floor is None:
-        score_floor = float(np.quantile(d_lat_g, 0.75))
-        print(f"[9] auto score_floor (q75 d_lat) = {score_floor:.5f}")
+        mu  = d_lat_g.mean()
+        sig = d_lat_g.std()
+        score_floor = mu + 0.5 * sig
+        print(f"[9] adaptive score_floor = {score_floor:.5f}  (μ+0.5σ)")
     else:
         print(f"[9] user score_floor = {score_floor:.5f}")
 
@@ -534,12 +545,17 @@ def adaptive_learning_ensemble_calibrated(
     d2sel   = np.full(len(eval_idx), np.nan)
     d2sel[keep] = d2sel_g
 
-        # prepare sel_score_all: start with initial FPS scores for all eval frames
-    sel_score_all = score_all_start.copy()
-    # override with actual selection-time scores for selected indices
-    sel_score_all[sel_rel] = sel_score
+            # prepare full sel_score_all for each eval frame
+    sel_score_all = np.full(len(eval_idx), np.nan)
+    # fill initial FPS score for gate-passed indices
+    sel_score_all[keep] = score_all_start
+    # compute mask for actually selected frames
+    sel_mask = np.zeros(len(eval_idx), dtype=bool)
+    sel_mask[np.where(keep)[0][sel_rel]] = True
+    # override with actual selection-time scores
+    sel_score_all[sel_mask] = sel_score
 
-    # 11) apply max_k if given if given
+    # 11) apply max_k if given if given if given
     if max_k is not None and len(sel_idx) > max_k:
         sel_idx = sel_idx[:max_k]
         print(f"[11] truncated to max_k={max_k}")
