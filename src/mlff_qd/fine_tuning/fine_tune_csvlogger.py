@@ -111,11 +111,11 @@ def main(args):
 
     data = load_data(config)
     use_last_n = config['settings']['data'].get('use_last_n', None) # to select sample of data
-    atoms_list, property_list = preprocess_data(data, use_last_n=use_last_n if use_last_n is not None else len(data["R"]))
+    atoms_list, property_list = preprocess_data(data)
     new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list)
     show_dataset_info(new_dataset)
     
-    transformations = prepare_transformations(config)
+    transformations = prepare_transformations(config,"train")
     custom_data = setup_data_module(
         config,
         os.path.join(folder, config['settings']['general']['database_name']),
