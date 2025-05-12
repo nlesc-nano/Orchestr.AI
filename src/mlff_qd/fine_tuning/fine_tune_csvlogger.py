@@ -93,9 +93,7 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
 
-    # not tested properly 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    folder = os.path.abspath(os.path.join(script_dir, config['settings']['logging']['folder']))
+    folder = os.path.abspath(config['settings']['logging']['folder'])
     logging.info(f"Using output directory: {folder}")
 
     # some permision error, Verify folder exists and is writable
