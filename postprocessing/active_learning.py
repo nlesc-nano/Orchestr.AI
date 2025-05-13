@@ -247,6 +247,59 @@ def fps_uncertainty(
     )
 
 # -----------------------------------------------------------------------------
+#  PURE D‑OPTIMAL (no early stops)
+# -----------------------------------------------------------------------------
+
+def d_optimal_full_order(
+    X_cand: np.ndarray,
+    X_train: np.ndarray,
+    *,
+    reg: float = 1e-6,
+    verbose: bool = False,
+):
+    """Return *all* candidate indices in greedy D‑optimal order + γ for all.
+
+    No gain‑floor, no min_k/max_k, no rho — it simply orders the pool so that
+    the first element gives the largest log‑det jump, the second the next, …
+    γ (Mahalanobis distance) is computed **before any removals** and returned
+    alongside.
+    """
+    m, d = X_cand.shape
+    I_d  = np.eye(d)
+    M_inv = np.linalg.inv(X_train.T @ X_train + reg * I_d)
+
+    # initial Mahalanobis‑squared for every candidate (used later for γ)
+    quad0  = np.einsum("id,dk,ik->i", X_cand, M_inv, X_cand)
+    gamma0 = np.sqrt(quad0)
+
+    # Working copy for greedy ordering
+    quad = quad0.copy()
+    order, gains = [], []
+
+    for _ in range(m):
+        i_best = int(np.argmax(quad))
+        q      = quad[i_best]
+        gain   = np.log1p(q)
+        order.append(i_best)
+        gains.append(gain)
+        if verbose:
+            print(f"pick {len(order):4d}/{m}: gain={gain:.3e}")
+
+        # rank‑1 update
+        x = X_cand[i_best]
+        v = M_inv @ x
+        denom = 1.0 + x @ v
+        M_inv -= np.outer(v, v) / denom
+
+        # fast downdate for remainder
+        alpha = X_cand @ v
+        quad -= (alpha ** 2) / denom
+        quad[i_best] = -np.inf  # lock in picked point
+
+    return np.asarray(order, int), np.asarray(gains, float), gamma0
+
+
+# -----------------------------------------------------------------------------
 # 3. Main adaptive‑learning routine (v4) with RMSE‑based threshold
 # -----------------------------------------------------------------------------
 
@@ -416,6 +469,7 @@ def adaptive_learning_ensemble_calibrated(
         mean_l_al: np.ndarray,
         *,
         force_rmse_per_comp: Optional[np.ndarray] = None,
+        denom_all: Optional[np.ndarray] = None,
         beta: Optional[float] = 0.5,
         drop_init: float = 1.0,
         min_k: int = 5,
@@ -432,12 +486,12 @@ def adaptive_learning_ensemble_calibrated(
       rho_eV     : eV per atom for σ_E tolerance   (default 0.002)
       rmse_tol_F : eV/Å tolerance for max|F|_err   (default 0.05)
     """
-
+    tol = 1e-3 
     eps = 1e-9
     rho_eV     = kwargs.get("rho_eV", 0.002)
-    rmse_tol_F = kwargs.get("rmse_tol_F", 0.05)
+    rmse_tol_F = kwargs.get("rmse_tol_F", 0.10)
     n_atoms     = len(all_frames[0])
-    sigma_tol_E = rho_eV * np.sqrt(n_atoms)
+    delta_tol_E = rho_eV * np.sqrt(n_atoms)
 
     # 1) split train/eval
     train_idx = np.where(~eval_mask)[0]
@@ -445,30 +499,109 @@ def adaptive_learning_ensemble_calibrated(
     print(f"[1] split: train={len(train_idx)}, eval={len(eval_idx)}")
 
     # 2) latent whitening & raw distance
-    _, _, _, G_eval_E, L_E = calibrate_alpha_reg_gcv(
-        mean_l_al[eval_idx], delta_E_frame[eval_idx])
-    G_train = scipy.linalg.solve_triangular(
-        L_E, mean_l_al[train_idx].T, lower=True).T
+    alpha_sq, lam_opt, terms_lat, G_all, L_E = calibrate_alpha_reg_gcv(mean_l_al, delta_E_frame)
+
+    # distance from eval 
+    G_train    = G_all[train_idx]          # latent vectors for current training set
+    G_eval_E   = G_all[eval_idx]           # latent vectors for eval/AL pool
+
+    # nearest-neighbour distance distribution **within training**
+    D_train = scipy.spatial.distance.cdist(G_train, G_train)
+    np.fill_diagonal(D_train, np.inf)
+    d_nn_train = D_train.min(axis=1)
+    print(f"[2] d_nn train stats: mean={d_nn_train.mean():.3f}, "
+          f"std={d_nn_train.std():.3f}, min={d_nn_train.min():.3f}, max={d_nn_train.max():.3f}")
+
+    D_eval = scipy.spatial.distance.cdist(G_eval_E, G_eval_E) 
+    np.fill_diagonal(D_eval, np.inf)
+    d_nn_eval = D_eval.min(axis=1)
+    print(f"[2] d_nn eval stats: mean={d_nn_eval.mean():.3f}, "
+          f"std={d_nn_eval.std():.3f}, min={d_nn_eval.min():.3f}, max={d_nn_eval.max():.3f}")
+
     d_lat_eval = scipy.spatial.distance.cdist(G_eval_E, G_train).min(axis=1)
-    print(f"[2] d_lat raw stats: mean={d_lat_eval.mean():.3f}, "
+    print(f"[2] d_lat_eval stats: mean={d_lat_eval.mean():.3f}, "
           f"std={d_lat_eval.std():.3f}, min={d_lat_eval.min():.3f}, max={d_lat_eval.max():.3f}")
 
+    plt.figure()
+    plt.hist(d_nn_train, bins=50, alpha=0.6, label='Train–Train NN')
+    plt.hist(d_nn_eval,   bins=50, alpha=0.6, label='Eval–Eval NN')
+    plt.hist(d_lat_eval,   bins=50, alpha=0.6, label='Eval–Train NN')
+    plt.xlabel('Distance')
+    plt.ylabel('Frequency')
+    plt.title('Distance Distributions in Latent Space')
+    plt.legend()
+    plt.tight_layout()
+    
+    outpath = 'distance_distributions.png'
+    plt.savefig(outpath)
+    print(f"Saved distance distributions plot to {outpath}")
+    
     # 3) per-frame max-RMSE_F
     if force_rmse_per_comp is not None:
         comps_pf = np.array([3*len(fr) for fr in all_frames], int)
         starts   = np.concatenate(([0], np.cumsum(comps_pf[:-1])))
-        rmse_F_pf = np.maximum.reduceat(force_rmse_per_comp, starts)[:len(all_frames)]
-        print(f"[3] computed max RMSE_F per frame")
+        rmse_F_pf_max = np.maximum.reduceat(force_rmse_per_comp, starts)[:len(all_frames)]
+        rmse_F_pf_mean = np.array([force_rmse_per_comp[starts[i]:starts[i] + comps_pf[i]].mean() for i in range(len(all_frames))])
+        print(f"[3] computed max RMSE_F and relative error per frame")
     else:
-        rmse_F_pf = np.zeros(len(all_frames))
+        rmse_F_pf_max = np.zeros(len(all_frames))
+        rmse_F_pf_mean = np.zeros(len(all_frames))
         print("[3] no force_rmse_per_comp → using zeros")
 
-    rmse_F_eval  = rmse_F_pf[eval_idx]
+    rmse_F_train = rmse_F_pf_max[train_idx]
+    rmse_Fmean_train = rmse_F_pf_mean[train_idx]
+    sigma_E_train = sigma_E_cal[train_idx]
+    delta_E_train = np.abs(delta_E_frame[train_idx])
+
+    rmse_F_eval  = rmse_F_pf_max[eval_idx]
+    rmse_Fmean_eval = rmse_F_pf_mean[eval_idx]
     sigma_E_eval = sigma_E_cal[eval_idx]
+    delta_E_eval = np.abs(delta_E_frame[eval_idx])
+
+    print(f"[3] rmse_Fmax_train: mean={rmse_F_train.mean():.3f}, std={rmse_F_train.std():.3f}, min={rmse_F_train.min():.3f}, max={rmse_F_train.max():.3f}")
+    print(f"[3] rmse_Fmean_train: mean={rmse_Fmean_train.mean():.3f}, std={rmse_Fmean_train.std():.3f}, min={rmse_Fmean_train.min():.3f}, max={rmse_Fmean_train.max():.3f}")
+    print(f"[3] sigma_E_train: mean={sigma_E_train.mean():.3f}, std={sigma_E_train.std():.3f}, min={sigma_E_train.min():.3f}, max={sigma_E_train.max():.3f}")
+    print(f"[3] delta_E_train: mean={delta_E_train.mean():.3f}, std={delta_E_train.std():.3f}, min={delta_E_train.min():.3f}, max={delta_E_train.max():.3f}")
+
     print(f"[3] rmse_F_eval: mean={rmse_F_eval.mean():.3f}, std={rmse_F_eval.std():.3f}, min={rmse_F_eval.min():.3f}, max={rmse_F_eval.max():.3f}")
+    print(f"[3] rmse_Fmean_eval: mean={rmse_Fmean_eval.mean():.3f}, std={rmse_Fmean_eval.std():.3f}, min={rmse_Fmean_eval.min():.3f}, max={rmse_Fmean_eval.max():.3f}")
     print(f"[3] sigma_E_eval: mean={sigma_E_eval.mean():.3f}, std={sigma_E_eval.std():.3f}, min={sigma_E_eval.min():.3f}, max={sigma_E_eval.max():.3f}")
-  
-    norm_E = sigma_E_eval / sigma_tol_E          # σ_E   in “tolerance units”
+    print(f"[3] delta_E_eval: mean={delta_E_eval.mean():.3f}, std={delta_E_eval.std():.3f}, min={delta_E_eval.min():.3f}, max={delta_E_eval.max():.3f}")
+
+    # Assess tolerance from reference true values
+    all_true_F = denom_all 
+    train_F       = all_true_F[train_idx]   # same dims
+    eval_F        = all_true_F[eval_idx]
+
+    # — 1. Noise floor δ from DFT forces via MAD → σₙ
+    noise      = 0.05 # eV/Ang 
+    print(f"[3] noise-floor δ (eV/Å):{noise:.3f}")
+    
+    # — 2. Per-frame RMS of the true forces
+    F_mag_train = np.linalg.norm(train_F, axis=-1)      # (n_train_frames, n_atoms)
+    F_rms_train = np.sqrt((F_mag_train**2).mean(axis=1))  # RMS per train frame
+    mean_F_rms   = F_rms_train.mean()
+    print(f"[3] mean true–force RMS per frame (eV/Å): {mean_F_rms:.3f}")
+
+    # — 3. Pick relative‐error budget ε and derive per‐frame RMSE tol
+    epsilon          = 0.05   # 5% relative error
+    rmse_tol_F_frame = epsilon * mean_F_rms
+    print(f"[3] predicted RMSE/frame tolerance (eV/Å): {rmse_tol_F_frame:.3f}")
+
+    # (optional) still print your percentile-based hard caps
+    F_mag_train_flat = F_mag_train.ravel()
+    F_mag_eval_flat  = np.linalg.norm(eval_F, axis=-1).ravel()
+    p99_train        = np.percentile(F_mag_train_flat, 99)
+    p99_eval        = np.percentile(F_mag_eval_flat, 99)
+    print(f"[3] 99th-pctile train |F|: {p99_train:.3f}")
+    print(f"[3] 99th-pctile eval  |F|: {p99_eval:.3f}")
+
+    # hard component cap (absolute)
+    rmse_tol_F = 2 * epsilon * p99_train
+    print(f"[3] threshold on max force comp: {rmse_tol_F:.3f}")
+    print(f"[3] threshold on force per frame: {rmse_tol_F_frame:.3f}")
+
+    norm_E = delta_E_eval / delta_tol_E          # σ_E   in “tolerance units”
     norm_F = rmse_F_eval  / rmse_tol_F           # RMSE_F in “tolerance units”
 
     std_E = norm_E.std() + eps
@@ -479,104 +612,129 @@ def adaptive_learning_ensemble_calibrated(
     print(f"[3] dynamic weights: w_E={w_E:.3f}, w_F={w_F:.3f}")
     
     # 4) normalize uncertainties (z-score)
-    z_sigma = (sigma_E_eval - sigma_E_eval.mean()) / (sigma_E_eval.std() + eps)
-    z_rmse  = (rmse_F_eval  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
+    z_sigma      = (delta_E_eval - delta_E_eval.mean()) / (delta_E_eval.std() + eps)
+    z_rmse       = (rmse_F_eval  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
+    z_rmse_frame = (rmse_Fmean_eval  - rmse_Fmean_eval.mean())   / (rmse_Fmean_eval.std()   + eps) 
     print(f"[4] z_sigma stats: mean={z_sigma.mean():.3f}, std={z_sigma.std():.3f}, "
           f"min={z_sigma.min():.3f}, max={z_sigma.max():.3f}")
     print(f"[4] z_rmse  stats: mean={z_rmse.mean():.3f}, std={z_rmse.std():.3f}, "
           f"min={z_rmse.min():.3f}, max={z_rmse.max():.3f}")
+    print(f"[4] z_rmse_frame  stats: mean={z_rmse_frame.mean():.3f}, std={z_rmse_frame.std():.3f}, "
+          f"min={z_rmse_frame.min():.3f}, max={z_rmse_frame.max():.3f}")
 
     # 5) empirical anchor in same z-units
-    z_sigma_emp = (sigma_tol_E - sigma_E_eval.mean()) / (sigma_E_eval.std() + eps)
-    z_rmse_emp  = (rmse_tol_F  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
-    print(f"[5] σ_tol_E={sigma_tol_E:.5f} (z={z_sigma_emp:+.3f}), "
-          f"F_tol={rmse_tol_F:.5f} (z={z_rmse_emp:+.3f})")
+    z_sigma_emp      = (delta_tol_E - delta_E_eval.mean()) / (delta_E_eval.std() + eps)
+    z_rmse_emp       = (rmse_tol_F  - rmse_F_eval.mean())   / (rmse_F_eval.std()   + eps)
+    z_rmse_emp_frame = (rmse_tol_F_frame - rmse_Fmean_eval.mean())   / (rmse_Fmean_eval.std()   + eps)
+    print(f"[5] σ_tol_E={delta_tol_E:.5f} (z={z_sigma_emp:+.3f}), "
+          f"F_tol={rmse_tol_F:.5f} (z={z_rmse_emp:+.3f}), "
+          f"F_tol_frame={rmse_tol_F_frame:.5f} (z={z_rmse_emp_frame:+.3f})")
 
     # 6) shift so empirical anchor → 0
-    u_frame_z = w_E*z_sigma + w_F*z_rmse
-    u_emp     = w_E*z_sigma_emp + w_F*z_rmse_emp
-    u_shift   = u_frame_z - u_emp
+    u_frame_z         = w_E*z_sigma + w_F*z_rmse
+    u_frame_z_frame   = w_E*z_sigma + w_F*z_rmse_frame
+    u_emp             = w_E*z_sigma_emp + w_F*z_rmse_emp
+    u_emp_frame       = z_rmse_emp_frame 
     print(f"[6] u_emp anchor = {u_emp:+.3f}")
-    print(f"[6] u_shift stats: mean={u_shift.mean():.3f}, std={u_shift.std():.3f}, "
-          f"min={u_shift.min():.3f}, max={u_shift.max():.3f}")
+    print(f"[6] u_frame_z stats: mean={u_frame_z.mean():.3f}, std={u_frame_z.std():.3f}, "
+          f"min={u_frame_z.min():.3f}, max={u_frame_z.max():.3f}")
+    print(f"[6] u_emp_frame anchor = {u_emp_frame:+.3f}")
+    print(f"[6] u_frame_z_frame stats: mean={u_frame_z_frame.mean():.3f}, std={u_frame_z_frame.std():.3f}, "
+          f"min={u_frame_z_frame.min():.3f}, max={u_frame_z_frame.max():.3f}")
+ 
+    # normalize uncertainty for hybrid
+    U_norm             = (u_frame_z - u_frame_z.mean()) / (u_frame_z.std() + eps)
+    U_norm_frame       = (u_frame_z_frame - u_frame_z_frame.mean()) / (u_frame_z_frame.std() + eps)
+    U_norm_floor       = (u_emp - u_frame_z.mean()) / (u_frame_z.std() + eps)
+    U_norm_floor_frame = (u_emp_frame - u_frame_z.mean()) / (u_frame_z.std() + eps)
+    print(f"[7] U_norm_floor = {U_norm_floor:+.3f}")
+    print(f"[7] U_norm stats: mean={U_norm.mean():.3f}, std={U_norm.std():.3f}, "
+          f"min={U_norm.min():.3f}, max={U_norm.max():.3f}")
+    print(f"[7] U_norm_floor_frame = {U_norm_floor_frame:+.3f}")
+    print(f"[7] U_norm_frame stats: mean={U_norm_frame.mean():.3f}, std={U_norm_frame.std():.3f}, "
+          f"min={U_norm_frame.min():.3f}, max={U_norm_frame.max():.3f}")
+    
+    # 7) full D-optimal ordering + initial Mahalanobis distance
+    order, gains_full, gamma0 = d_optimal_full_order(
+        X_cand  = G_eval_E.astype(np.float64),
+        X_train = G_train.astype(np.float64),
+        reg     = 1e-6)
 
-    # 7) hard gate on shifted > 0, ensure at least min_k
-    keep = u_shift > 0.0
-    if keep.sum() < min_k:
-        extras = np.argsort(u_shift)[-min_k:]
-        keep[extras] = True
-        print(f"[7] softened gate to reach min_k={min_k}")
-    kept_idx = eval_idx[keep]
-    print(f"[7] gate kept {keep.sum()}/{len(keep)} frames: {kept_idx}")
+    # diversity score = per-pick log-det gain
+    diversity_score = np.empty_like(gamma0)
+    diversity_score[order] = gains_full
+    D_norm = (diversity_score - diversity_score.mean()) / (diversity_score.std() + eps)
+    print(f"[8] D_norm stats: mean={D_norm.mean():.3f}, std={D_norm.std():.3f}, "
+          f"min={D_norm.min():.3f}, max={D_norm.max():.3f}")
+    
+    # compute D_norm_floor at the Mahalanobis threshold γ=1
+    idx_gamma1    = np.argmin(np.abs(gamma0 - 1.0))
+    D_norm_floor  = D_norm[idx_gamma1]
+    print(f"[8] D_norm_floor = {D_norm_floor:+.3f}")
 
-    eval_idx_g  = kept_idx
-    G_eval_E_g  = G_eval_E[keep]
-    d_lat_g     = d_lat_eval[keep]
+    conv_U = False
+    conv_U_frame = False
+    conv_D = False
+    
+    if U_norm_floor >= U_norm.max() - tol:
+        conv_U = True
+        print("Error/Uncertainty… with max force comp converged")
+    if U_norm_floor_frame >= U_norm_frame.max() - tol:
+        conv_U_frame = True
+        print("Error/Uncertainty… with force per frame converged")
+    if D_norm_floor >= D_norm.max() - tol:
+        conv_D = True
+        print("Diversity has converged")
+    if conv_U and conv_U_frame and conv_D:
+        print("Active Learning has fully converged")
+        return 
+    if conv_U_frame and conv_D:
+        print("Active Learning has fully converged on diversity and per frame. Out of distribution AL is suggested")
+        return
 
-    # 8) prepare FPS (distance-only)
-    beta_fps    = 0.0
-    score_short = d_lat_g - d_lat_g.min() + eps
-    print(f"[8] FPS pool={len(eval_idx_g)}")
-    print(f"[8] score_short stats: min={score_short.min():.3f}, "
-          f"median={np.median(score_short):.3f}, max={score_short.max():.3f}")
+    # 8) hybrid score & selection
+    norm_U = u_frame_z / (u_emp + eps)                     # eps to avoid 0/0
+    norm_D = diversity_score / (diversity_score[idx_gamma1] + eps)
+    
+    std_U = norm_U.std() + eps
+    std_D = norm_D.std() + eps
+    
+    lam_hybrid = std_U / (std_U + std_D)          # dynamic 0–1
+    print(f"[8] dynamic λ = {lam_hybrid:.3f}  (std_U={std_U:.3f}, std_D={std_D:.3f})")
 
-    # 9) early-exit floor on raw distance
-    if score_floor is None:
-        mu  = d_lat_g.mean()
-        sig = d_lat_g.std()
-        score_floor = mu + 0.5 * sig
-        print(f"[9] adaptive score_floor = {score_floor:.5f}  (μ+0.5σ)")
+    hybrid = lam_hybrid * U_norm + (1.0 - lam_hybrid) * D_norm
+
+    # hybrid_floor mixes the two thresholds
+    hybrid_floor = lam_hybrid*U_norm_floor + (1.0-lam_hybrid)*D_norm_floor
+
+    print(f"[9] lam_hybrid = {lam_hybrid:.3f}")
+    print(f"[9] hybrid stats: mean={hybrid.mean():.3f}, std={hybrid.std():.3f}, "
+          f"min={hybrid.min():.3f}, max={hybrid.max():.3f}")
+    print(f"[9] hybrid_floor = {hybrid_floor:+.3f}")
+    
+    # ---------------- 6) gate then budget ----------------------------------
+    keep_mask = hybrid > hybrid_floor
+    idx_keep  = np.where(keep_mask)[0]
+    n_keep    = idx_keep.size
+    k_budget  = 250 if lam_hybrid < 0.5 else 500
+    if n_keep > k_budget:
+        top_rel = idx_keep[np.argsort(hybrid[idx_keep])[-k_budget:]]
     else:
-        print(f"[9] user score_floor = {score_floor:.5f}")
+        top_rel = idx_keep
+    sel_idx = eval_idx[top_rel]
+    print(f"[8] kept {n_keep} frames after floor, selecting {len(sel_idx)}")
 
-    # 10) run FPS
-    print(f"[10] FPS params: β={beta_fps}, drop_init={drop_init}, min_k={min_k}")
-    sel_rel, sel_score, sel_dist, score_all_start, dist_all_start = fps_uncertainty(
-        G_eval_E_g, G_train, u_shift[keep],
-        beta=beta_fps, drop_init=drop_init,
-        min_k=min_k, score_floor=score_floor, verbose=True
-    )
-    sel_idx = eval_idx_g[sel_rel]
-    print(f"[10] FPS selected {len(sel_idx)} frames: {sel_idx}")
-
-    # compute d2sel: distance to nearest selected among gate-passed
-    D = scipy.spatial.distance.cdist(G_eval_E_g, G_eval_E_g[sel_rel])
-    d2sel_g = D.min(axis=1)
-    d2sel   = np.full(len(eval_idx), np.nan)
-    d2sel[keep] = d2sel_g
-
-            # prepare full sel_score_all for each eval frame
-    sel_score_all = np.full(len(eval_idx), np.nan)
-    # fill initial FPS score for gate-passed indices
-    sel_score_all[keep] = score_all_start
-    # compute mask for actually selected frames
-    sel_mask = np.zeros(len(eval_idx), dtype=bool)
-    sel_mask[np.where(keep)[0][sel_rel]] = True
-    # override with actual selection-time scores
-    sel_score_all[sel_mask] = sel_score
-
-    # 11) apply max_k if given if given if given
-    if max_k is not None and len(sel_idx) > max_k:
-        sel_idx = sel_idx[:max_k]
-        print(f"[11] truncated to max_k={max_k}")
-    print(f"[11] final selection size = {len(sel_idx)}")
-
-    # 12) log all metrics
+    # ---------------- 7) logging -------------------------------------------
     log_path = f"{base}_log.txt"
     with open(log_path, "w") as fh:
-        fh.write("Idx\tσ_E\tmaxRMSE_F\td_lat\tz_sigma\tz_rmse\tu_shift\td2sel\tsel_score\tgate\tfps\n")
-        for i, idx in enumerate(eval_idx):
-            gate_flag = keep[i]
-            fps_flag  = idx in sel_idx
-            fh.write(
-                f"{idx}\t{sigma_E_eval[i]:.6f}\t{rmse_F_eval[i]:.6f}\t"
-                f"{d_lat_eval[i]:.6f}\t{z_sigma[i]:.3f}\t{z_rmse[i]:.3f}\t"
-                f"{u_shift[i]:.3f}\t{d2sel[i]:.6f}\t{sel_score_all[i]:.6f}\t"
-                f"{gate_flag}\t{fps_flag}\n"
-            )
-    print(f"[12] log saved to {log_path}")
+        fh.write("Idx\tU_norm\tD_norm\tlam_hybrid\thybrid\thybrid_floor\tpicked\n")
+        for i_pool, idx in enumerate(eval_idx):
+            picked = idx in sel_idx
+            fh.write(f"{idx}\t{U_norm[i_pool]:.3f}\t{D_norm[i_pool]:.3f}\t"
+                     f"{lam_hybrid:.3f}\t{hybrid[i_pool]:.3f}\t{hybrid_floor:.3f}\t{picked}\n")
+    print(f"[9] log saved to {log_path}")
 
-    # 13) return selected objects + their indices
+    # ---------------- 8) return --------------------------------------------
     sel_objs = [all_frames[i] for i in sel_idx]
     return sel_objs, sel_idx
 
@@ -589,6 +747,7 @@ def adaptive_learning_ensemble_calibrated_old(
         mean_l_al: np.ndarray,
         *,
         force_rmse_per_comp: Optional[np.ndarray] = None,
+        denom_all: Optional[np.ndarray] = None,
         beta: float = 0.5,
         drop_init: float = 1.0,
         min_k: int = 5,

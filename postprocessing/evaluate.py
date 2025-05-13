@@ -580,10 +580,70 @@ def run_eval(config):
         comp_mask       = np.repeat(val_mask, atom_counts * 3)   # shape (total_comp,)
         latents_comp    = np.repeat(mean_L_atom, 3, axis=0)
 
-        force_res_flat = stats_ens.all_force_residuals.flatten()      # shape (3*N_tot_atoms,)
-        abs_force_res  = np.abs(force_res_flat).astype(float)
-        rmse_force_comp = abs_force_res
-
+        # Convert all_true_F list to NumPy array
+        all_true_F = np.array(all_true_F)  # Shape: (n_frames, n_atoms, 3)
+        n_frames, n_atoms = all_true_F.shape[:2]
+        print(f"n_frames: {n_frames}")
+        print(f"n_atoms: {n_atoms}")
+        N_tot_atoms = n_frames * n_atoms
+        
+        force_res_flat = stats_ens.all_force_residuals.flatten()  # Shape: (3*N_tot_atoms,)
+        res_per_frame_atom = force_res_flat.reshape(n_frames, n_atoms, 3)  # Shape: (n_frames, n_atoms, 3)
+        
+        # Compute RMSE (absolute residuals) per component per atom per frame
+        rmse_force_comp = np.sqrt(res_per_frame_atom**2)  # Shape: (n_frames, n_atoms, 3)
+        max_rmse_force_comp = np.max(rmse_force_comp, axis=(1, 2))  # Shape: (n_frames,)
+        max_indices = np.argmax(rmse_force_comp.reshape(n_frames, -1), axis=1)  # Shape: (n_frames,)
+        atom_indices = max_indices // 3  # Atom index
+        comp_indices = max_indices % 3   # Component index (0, 1, 2 for x, y, z)
+        
+        # Find the frame with the overall maximum RMSE
+        overall_max_frame_idx = np.argmax(max_rmse_force_comp)  # Index of frame with max RMSE
+        overall_max_rmse = max_rmse_force_comp[overall_max_frame_idx]  # Scalar
+        overall_atom_idx = atom_indices[overall_max_frame_idx]  # Atom index
+        overall_comp_idx = comp_indices[overall_max_frame_idx]  # Component index
+        
+        # Extract true and predicted forces for the max RMSE component
+        true_force = all_true_F[overall_max_frame_idx, overall_atom_idx, overall_comp_idx]  # Scalar (eV/Å)
+        pred_force = true_force + res_per_frame_atom[overall_max_frame_idx, overall_atom_idx, overall_comp_idx]  # Scalar (eV/Å)
+        
+        # Compute absolute DFT forces
+        abs_true_F = np.abs(all_true_F)  # Shape: (n_frames, n_atoms, 3)
+        max_abs_true_F = abs_true_F[np.arange(n_frames), atom_indices, comp_indices]  # Shape: (n_frames,)
+        
+        # Compute relative RMSE for maximum force component per frame
+        F0 = 0.01 * np.mean(abs_true_F)  # eV/Å floor
+        print(f"F0: {F0} eV/Å")  # Debug F0
+        denom = np.maximum(max_abs_true_F, F0)  # Shape: (n_frames,)
+        rel_max_rmse_force_comp = max_rmse_force_comp / denom  # Shape: (n_frames,)
+        
+        # Debug max relative error
+        max_rel_idx = np.argmax(rel_max_rmse_force_comp)
+        print(f"Frame with max rel_max_rmse_force_comp: {max_rel_idx}")
+        print(f"Max rel_max_rmse_force_comp value: {rel_max_rmse_force_comp[max_rel_idx]}")
+        print(f"Corresponding max_rmse_force_comp: {max_rmse_force_comp[max_rel_idx]} eV/Å")
+        print(f"Corresponding max_abs_true_F: {max_abs_true_F[max_rel_idx]} eV/Å")
+        print(f"Corresponding denom: {denom[max_rel_idx]} eV/Å")
+        print(f"Frames with rel_max : {rel_max_rmse_force_comp}")
+        
+        # Compute relative RMSE for all components
+        rmse_force_comp = rmse_force_comp.flatten()  # Shape: (3*n_frames*n_atoms,)
+        abs_true_F = abs_true_F.flatten()  # Shape: (3*n_frames*n_atoms,)
+        denom_all = np.maximum(abs_true_F, F0)
+        rel_rmse_force_comp = rmse_force_comp / denom_all  # Shape: (3*n_frames*n_atoms,)
+        
+        # Print diagnostics
+        print(f"rmse_force_comp: {np.min(rmse_force_comp)} {np.max(rmse_force_comp)}")
+        print(f"rel_rmse_force_comp: {np.min(rel_rmse_force_comp)} {np.max(rel_rmse_force_comp)}")
+        print(f"max_rmse_force_comp: {np.min(max_rmse_force_comp)} {np.max(max_rmse_force_comp)}")
+        print(f"rel_max_rmse_force_comp: {np.min(rel_max_rmse_force_comp)} {np.max(rel_max_rmse_force_comp)}")
+        print(f"Overall max RMSE: {overall_max_rmse} eV/Å at frame {overall_max_frame_idx}, "
+              f"atom {overall_atom_idx}, component {['x', 'y', 'z'][overall_comp_idx]}")
+        print(f"True DFT force: {true_force} eV/Å")
+        print(f"Predicted force: {pred_force} eV/Å")
+        print(f"Absolute error: {abs(pred_force - true_force)} eV/Å")
+        print(f"Relative error: {abs(pred_force - true_force) / np.maximum(abs(true_force), F0)}")
+        
         if n_models > 1:
             # Ensemble-based spreads
             sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
@@ -708,6 +768,7 @@ def run_eval(config):
                     delta_E_frame         = stats_ens.delta_E_frame,
                     mean_l_al             = mean_L_frame,
                     force_rmse_per_comp   = rmse_force_comp,
+                    denom_all             = all_true_F, 
                     beta                  = 0,
                     drop_init             = 1.0,
                     min_k                 = 5,
