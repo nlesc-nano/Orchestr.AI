@@ -1118,19 +1118,6 @@ def adaptive_learning_mig_pool_windowed(
     F_train = np.asarray(F_train, dtype=np.float64)
     L       = np.asarray(L,       dtype=np.float64)
 
-    def _first_bad_row(arr, name):
-        if not np.isfinite(arr).all():
-            bad = np.where(~np.isfinite(arr).all(axis=1))[0][:10]  # show up to 10
-            raise ValueError(
-                f"{name} still has non-finite rows at positions {bad.tolist()} "
-                f"(showing first 10).")
-    
-    _first_bad_row(F_pool,  "F_pool")
-    _first_bad_row(F_train, "F_train")
-    
-    if not np.isfinite(L).all():
-        raise ValueError("Cholesky matrix L contains NaN/Inf values.")
-
     sigma_pool = predict_sigma_from_L(F_pool, L, alpha_sq)
     G_train = solve_triangular(L, F_train.T, lower=True).T
     G_pool = solve_triangular(L, F_pool.T, lower=True).T
@@ -1142,44 +1129,83 @@ def adaptive_learning_mig_pool_windowed(
     good_frames = len(pool_frames) - len(bad_global)
     print(f"[AL] analyzing {good_frames}/{len(pool_frames)} good frames (excluded {len(bad_global)} bad frames)")
 
+    # ------------------------------------------------------------------
+    # Windowed D-optimal selection (γ₀ > 1 cutoff, no D_norm)
+    # ------------------------------------------------------------------
     cand_global = []
-    records = []
-    n_frames = len(pool_frames)
+    records     = []
+    n_frames    = len(pool_frames)
+    
     for w0 in range(0, n_frames, window_size):
-        w1 = min(w0 + window_size, n_frames)
+        w1  = min(w0 + window_size, n_frames)
         win = list(range(w0, w1))
+        print(f"\n[Pool-AL] Window {w0}-{w1}: {len(win)} total frames")
+    
+        # σ filter + bad-frame filter
         high = [i for i in win if sigma_pool[i] > sigma_emp and i not in bad_global]
+        print(f"[Pool-AL]   {len(high)} after σ>σ_emp & sanity filter")
         if not high:
             continue
-        sub_G = G_pool[high]
-        d_lat_win = cdist(sub_G, G_train).min(axis=1)
-        floor = float(np.quantile(d_lat_win, 0.75))
-        picked, sel_score, sel_dist, *_ = fps_uncertainty(
-            sub_G, G_train, sigma_pool[high],
-            beta=beta, drop_init=drop_init, min_k=min_k,
-            score_floor=floor, verbose=False
+    
+        sub_G = G_pool[high].astype(np.float64)
+        print(f"[Pool-AL]   sub_G shape = {sub_G.shape}")
+    
+        # D-optimal ranking
+        order, gains_full, gamma0 = d_optimal_full_order(
+            X_cand = sub_G,
+            X_train= G_train.astype(np.float64),
+            reg    = 1e-6
         )
-        picks = [high[p] for p in picked]
-        cand_global.extend(picks)
-        print(f"[Pool-AL] win {w0}-{w1}, picks {len(picks)} (filtered), score_floor={floor:.5f}")
+        print(
+            f"[Pool-AL]   D-opt got {len(order)} candidates, "
+            f"gains ∈ [{gains_full.min():.3f}, {gains_full.max():.3f}], "
+            f"γ₀ ∈ [{gamma0.min():.3f}, {gamma0.max():.3f}]"
+        )
+    
+        # find the raw gain at γ₀≈1
+        idx_gamma1 = np.argmin(np.abs(gamma0 - 1.0))
+        gain_floor = gains_full[idx_gamma1]
+        print(f"[DEBUG]  raw gain floor @ γ₀≈1: {gain_floor:.3f}")
+        
+        # keep any candidate with gain above that floor
+        idx_keep = np.where(gains_full > gain_floor)[0]
+        print(f"[DEBUG]  {len(idx_keep)} frames with gain > gain_floor")
+        
+        if idx_keep.size:
+            # in D-opt order
+            kept_local = [i for i in order if i in idx_keep]
+        else:
+            # fallback
+            print(f"[Pool-AL]   no OOD frames: falling back to first {min_k}")
+            kept_local = order[:min_k]
 
-        for idx_local, idx in enumerate(picks):
+        print(f"[Pool-AL]   selected {len(kept_local)} in this window")
+    
+        # map back to global indices
+        picks = [high[i] for i in kept_local]
+        cand_global.extend(picks)
+    
+        # record entries
+        for j, idx in enumerate(picks):
             records.append((
                 idx,
                 mu_E_pool[idx],
                 sigma_pool[idx],
-                sel_score[idx_local],
-                sel_dist[idx_local],
+                gains_full[kept_local[j]],  # D-optimal log-det gain
+                gamma0[kept_local[j]],      # γ₀ value
                 f"{w0}-{w1}"
             ))
-
+    
+    # ------------------------------------------------------------------
+    # Write out the selection log
+    # ------------------------------------------------------------------
     idx_file = f"{base}_idxs.txt"
     with open(idx_file, "w") as fh:
-        fh.write("idx\tpred_E\tσ\tFPS_score\tdist\twindow\n")
-        for idx, pred_E, sigma, score, dist, window in records:
-            fh.write(f"{idx}\t{pred_E:.5f}\t{sigma:.5f}\t{score:.5f}\t{dist:.5f}\t{window}\n")
+        fh.write("idx\tpred_E\tσ\tDgain\tgamma0\twindow\n")
+        for idx, pred_E, sigma, dgain, g0, window in records:
+            fh.write(f"{idx}\t{pred_E:.5f}\t{sigma:.5f}\t{dgain:.5f}\t{g0:.3f}\t{window}\n")
     print(f"[AL] wrote log with {len(records)} entries to {idx_file}")
-
+    
     sel_frames = [pool_frames[i] for i in cand_global]
     return sel_frames, cand_global
 

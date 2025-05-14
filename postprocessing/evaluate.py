@@ -24,7 +24,7 @@ import scipy.linalg
 import plotly.tools as tls
 import plotly.io as pio
 
-from ase.io import read  # Needed for reading training/eval data
+from ase.io import read, write  # Needed for reading training/eval data
 
 # === Local Module Imports ===
 from postprocessing.parsing import parse_extxyz, save_stacked_xyz
@@ -851,10 +851,6 @@ def run_eval(config):
             df     = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
             sm     = df.rolling(window, center=True, min_periods=1).mean()
 
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
-            ax.fill_between(steps, sm["mu"]-2*sm["sigma"], sm["mu"]+2*sm["sigma"],
-                             alpha=0.3, label="σ (smoothed)")
     
             # bond‑length thresholds ----------------------------------------
             train_idx     = np.where(train_mask)[0]
@@ -896,6 +892,20 @@ def run_eval(config):
             bad_thin = bad_global.intersection(set(thin_idx))
             bad_mask = np.isin(steps, list(bad_global))
 
+            # Save everything for later re-plotting:
+            np.savez_compressed(
+                "pool_energy_trace.npz",
+                steps = steps,
+                mu    = sm["mu"].values,
+                sigma = sm["sigma"].values,
+                bad   = bad_mask
+            )
+            print("Saved data to pool_energy_trace.npz")
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
+            ax.fill_between(steps, sm["mu"]-2*sm["sigma"], sm["mu"]+2*sm["sigma"],
+                             alpha=0.3, label="σ (smoothed)")
             ax.scatter(steps[bad_mask], sm["mu"][bad_mask], marker='x', label='bond outlier')
             ax.legend()
             ax.set_xlabel("Pool frame index")
@@ -929,20 +939,7 @@ def run_eval(config):
             )
             
             assert np.isfinite(L_chol).all(), "L_chol still has NaNs/Infs!"
-            
-            print(f"[GCV]  α²={alpha_sq:.3e}   λ={lambda_opt:.3e}")
 
-#            F_train = F_train.astype(float)
-            
-#            A = (1.0 / alpha_sq) * (F_train.T @ F_train)       # d × d
-#            A[np.diag_indices_from(A)] += 1.0                  # add identity
-            
-#            L_chol = np.linalg.cholesky(A)                     # d × d, guaranteed square
-            
-            # quick sanity check
-#            assert L_chol.shape[0] == L_chol.shape[1], "L_chol not square!"
-#            assert np.isfinite(L_chol).all(), "L_chol still has NaN/Inf."
-            
             # uncertainty for pool path -------------------------------------
             if n_models >= 2:
                 calib_pool = VarianceScalingCalibrator().fit(
@@ -970,7 +967,7 @@ def run_eval(config):
                 window_size  = eval_cfg.get("pool_window", 100),
                 base         = "al_pool_v1")
     
-                    # pool window log -----------------------------------------------
+            # pool window log -----------------------------------------------
             n_thin = len(thin_idx)
             w_size = eval_cfg.get("pool_window", 100)
             n_win  = (n_thin + w_size - 1) // w_size
@@ -988,20 +985,12 @@ def run_eval(config):
     
             # Extend master data structures ---------------------------------
             if sel_objs:
-                offset = len(all_frames)
-                all_frames.extend(sel_objs)
-                all_true_E  = np.concatenate([all_true_E, np.full(len(sel_objs), np.nan)])
-                all_true_F.extend([None] * len(sel_objs))
-                train_mask  = np.concatenate([train_mask, np.ones(len(sel_objs), dtype=bool)])
-                val_mask    = np.concatenate([val_mask,   np.zeros(len(sel_objs), dtype=bool)])
-    
-                pool_positions  = np.array([fr.get_positions() for fr in sel_objs])
-                pool_forces_arr = np.full(pool_positions.shape, np.nan)
-                pool_energies   = np.full(len(sel_objs), np.nan)
-                atom_types      = sel_objs[0].get_chemical_symbols() if hasattr(sel_objs[0], 'get_chemical_symbols') else []
-                save_stacked_xyz("to_label_from_pool.xyz",
-                                 pool_energies, pool_positions, pool_forces_arr, atom_types)
-                print(f"Saved {len(sel_objs)} pool frames to 'to_label_from_pool.xyz'.")
+                with open("to_DFT_labelling_from_pool.xyz", "w") as fh:
+                    for orig_idx, atoms in zip(sel_global_idx, sel_objs):
+                        e_pred = mu_E_pool[orig_idx]
+                        comment = f"frame={orig_idx},  pred_E={e_pred:.5f}"
+                        write(fh, atoms, format="xyz", comment=comment)
+                print(f"Saved {len(sel_objs)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
             else:
                 print("No pool frames selected; nothing to save.")
 
