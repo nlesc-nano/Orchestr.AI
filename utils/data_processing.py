@@ -6,7 +6,8 @@ import h5py
 from ase import Atoms
 import schnetpack as spk
 import schnetpack.transform as trn
-
+import torch    
+     
 def load_data(config):
     try:
         data = np.load(config['settings']['data']['dataset_path'])
@@ -20,7 +21,6 @@ def preprocess_data(data):
     numbers = data["z"]
     atoms_list = []
     property_list = []
-    
     positions_array = np.array(data["R"])
     energies_array = np.array(data["E"])
     forces_array = np.array(data["F"])
@@ -28,12 +28,12 @@ def preprocess_data(data):
     for idx in range(len(positions_array)):
         ats = Atoms(positions=positions_array[idx], numbers=numbers)
         properties = {
+            '_positions': torch.tensor(positions_array[idx], dtype=torch.float32, requires_grad=True),
             'energy': np.array([energies_array[idx]], dtype=np.float32),
             'forces': forces_array[idx].astype(np.float32)
         }
         atoms_list.append(ats)
         property_list.append(properties)
-
     return atoms_list, property_list
 
 def setup_logging_and_dataset(config, atoms_list, property_list):
@@ -61,10 +61,27 @@ def setup_logging_and_dataset(config, atoms_list, property_list):
     
     return new_dataset, property_units
 
-def prepare_transformations(config, task_type):
+# def prepare_transformations(config, task_type):
     
+    # cutoff = config['settings']['model']['cutoff']
+    # transformations = [trn.ASENeighborList(cutoff=cutoff)]
+    
+    # if task_type == "train":
+        # transformations.append(trn.RemoveOffsets("energy", remove_mean=True, remove_atomrefs=False))
+    # elif task_type != "infer":
+        # raise ValueError(f"Unsupported task type: {task_type}")
+    
+    # transformations.append(trn.CastTo32())
+    
+    # return transformations
+
+
+def prepare_transformations(config, task_type):
     cutoff = config['settings']['model']['cutoff']
-    transformations = [trn.ASENeighborList(cutoff=cutoff)]
+
+    transformations = [
+        trn.ASENeighborList(cutoff=cutoff),
+    ]
     
     if task_type == "train":
         transformations.append(trn.RemoveOffsets("energy", remove_mean=True, remove_atomrefs=False))
@@ -74,7 +91,6 @@ def prepare_transformations(config, task_type):
     transformations.append(trn.CastTo32())
     
     return transformations
-    
     
 def setup_data_module(config, db_path, transformations, property_units):
     custom_data = spk.data.AtomsDataModule(
@@ -92,6 +108,8 @@ def setup_data_module(config, db_path, transformations, property_units):
     custom_data.prepare_data()
     custom_data.setup()
     logging.info("Data module prepared and set up")
+    # batch = next(iter(custom_data.val_dataloader()))
+    # print("Batch keys:", batch.keys())
     
     return custom_data
     
