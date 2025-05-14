@@ -12,7 +12,7 @@ def load_config(config_file=None):
     # Example: go up 3 or 4 levels to reach the project root, then into config/preprocess_config.yaml.
     if config_file is None:
         # Adjust parents[...] as necessary based on your directory structure
-        default_path = Path(__file__).resolve().parents[3] / "config" / "preprocess_config.yaml"
+        default_path = "preprocess_config.yaml"
         config_file = str(default_path)  # convert Path object to string if needed
 
     try:

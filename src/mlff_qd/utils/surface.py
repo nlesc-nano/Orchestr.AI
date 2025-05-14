@@ -4,7 +4,7 @@ import random
 from periodictable import elements
 
 def compute_surface_indices_with_replace_surface_dynamic(
-    input_file, surface_atom_types, output_xyz, f=1.0
+    input_file, surface_atom_types, f=1.0, surface_replaced_file="surface_replaced.xyz"
 ):
     """
     Dynamically replace surface atoms with random elements from the periodic table that are not in the molecule.
@@ -13,12 +13,12 @@ def compute_surface_indices_with_replace_surface_dynamic(
         input_file (str): Path to the input .xyz file.
         surface_atom_types (list): List of atom types considered as surface atoms to be replaced.
         f (float): Fraction of surface atoms to replace (default: 1.0).
+        surface_replaced_file (str): Path to the output .xyz file with surface atoms replaced.
 
     Returns:
         surface_indices (list): Indices of the replaced surface atoms in the structure.
         replaced_atom_types (list): Updated atom types after replacement.
     """
-
     print(f"Reading molecule from {input_file}...")
     mol_original = Molecule(input_file)  # Load the original molecule
     mol_updated = mol_original.copy()  # Create a copy to track cumulative changes
@@ -53,8 +53,8 @@ def compute_surface_indices_with_replace_surface_dynamic(
         print(f"Replacement {i+1}: {len(surface_indices)} surface atoms replaced so far.")
 
     # Save the final updated molecule to the output file
-    print(f"Writing modified molecule with replacements to {output_xyz}...")
-    mol_updated.write(output_xyz)
+    print(f"Writing modified molecule with replacements to {surface_replaced_file}...")
+    mol_updated.write(surface_replaced_file)
 
     # Extract updated atom types
     replaced_atom_types = [atom.symbol for atom in mol_updated]

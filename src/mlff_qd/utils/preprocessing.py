@@ -1,16 +1,13 @@
 import numpy as np
-import pickle 
 import random
-import matplotlib.pyplot as plt
-import yaml 
-import pprint
-import argparse
-from pathlib import Path
-from periodictable import elements
-from scipy.spatial.transform import Rotation as R
-from scm.plams import Molecule
 
+from periodictable import elements
+
+from mlff_qd.utils.analysis import compute_rmsd_matrix
 from mlff_qd.utils.io import save_xyz
+
+import logging
+logger = logging.getLogger(__name__)
 
 def center_positions(positions, masses):
     """
@@ -24,57 +21,35 @@ def center_positions(positions, masses):
         np.ndarray: Centered atomic positions (num_frames, num_atoms, 3).
     """
     num_frames, num_atoms, _ = positions.shape
-    com_frames = np.zeros((num_frames, 3))
-
-    # Calculate COM for each frame
-    for frame_idx in range(num_frames):
-        com_frames[frame_idx] = np.sum(
-            positions[frame_idx] * masses[:, np.newaxis], axis=0
-        ) / masses.sum()
-
-    # Subtract COM from all positions
-    centered_positions = positions - com_frames[:, np.newaxis, :]
-    return centered_positions
-
-def align_to_reference(positions, reference_positions):
-    """
-    Align atomic positions of each frame to a reference structure using least-squares fitting.
-
-    Parameters:
-        positions (np.ndarray): Atomic positions (num_frames, num_atoms, 3).
-        reference_positions (np.ndarray): Reference positions (num_atoms, 3).
-
-    Returns:
-        np.ndarray: Aligned atomic positions (num_frames, num_atoms, 3).
-    """
-    aligned_positions = np.zeros_like(positions)
-    for frame_idx, frame in enumerate(positions):
-        # Calculate optimal rotation matrix
-        H = frame.T @ reference_positions
-        U, _, Vt = np.linalg.svd(H)
-        rotation_matrix = U @ Vt
-
-        # Apply rotation to align the frame
-        aligned_positions[frame_idx] = frame @ rotation_matrix.T
+    com = np.zeros((num_frames, 3))
     
-    return aligned_positions
+    for i in range(num_frames):
+        com[i] = np.sum(positions[i] * masses[:, None], axis=0) / masses.sum()
+    
+    return positions - com[:, None, :]
+
+def align_to_reference(positions, reference):
+    """Align each frame to the reference using SVD."""
+    num_frames = positions.shape[0]
+    aligned = np.zeros_like(positions)
+    rotations = np.zeros((num_frames, 3, 3))
+    
+    for i, frame in enumerate(positions):
+        H = frame.T @ reference
+        U, _, Vt = np.linalg.svd(H)
+        Rmat = U @ Vt
+        rotations[i] = Rmat
+        aligned[i] = frame @ Rmat.T
+    
+    return aligned, rotations
 
 def rotate_forces(forces, rotation_matrices):
-    """
-    Rotate forces for each frame to match the aligned orientation.
-
-    Parameters:
-        forces (np.ndarray): Atomic forces (num_frames, num_atoms, 3).
-        rotation_matrices (np.ndarray): Rotation matrices (num_frames, 3, 3).
-
-    Returns:
-        np.ndarray: Rotated forces (num_frames, num_atoms, 3).
-    """
-    rotated_forces = np.zeros_like(forces)
-    for frame_idx, frame_forces in enumerate(forces):
-        rotated_forces[frame_idx] = frame_forces @ rotation_matrices[frame_idx]
+    """Rotate forces using the corresponding rotation matrices."""
+    rotated = np.zeros_like(forces)
+    for i, frame in enumerate(forces):
+        rotated[i] = frame @ rotation_matrices[i].T
     
-    return rotated_forces
+    return rotated
 
 def create_mass_dict(atom_types):
     """
@@ -86,56 +61,47 @@ def create_mass_dict(atom_types):
     Returns:
         dict: Dictionary where keys are atom types and values are atomic masses.
     """
-
     mass_dict = {atom: elements.symbol(atom).mass for atom in set(atom_types)}
-    print(f"Generated mass dictionary: {mass_dict}")
+    logger.info(f"Generated mass dictionary: {mass_dict}")
     return mass_dict
 
-def generate_randomized_samples(
-    md_positions,
-    atom_types,
-    num_samples=100,
-    base_scale=0.1
-):
-    """
-    Generate random configurations by applying Gaussian perturbations to atomic positions.
-    The displacements are fixed in scale and not adjusted to match any RMSD target.
-
-    Parameters:
-        md_positions (list of np.ndarray): List of MD frames (num_frames, num_atoms, 3).
-        atom_types (list of str): Atom types for each atom in the structure.
-        num_samples (int): Number of randomized configurations to generate.
-        base_scale (float): Standard deviation of the Gaussian noise applied to displace each atom.
-
-    Returns:
-        np.ndarray: Array of randomized configurations (num_samples, num_atoms, 3).
-    """
-    randomized_structures = []
-
+def generate_randomized_samples(md_positions, atom_types, num_samples=100, base_scale=0.1):
+    """Generate random structures by Gaussian perturbation."""
+    randomized = []
+    
     for i in range(num_samples):
-        # Select a random reference frame
-        start_idx = np.random.choice(len(md_positions))
-        reference_positions = md_positions[start_idx]
+        ref = random.choice(md_positions)
+        disp = np.random.normal(0, base_scale, size=ref.shape)
+        disp -= np.mean(disp, axis=0)
+        randomized.append(ref + disp)
+    
+        if (i+1) % 100 == 0 or i==0:
+            logger.info(f"Generated {i+1}/{num_samples} randomized samples...")
+    
+    save_xyz("randomized_samples.xyz", randomized, atom_types)
+    
+    logger.info("Saved randomized samples to 'randomized_samples.xyz'")
+    
+    return np.array(randomized)
 
-        # Generate random displacements
-        displacement = np.random.normal(loc=0.0, scale=base_scale, size=reference_positions.shape)
+def iterative_alignment_fixed(centered_positions, tol=1e-6, max_iter=10):
+    """Iteratively align positions to a converged reference."""
+    ref = centered_positions[0]
+    prev_ref = None
+    
+    for _ in range(max_iter):
+        aligned, rotations = align_to_reference(centered_positions, ref)
+        new_ref = np.mean(aligned, axis=0)
+        if prev_ref is not None and np.linalg.norm(new_ref - prev_ref) < tol:
+            break
+        prev_ref = new_ref
+        ref = new_ref
+    
+    return aligned, rotations, new_ref
 
-        # Remove net translation
-        mean_disp = np.mean(displacement, axis=0)  # Average over all atoms
-        displacement -= mean_disp  # Now no net translation
-
-        # Apply displacements to the reference positions
-        randomized_structure = reference_positions + displacement
-        randomized_structures.append(randomized_structure)
-
-        # Print progress every 100 samples or for the first sample
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"Generating sample {i + 1}/{num_samples}...")
-
-    print(f"Generated {len(randomized_structures)} randomized samples.")
-
-    # Save the randomized samples
-    save_xyz("randomized_samples.xyz", randomized_structures, atom_types)
-    print(f"Saved {len(randomized_structures)} randomized samples to 'randomized_samples.xyz'.")
-
-    return np.array(randomized_structures)
+def find_medoid_structure(aligned_positions):
+    """Find the medoid structure from aligned positions."""
+    rmsd_mat = compute_rmsd_matrix(aligned_positions)
+    mean_rmsd = np.mean(rmsd_mat, axis=1)
+    idx = np.argmin(mean_rmsd)
+    return aligned_positions[idx], idx

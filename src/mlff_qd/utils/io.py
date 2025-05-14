@@ -1,19 +1,8 @@
 import numpy as np
-import pickle 
-import random
-import matplotlib.pyplot as plt
-import yaml 
-import pprint
-import argparse
 from pathlib import Path
-from periodictable import elements
-from scipy.spatial.transform import Rotation as R
-from scm.plams import Molecule
-from CAT.recipes import replace_surface
-from sklearn.cluster import KMeans
-from sklearn.cluster import DBSCAN
-from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA
+
+import logging
+logger = logging.getLogger(__name__)
 
 def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
     """
@@ -35,12 +24,16 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
 
     Notes
     -----
-    - This function always writes to 'data/processed/filename'.
+    - This function always writes to 'processed_data/filename'.
     - If 'energies' is provided, each frame's comment line includes that frame's energy.
     - You can use 'comment' to clarify if the frames are "Aligned positions", "Aligned forces", etc.
     """
 
-    Path(filename).parent.mkdir(parents=True, exist_ok=True)
+    # Determine processed output directory
+    processed_dir = Path.cwd() / "processed_data"
+
+    # Build the full path
+    output_path = processed_dir / filename
         
     # Convert frames to a NumPy array if needed
     frames = np.asarray(positions)
@@ -48,8 +41,8 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
     num_atoms = len(atom_types)
     has_energies = (energies is not None) and (len(energies) == num_frames)
 
-    print(f"Saving XYZ data to: {filename}")
-    with open(filename, "w") as f:
+    print(f"Saving XYZ data to: {output_path}")
+    with open(output_path, "w") as f:
         for i, frame in enumerate(frames):
             f.write(f"{num_atoms}\n")
 
@@ -64,53 +57,17 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
             for atom, (x, y, z) in zip(atom_types, frame):
                 f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
 
-    print(f"Done. Wrote {num_frames} frames to '{filename}'.")
-
-def save_frequencies(filename, frequencies):
-    """
-    Save vibrational frequencies to a file.
-
-    Parameters:
-        filename (str): Path to the output file.
-        frequencies (np.ndarray): Vibrational frequencies (cm^-1).
-    """
-    print(f"Saving vibrational frequencies to {filename}...")
-    with open(filename, "w") as f:
-        f.write("Vibrational Frequencies (cm^-1):\n")
-        for i, freq in enumerate(frequencies, start=1):
-            f.write(f"Mode {i}: {freq:.6f} cm^-1\n")
-    
-    print(f"Frequencies saved to {filename}.")
-
-def save_binary(filename, frequencies, positions, eigenvectors, atom_types):
-    """Save frequencies, positions, eigenvectors, and atom types to a binary file."""
-    data = {
-        "frequencies": frequencies,
-        "positions": positions,
-        "eigenvectors": eigenvectors,
-        "atom_types": atom_types
-    }
-    with open(filename, "wb") as f:
-        pickle.dump(data, f)
-
-    print(f"Saved data to binary file: {filename}")
-
-def load_binary(filename):
-    """Load frequencies, positions, eigenvectors, and atom types from a binary file."""
-    with open(filename, "rb") as f:
-        data = pickle.load(f)
-    
-    print(f"Loaded data from binary file: {filename}")
-    
-    return data["frequencies"], data["eigenvectors"]
+    print(f"Done. Wrote {num_frames} frames to '{output_path}'.")
 
 def reorder_xyz_trajectory(input_file, output_file, num_atoms):
     """Reorder atoms in the XYZ trajectory."""
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+    processed_dir = Path(__file__).resolve().parents[3] / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    output_path = processed_dir / output_file
 
     print(f"Reordering atoms in trajectory file: {input_file}")
 
-    with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+    with open(input_file, "r") as infile, open(output_path, "w") as outfile:
         lines = infile.readlines()
         num_lines_per_frame = num_atoms + 2
         for i in range(0, len(lines), num_lines_per_frame):
@@ -120,7 +77,7 @@ def reorder_xyz_trajectory(input_file, output_file, num_atoms):
             outfile.writelines(header)
             outfile.writelines(sorted_atoms)
     
-    print(f"Reordered trajectory saved to: {output_file}")
+    print(f"Reordered trajectory saved to: {output_path}")
 
 def parse_positions_xyz(filename, num_atoms):
     """
@@ -135,7 +92,7 @@ def parse_positions_xyz(filename, num_atoms):
         list: Atomic types.
         list: Total energies for each frame (if available; otherwise, empty list).
     """
-    print(f"Parsing positions XYZ file: {filename}")
+    logger.info(f"Parsing positions XYZ file: {filename}")
     positions = []
     atom_types = []
     total_energies = []
@@ -167,7 +124,7 @@ def parse_positions_xyz(filename, num_atoms):
 
 def parse_forces_xyz(filename, num_atoms):
     """Parse forces from an XYZ file."""
-    print(f"Parsing forces XYZ file: {filename}")
+    logger.info(f"Parsing forces XYZ file: {filename}")
     forces = []
     with open(filename, "r") as f:
         lines = f.readlines()
@@ -194,6 +151,6 @@ def get_num_atoms(filename):
     with open(filename, "r") as f:
         num_atoms = int(f.readline().strip())
     
-    print(f"Number of atoms: {num_atoms}")
+    logger.info(f"Number of atoms: {num_atoms}")
     
     return num_atoms

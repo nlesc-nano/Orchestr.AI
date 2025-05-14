@@ -16,6 +16,22 @@ pip install PLAMS
 
 One can find more information [here](https://www.scm.com/doc/plams/started.html#installing-plams).
 
+### Install DScribe
+One can install DScribe through pip which will automatically get the latest stable release:
+
+```bash
+pip install dscribe
+```
+
+They also provide a conda package through conda-forge:
+
+
+```bash
+conda install -c conda-forge dscribe
+```
+
+One can find more information [here](https://singroup.github.io/dscribe/latest/install.html).
+
 ### Install Compound Attachment Tool (CAT), nano-CAT and auto-FOX
 To install these packages we recommend to download the latest versions from their original repositories in the links below:
 
@@ -70,9 +86,9 @@ The current version of the platform is developped for being run in a cluster. Th
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
 ### Preprocessing tools
-The input file for the preprocessing of the data can be found in config/preprocess_config.yaml. The initial data for being processed should be placed in data/raw. This tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
+An input file example for the preprocessing of the data can be found in config_files/preprocess_config.yaml. The initial data for being processed should be placed in a consistent way to the paths indicated in the input file. This preprocessing tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
 
-By default, the preprocessing code assumes that the input file is config/preprocess_config.yaml. If that is the case, it can be run as:
+By default, the preprocessing code assumes that the input file is preprocess_config.yaml. If that is the case, it can be run as:
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset
 ```
@@ -81,11 +97,11 @@ However, if an user wants to specify a different custom configuration file for t
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
 ```
-## YAML Generation for SchNet and Nequip Training
+### YAML Generation for SchNet and Nequip Training
 
 Use the `generate_scripts.py` script to automatically create a YAML configuration file for training. The script requires two parameters: the platform (`-p`) and the output file (`-o`).
 
-### Generate YAML for SchNet
+#### Generate YAML for SchNet
 
 To generate a configuration file for SchNet, run:
 
@@ -95,7 +111,7 @@ python generate_scripts.py -p schnet -o schnet.yaml
 
 This command produces `schnet.yaml` with all necessary settings for training using SchNet.
 
-### Generate YAML for Nequip
+#### Generate YAML for Nequip
 
 ```bash
 python generate_scripts.py -p nequip -o nequip.yaml
@@ -103,12 +119,27 @@ python generate_scripts.py -p nequip -o nequip.yaml
 
 This generates `nequip.yaml`, which is pre-configured for Nequip training.
 
-### Training locally
+### Training
 If an user wants to run locally the training code, one can do the following:
 ```bash
-python training.py --config input_file.yaml
+python -m mlff_qd.training.main
 ```
-By default, if no input file is specified, the training code looks for a file called input.yaml.
+By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
+```bash
+python -m mlff_qd.training.main --config input_file.yaml
+```
+
+In the running_files folder there is an example of file for running the training, and afterwards the inference, in a cluster using a slurm queue system.
+
+### Inference code
+After the training has finished, an user can run the inference code that generates the MLFF:
+```bash
+python -m mlff_qd.training.inference
+```
+By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
+```bash
+python -m mlff_qd.training.inference --config input_file.yaml
+```
 
 ## CLI Mode - Extract Training Metrics from TensorBoard Event Files
 

@@ -8,11 +8,14 @@ import yaml
 import argparse
 import pickle
 import logging
-from utils.logging_utils import timer, setup_logging
-from utils.data_processing import load_data, preprocess_data, setup_logging_and_dataset, prepare_transformations, setup_data_module, show_dataset_info
-from utils.model import setup_model
-from utils.helpers import load_config, parse_args
+
 from schnetpack.data import ASEAtomsData
+
+from mlff_qd.utils.logging_utils import timer, setup_logging
+from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+        prepare_transformations, setup_data_module, show_dataset_info )
+from mlff_qd.utils.model import setup_model
+from mlff_qd.utils.helpers import load_config, parse_args
 
 def convert_units(value, from_unit, to_unit):
     """Convert energy or force values between different unit systems."""
@@ -71,7 +74,6 @@ def save_forces(all_actual_forces_flat,all_predicted_forces_flat, dataset_type):
     except Exception as e:
         print(f"Error saving force results: {e}")
         
-@timer
 def run_inference(loader, dataset_type, best_model, device, property_units, new_dataset):
     all_actual_energy = []
     all_predicted_energy = []
