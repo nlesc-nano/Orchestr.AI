@@ -141,8 +141,6 @@ def calibrate_alpha_reg_gcv(
     print(f"[GCV] λ = {lam_opt:.3e}, α² = {alpha_sq:.3e}")
     return alpha_sq, lam_opt, terms_lat, G_eval, L
 
-
-
 # -----------------------------------------------------------------------------
 # 2. FPS‑W sampler (uncertainty‑biased farthest‑point sampling)
 # -----------------------------------------------------------------------------
@@ -946,98 +944,152 @@ def adaptive_learning_mig_pool(
 
     return sel_frames, sel_rel
 
-def compute_bond_thresholds(frames, neighbor_list, first_shell_cutoff=3.0, device=None):
-    cache_path = os.path.join(neighbor_list.cache_path, 'cache_0.pt')
-    if not os.path.exists(cache_path):
-        raise FileNotFoundError(f"Cache file {cache_path} not found")
-    cache_data = torch.load(cache_path)
+def compute_bond_thresholds(
+        frames,
+        neighbor_list,
+        first_shell_cutoff=3.0,
+        device=None,
+        cache_path="thresholds.npz"
+    ):
+    """
+    Compute (or load) bonded‐pair thresholds (min, max, mean).
+    Caches result in `cache_path`.
+    """
+    # 1) Try to load
+    if os.path.exists(cache_path):
+        with np.load(cache_path, allow_pickle=True) as data:
+            thresholds = data["thresholds"].item()
+        print(f"[compute_bond_thresholds] Loaded thresholds from {cache_path}")
+        return thresholds
 
-    idx_i = cache_data['_idx_i'].numpy()
-    idx_j = cache_data['_idx_j'].numpy()
-    offsets = cache_data['_offsets'].numpy()
+    # 2) Compute from scratch
+    cache_file = os.path.join(neighbor_list.cache_path, "cache_0.pt")
+    if not os.path.exists(cache_file):
+        raise FileNotFoundError(f"Cache file {cache_file} not found")
+    cache_data = torch.load(cache_file)
+    idx_i = cache_data["_idx_i"].numpy()
+    idx_j = cache_data["_idx_j"].numpy()
+    offsets = cache_data["_offsets"].numpy()
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu") \
+          if device is None else device
 
     bond_lengths = {}
-    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     n_frames = len(frames)
     for idx, frame in enumerate(frames):
         if idx % 50 == 0:
             print(f"compute_bond_thresholds: processing frame {idx+1}/{n_frames}")
-        positions = frame.get_positions()
-        Z = frame.get_atomic_numbers()
+        pos = frame.get_positions()
+        Z   = frame.get_atomic_numbers()
         cell = frame.get_cell()
         for i, j, off in zip(idx_i, idx_j, offsets):
             if j <= i:
                 continue
-            pos_i = positions[i] + np.dot(off, cell)
-            pos_j = positions[j]
-            dist = np.linalg.norm(pos_i - pos_j)
-            if dist > first_shell_cutoff:
+            p_i = pos[i] + np.dot(off, cell)
+            p_j = pos[j]
+            d = np.linalg.norm(p_i - p_j)
+            if d > first_shell_cutoff:
                 continue
             pair = tuple(sorted((Z[i], Z[j])))
-            bond_lengths.setdefault(pair, []).append(dist)
-    
+            bond_lengths.setdefault(pair, []).append(d)
+
     thresholds = {
         pair: {
-            'min': float(np.min(dists)),
-            'max': float(np.max(dists)),
-            'mean': float(np.mean(dists))
+            "min": float(np.min(dists)),
+            "max": float(np.max(dists)),
+            "mean": float(np.mean(dists))
         }
         for pair, dists in bond_lengths.items()
     }
     print("Bond thresholds (pair: {min, max, mean}):")
     for pair, stats in thresholds.items():
-        elem_pair = tuple(chemical_symbols[z] for z in pair)
-        print(f"  {elem_pair}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
+        elems = tuple(chemical_symbols[z] for z in pair)
+        print(f"  {elems}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
+
+    # 3) Save cache
+    np.savez_compressed(cache_path, thresholds=thresholds)
+    print(f"[compute_bond_thresholds] Saved thresholds to {cache_path}")
     return thresholds
 
-def filter_unrealistic_indices(frames, neighbor_list, thresholds, pct_tol=0.15, first_shell_cutoff=3.0, device=None):
-    cache_path = os.path.join(neighbor_list.cache_path, 'cache_0.pt')
-    if not os.path.exists(cache_path):
-        raise FileNotFoundError(f"Cache file {cache_path} not found")
-    cache_data = torch.load(cache_path)
 
-    idx_i = cache_data['_idx_i'].numpy()
-    idx_j = cache_data['_idx_j'].numpy()
-    offsets = cache_data['_offsets'].numpy()
+def filter_unrealistic_indices(
+        frames,
+        neighbor_list,
+        thresholds,
+        pct_tol=0.15,
+        first_shell_cutoff=3.0,
+        device=None,
+        cache_path="bad_globals.npz"
+    ):
+    """
+    Identify (or load) set of frame‐indices with impossible bonds.
+    Caches result in `cache_path`.
+    """
+    # 1) Try to load
+    if os.path.exists(cache_path):
+        data = np.load(cache_path)
+        bad = set(data["bad_global"].tolist())
+        print(f"[filter_unrealistic_indices] Loaded bad_global from {cache_path}")
+        return bad
+
+    # 2) Compute
+    cache_file = os.path.join(neighbor_list.cache_path, "cache_0.pt")
+    if not os.path.exists(cache_file):
+        raise FileNotFoundError(f"Cache file {cache_file} not found")
+    cache_data = torch.load(cache_file)
+    idx_i = cache_data["_idx_i"].numpy()
+    idx_j = cache_data["_idx_j"].numpy()
+    offsets = cache_data["_offsets"].numpy()
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu") \
+          if device is None else device
 
     bad = []
-    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     n_frames = len(frames)
     for idx, frame in enumerate(frames):
         if idx % 50 == 0:
             print(f"filter_unrealistic_indices: checking frame {idx+1}/{n_frames}")
-        positions = frame.get_positions()
-        Z = frame.get_atomic_numbers()
+        pos = frame.get_positions()
+        Z   = frame.get_atomic_numbers()
         cell = frame.get_cell()
         flagged = False
         for i, j, off in zip(idx_i, idx_j, offsets):
             if j <= i:
                 continue
-            pos_i = positions[i] + np.dot(off, cell)
-            pos_j = positions[j]
-            dist = np.linalg.norm(pos_i - pos_j)
-            if dist > first_shell_cutoff:
+            p_i = pos[i] + np.dot(off, cell)
+            p_j = pos[j]
+            d = np.linalg.norm(p_i - p_j)
+            if d > first_shell_cutoff:
                 continue
             pair = tuple(sorted((Z[i], Z[j])))
             if pair not in thresholds:
                 continue
-            d_min = thresholds[pair]['min']
-            d_max = thresholds[pair]['max']
-            d_mean = thresholds[pair]['mean']
+            d_min = thresholds[pair]["min"]
+            d_max = thresholds[pair]["max"]
+            d_mean = thresholds[pair]["mean"]
             lo = min((1 - pct_tol) * d_mean, d_min)
             hi = max((1 + pct_tol) * d_mean, d_max)
-            if dist < lo or dist > hi:
-                elem_pair = tuple(chemical_symbols[z] for z in pair)
+            if d < lo or d > hi:
+                elems = tuple(chemical_symbols[z] for z in pair)
                 print(
-                    f"[Warning] Frame {idx+1}: bond {elem_pair} distance {dist:.3f} Å "
-                    f"outside [{lo:.3f}, {hi:.3f}] (ref mean={d_mean:.3f}, min={d_min:.3f}, max={d_max:.3f} Å)"
+                    f"[Warning] Frame {idx+1}: bond {elems} distance {d:.3f} Å "
+                    f"outside [{lo:.3f}, {hi:.3f}] (ref mean={d_mean:.3f}, "
+                    f"min={d_min:.3f}, max={d_max:.3f} Å)"
                 )
                 bad.append(idx)
                 flagged = True
                 break
-            if flagged:
-                break
-    return set(bad)
+        if flagged:
+            # stop checking further bonds in this frame
+            continue
+
+    bad_set = set(bad)
+
+    # 3) Save cache
+    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
+    print(f"[filter_unrealistic_indices] Saved bad_global to {cache_path}")
+    return bad_set
+
 
 def adaptive_learning_mig_pool_windowed(
         pool_frames: list,
@@ -1062,6 +1114,23 @@ def adaptive_learning_mig_pool_windowed(
     """
     Pool-based AL with windowed FPS and bond sanity filter via precomputed bad_global.
     """
+    F_pool  = np.asarray(F_pool,  dtype=np.float64)
+    F_train = np.asarray(F_train, dtype=np.float64)
+    L       = np.asarray(L,       dtype=np.float64)
+
+    def _first_bad_row(arr, name):
+        if not np.isfinite(arr).all():
+            bad = np.where(~np.isfinite(arr).all(axis=1))[0][:10]  # show up to 10
+            raise ValueError(
+                f"{name} still has non-finite rows at positions {bad.tolist()} "
+                f"(showing first 10).")
+    
+    _first_bad_row(F_pool,  "F_pool")
+    _first_bad_row(F_train, "F_train")
+    
+    if not np.isfinite(L).all():
+        raise ValueError("Cholesky matrix L contains NaN/Inf values.")
+
     sigma_pool = predict_sigma_from_L(F_pool, L, alpha_sq)
     G_train = solve_triangular(L, F_train.T, lower=True).T
     G_pool = solve_triangular(L, F_pool.T, lower=True).T

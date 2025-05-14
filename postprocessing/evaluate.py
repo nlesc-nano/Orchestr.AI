@@ -21,6 +21,8 @@ import contextlib
 import matplotlib.pyplot as plt
 import pandas as pd
 import scipy.linalg
+import plotly.tools as tls
+import plotly.io as pio
 
 from ase.io import read  # Needed for reading training/eval data
 
@@ -831,21 +833,27 @@ def run_eval(config):
             pool_frames = read(pool_xyz_path, index=":", format="extxyz")
     
             # ensemble eval on pool -----------------------------------------
-            ens_E_pool, ens_F_pool, ens_L_pool, _ = evaluate_and_cache_ensemble(
+            ens_E_pool, ens_F_pool, ens_L_pool, _, _, _ = evaluate_and_cache_ensemble(
                 pool_frames, ensemble_folder, device, batch_size, eval_log,
                 config, neighbour_list, npz_path="ensemble_unlabel.npz")
-            mu_L_pool    = np.mean(ens_L_pool, axis=0)
+
+            ens_E_pool = np.stack(ens_E_pool, axis=0)
+            ens_L_pool = np.stack(ens_L_pool, axis=0)
+
             mu_E_pool    = np.mean(ens_E_pool, axis=0)
             sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
-    
+            mu_L_pool    = np.mean(ens_L_pool, axis=0)
+            mean_L_frame  = np.mean(ens_L_pool, axis=0)
+
             # rolling average plot (unchanged) ------------------------------
             steps  = np.arange(len(mu_E_pool))
             window = 50
             df     = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
             sm     = df.rolling(window, center=True, min_periods=1).mean()
-            plt.figure(figsize=(6,4))
-            plt.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
-            plt.fill_between(steps, sm["mu"]-2*sm["sigma"], sm["mu"]+2*sm["sigma"],
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
+            ax.fill_between(steps, sm["mu"]-2*sm["sigma"], sm["mu"]+2*sm["sigma"],
                              alpha=0.3, label="σ (smoothed)")
     
             # bond‑length thresholds ----------------------------------------
@@ -859,17 +867,82 @@ def run_eval(config):
             pool_stride   = eval_cfg.get("pool_stride", 50)
             thin_idx      = np.arange(len(pool_frames))[::pool_stride]
             pool_frames_thin  = [pool_frames[i] for i in thin_idx]
-            F_pool_thin       = mu_L_pool[thin_idx]
-            mu_E_pool_thin    = mu_E_pool[thin_idx]
-    
+            F_pool_thin       = mu_L_pool[thin_idx].astype(float)
+            mu_E_pool_thin    = mu_E_pool[thin_idx].astype(float)
+            F_train_thin     = mean_L_frame[thin_idx].astype(float)   # needed by AL
+            
+            # ---------------------------------------------------------------------
+            # DROP NaN / Inf ROWS
+            # ---------------------------------------------------------------------
+            mask_pool  = np.isfinite(F_pool_thin).all(axis=1)
+            mask_train = np.isfinite(F_train_thin).all(axis=1)
+            finite_mask = mask_pool & mask_train
+            
+            if not finite_mask.all():
+                dropped = np.where(~finite_mask)[0]
+                print(f"[Pool-AL] dropping {len(dropped)} NaN/Inf rows: {dropped.tolist()}")
+                thin_idx         = thin_idx[finite_mask]
+                pool_frames_thin = [pool_frames[i] for i in thin_idx]
+                F_pool_thin      = F_pool_thin [finite_mask]
+                F_train_thin     = F_train_thin[finite_mask]
+                mu_E_pool_thin   = mu_E_pool_thin[finite_mask]
+
+            # ---------------------------------------------------------------------
+            # MAP bad_global TO THINNED COORDINATES
+            # ---------------------------------------------------------------------
+            bad_rel = set(np.nonzero(np.isin(thin_idx, list(bad_global)))[0])
+            
             # highlight bond outliers on plot -------------------------------
             bad_thin = bad_global.intersection(set(thin_idx))
-            bad_mask = np.isin(steps, list(bad_thin))
-            plt.scatter(steps[bad_mask], sm["mu"][bad_mask], marker='x', label='bond outlier')
-            plt.legend(); plt.xlabel("Pool frame index"); plt.ylabel("Predicted energy")
-            plt.title("Pool energy ± uncertainty"); plt.tight_layout()
-            plt.savefig("pool_energy_uncertainty.png", dpi=200); plt.close()
-    
+            bad_mask = np.isin(steps, list(bad_global))
+
+            ax.scatter(steps[bad_mask], sm["mu"][bad_mask], marker='x', label='bond outlier')
+            ax.legend()
+            ax.set_xlabel("Pool frame index")
+            ax.set_ylabel("Predicted energy")
+            ax.set_title("Pool energy ± uncertainty")
+            fig.tight_layout()
+
+            fig.savefig("pool_energy_uncertainty.png", dpi=200)
+            plotly_fig = tls.mpl_to_plotly(fig)
+            pio.write_html(plotly_fig, "pool_energy_uncertainty_plotly.html", auto_open=False)
+
+            # ----------------------------------------------------------------------
+            # ❶  Build training design matrix and targets
+            # ----------------------------------------------------------------------
+            train_idx    = np.where(train_mask)[0]
+            F_train_full = mean_L_frame[train_idx].astype(float)
+            y_train_full = stats_ens.delta_E_frame[train_idx].astype(float)
+            
+            # guard: drop non-finite rows
+            good_rows = np.isfinite(F_train_full).all(axis=1) & np.isfinite(y_train_full)
+            F_train   = F_train_full[good_rows]
+            y_train   = y_train_full[good_rows]
+            
+            # ----------------------------------------------------------------------
+            # ❷  Fit λ and α² with (generalised) cross-validation
+            # ----------------------------------------------------------------------
+            alpha_sq, lambda_opt, _, _, L_chol = calibrate_alpha_reg_gcv(
+                F_eval=F_train,
+                y=y_train,
+                lambda_bounds=(1e-6, 1e4)
+            )
+            
+            assert np.isfinite(L_chol).all(), "L_chol still has NaNs/Infs!"
+            
+            print(f"[GCV]  α²={alpha_sq:.3e}   λ={lambda_opt:.3e}")
+
+#            F_train = F_train.astype(float)
+            
+#            A = (1.0 / alpha_sq) * (F_train.T @ F_train)       # d × d
+#            A[np.diag_indices_from(A)] += 1.0                  # add identity
+            
+#            L_chol = np.linalg.cholesky(A)                     # d × d, guaranteed square
+            
+            # quick sanity check
+#            assert L_chol.shape[0] == L_chol.shape[1], "L_chol not square!"
+#            assert np.isfinite(L_chol).all(), "L_chol still has NaN/Inf."
+            
             # uncertainty for pool path -------------------------------------
             if n_models >= 2:
                 calib_pool = VarianceScalingCalibrator().fit(
@@ -883,14 +956,13 @@ def run_eval(config):
             Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
                 pool_frames_thin,
                 F_pool_thin,
-                mean_L_al[~val_mask],
+                F_train_thin,
                 alpha_sq,
                 L_chol,
                 mu_E_pool    = mu_E_pool_thin,
-                sigma_E_pool = sigma_E_pool_cal,
                 thresholds   = thresholds,
                 neighbor_list= neighbour_list,
-                bad_global   = bad_thin,
+                bad_global   = bad_rel,
                 rho_eV       = 0.002,
                 beta         = 0.0,
                 drop_init    = 1.0,
