@@ -141,6 +141,12 @@ By default, it will look for a input file called input.yaml. Thus, if an user wa
 python -m mlff_qd.training.inference --config input_file.yaml
 ```
 
+### Postprocessing
+More details will be added in future versions, but the postprocessing code is run as:
+```bash
+python -m mlff_qd.postprocessing
+```
+
 ## Extract Training Metrics from TensorBoard Event Files
 
 This script, `analysis/extract_metrics.py`,  extracts scalar training metrics from TensorBoard event files and saves them to a CSV file.
