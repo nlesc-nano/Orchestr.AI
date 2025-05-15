@@ -27,7 +27,7 @@ from ase.data import chemical_symbols
 
 import scipy.linalg
 import scipy.linalg, scipy.spatial.distance
-from postprocessing.plotting import plot_swapped_final_tight
+from mlff_qd.postprocessing.plotting import plot_swapped_final_tight
 from typing import Tuple, List, Optional 
 from scipy.ndimage import gaussian_filter1d
 from kneed import KneeLocator

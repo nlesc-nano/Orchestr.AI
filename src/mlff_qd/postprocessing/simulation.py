@@ -23,7 +23,7 @@ from ase.vibrations import Vibrations
 
 # === Local module imports ===
 # Use the calculator from the calculator module
-from postprocessing.calculator import MyTorchCalculator, ANGSTROM_TO_BOHR
+from mlff_qd.postprocessing.calculator import MyTorchCalculator, ANGSTROM_TO_BOHR
 
 # --- Global Timing Variables ---
 last_call_time = None

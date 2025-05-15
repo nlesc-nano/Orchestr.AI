@@ -14,11 +14,10 @@ import traceback
 import torch
 from ase.io import read
 
-# === Local module imports (using absolute paths) ===
-from postprocessing.calculator import setup_neighbor_list, assign_charges
-from postprocessing.simulation import run_md, run_geo_opt, run_vibrational_analysis
-from postprocessing.config_loader import load_config
-from postprocessing.evaluate import run_eval
+from mlff_qd.postprocessing.calculator import setup_neighbor_list, assign_charges
+from mlff_qd.postprocessing.simulation import run_md, run_geo_opt, run_vibrational_analysis
+from mlff_qd.postprocessing.config_loader import load_config
+from mlff_qd.postprocessing.evaluate import run_eval
 
 # === Setup Logging and Unbuffered Output ===
 sys.path.insert(0, os.getcwd())

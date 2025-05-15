@@ -27,19 +27,18 @@ import plotly.io as pio
 from ase.io import read, write  # Needed for reading training/eval data
 
 # === Local Module Imports ===
-from postprocessing.parsing import parse_extxyz, save_stacked_xyz
-from postprocessing.calculator import setup_neighbor_list, assign_charges, evaluate_model
-from postprocessing.stats import MLFFStats
-from postprocessing.features import compute_features
-from postprocessing.uq_models import train_uq_models, predict_uncertainties, fit_gmm_and_compute_uncertainty
-#from postprocessing.uq_metrics_calculator import calculate_uq_metrics
-from postprocessing.uq_metrics_calculator import VarianceScalingCalibrator, run_uq_metrics, calculate_uq_metrics
-from postprocessing.mlff_plotting import plot_mlff_stats
-from postprocessing.plotting import (
+from mlff_qd.postprocessing.parsing import parse_extxyz, save_stacked_xyz
+from mlff_qd.postprocessing.calculator import setup_neighbor_list, assign_charges, evaluate_model
+from mlff_qd.postprocessing.stats import MLFFStats
+from mlff_qd.postprocessing.features import compute_features
+from mlff_qd.postprocessing.uq_models import train_uq_models, predict_uncertainties, fit_gmm_and_compute_uncertainty
+from mlff_qd.postprocessing.uq_metrics_calculator import VarianceScalingCalibrator, run_uq_metrics, calculate_uq_metrics
+from mlff_qd.postprocessing.mlff_plotting import plot_mlff_stats
+from mlff_qd.postprocessing.plotting import (
     generate_uq_plots, 
     generate_al_influence_plots, generate_al_traditional_plots
 )
-from postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, filter_unrealistic_indices, compute_bond_thresholds, adaptive_learning_ensemble_calibrated 
+from mlff_qd.postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, filter_unrealistic_indices, compute_bond_thresholds, adaptive_learning_ensemble_calibrated 
 
 
 def setup_evaluation(config):
