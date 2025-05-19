@@ -565,7 +565,10 @@ def run_eval(config):
         ens_L_frame_sel = ens_L_frame[:n_models]
  
         mu_E          = np.mean(ens_E_sel, axis=0)
+        sigma_mu_E    = np.std(ens_E_sel, axis=0)
+
         mu_F_flat     = np.mean(ens_F_sel, axis=0)
+
         mean_L_frame  = np.mean(ens_L_frame_sel, axis=0)   # (n_frames, d_frame)
 
         # build MLFFStats ----------------------------------------------------
@@ -661,7 +664,7 @@ def run_eval(config):
     
             # -------- NEW: latent‑GP for forces -------------------------------
             F_val_lat_F = latents_comp[comp_mask]              # (n_val_comp, d_atom)
-            y_val_F     = abs_force_res[comp_mask]             # (n_val_comp,)
+            y_val_F     = np.abs(force_res_flat[comp_mask])        # (n_val_comp,)
             print(f"Calibrating force uncertainty on single model")
             alpha_sq_F, _, _, _, L_F = calibrate_alpha_reg_gcv(F_val_lat_F, y_val_F)
             G_all_F     = scipy.linalg.solve_triangular(L_F, latents_comp.T, lower=True).T
@@ -700,7 +703,6 @@ def run_eval(config):
         # histograms if plotting
         do_plot = True 
         if do_plot:
-            import matplotlib.pyplot as plt
     
             # Energy histograms
             plt.figure()
@@ -708,14 +710,14 @@ def run_eval(config):
             plt.xlabel("Frame-wise Mean Energy")
             plt.ylabel("Count")
             plt.title("Ensemble: Mean Energy per Frame")
-            plt.savefig("ensemble_energy_mean_hist.png")
+#            plt.savefig("ensemble_energy_mean_hist.png")
     
             plt.figure()
             plt.hist(std_E_frame, bins=50)
             plt.xlabel("Frame-wise Energy Std")
             plt.ylabel("Count")
             plt.title("Ensemble: Energy Std Dev per Frame")
-            plt.savefig("ensemble_energy_std_hist.png")
+ #           plt.savefig("ensemble_energy_std_hist.png")
     
             # Force histograms
             plt.figure()
@@ -723,14 +725,14 @@ def run_eval(config):
             plt.xlabel("Comp-wise Mean Force")
             plt.ylabel("Count")
             plt.title("Ensemble: Mean Force per Component")
-            plt.savefig("ensemble_force_mean_hist.png")
+  #          plt.savefig("ensemble_force_mean_hist.png")
     
             plt.figure()
             plt.hist(std_F_comp, bins=100)
             plt.xlabel("Comp-wise Force Std")
             plt.ylabel("Count")
             plt.title("Ensemble: Force Std Dev per Component")
-            plt.savefig("ensemble_force_std_hist.png")
+   #         plt.savefig("ensemble_force_std_hist.png")
     
             plt.show()
         # ——— end ensemble summary ———
@@ -757,47 +759,19 @@ def run_eval(config):
     
         if al_val_flag and al_val_flag.lower() in ["influence", "traditional"]:
     
-            if n_models >= 2:
-                calib      = VarianceScalingCalibrator().fit(
-                                stats_ens.delta_E_frame[val_mask],
-                                sigma_E_raw[val_mask])
-                sigma_E_cal = calib.transform(sigma_E_raw)
-                sel_objs, sel_idx = adaptive_learning_ensemble_calibrated(
-                    all_frames            = all_frames,
-                    eval_mask             = val_mask,
-                    sigma_E_cal           = sigma_E_cal,
-                    delta_E_frame         = stats_ens.delta_E_frame,
-                    mean_l_al             = mean_L_frame,
-                    force_rmse_per_comp   = rmse_force_comp,
-                    denom_all             = all_true_F, 
-                    beta                  = 0,
-                    drop_init             = 1.0,
-                    min_k                 = 5,
-                    max_k                 = 500,
-                    score_floor           = None,
-                    base                  = "al_ens_val")
-                # latent α², L not used in this path
-                alpha_sq = L_chol = None
-            else:
-                # single‑model path uses latent‑based uncertainty
-                sel_objs, sel_idx = adaptive_learning_mig_calibrated(
-                    all_frames            = all_frames,
-                    eval_mask             = val_mask,
-                    delta_E_frame         = stats_ens.delta_E_frame,
-                    mean_l_al             = mean_L_frame,
-                    force_rmse_per_comp   = rmse_force_comp,
-                    target_rmse_conv      = 0.015,
-                    beta                  = 0.0,
-                    drop_init             = 1.0,
-                    min_k                 = 5,
-                    max_k                 = 500,
-                    score_floor           = None,
-                    base                  = "al_mig_val")
-                # save α² and L_chol for pool‑AL
-                F_train_lat = mean_L_frame[~val_mask]
-                F_val_lat   = mean_L_frame[val_mask]
-                y_val       = stats_ens.delta_E_frame[val_mask]
-                alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_val_lat, y_val)
+            sel_objs, sel_idx = adaptive_learning_ensemble_calibrated(
+                all_frames            = all_frames,
+                eval_mask             = val_mask,
+                delta_E_frame         = stats_ens.delta_E_frame,
+                mean_l_al             = mean_L_frame,
+                force_rmse_per_comp   = rmse_force_comp,
+                denom_all             = all_true_F, 
+                beta                  = 0,
+                drop_init             = 1.0,
+                min_k                 = 5,
+                max_k                 = 500,
+                score_floor           = None,
+                base                  = "al_ens_val")
     
             # optional “traditional” AL -------------------------------------
             if al_val_flag.lower() == "traditional":
@@ -841,8 +815,12 @@ def run_eval(config):
 
             mu_E_pool    = np.mean(ens_E_pool, axis=0)
             sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
+            mu_F_pool    = np.mean(ens_F_pool, axis=0)
+            print(f"ens_F_pool shape: {ens_F_pool.shape}")
+
+            sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
             mu_L_pool    = np.mean(ens_L_pool, axis=0)
-            mean_L_frame  = np.mean(ens_L_pool, axis=0)
+            mean_L_frame = np.mean(ens_L_pool, axis=0)
 
             # rolling average plot (unchanged) ------------------------------
             steps  = np.arange(len(mu_E_pool))
@@ -861,10 +839,11 @@ def run_eval(config):
             # thin for AL ----------------------------------------------------
             pool_stride   = eval_cfg.get("pool_stride", 50)
             thin_idx      = np.arange(len(pool_frames))[::pool_stride]
-            pool_frames_thin  = [pool_frames[i] for i in thin_idx]
-            F_pool_thin       = mu_L_pool[thin_idx].astype(float)
-            mu_E_pool_thin    = mu_E_pool[thin_idx].astype(float)
-            F_train_thin     = mean_L_frame[thin_idx].astype(float)   # needed by AL
+            pool_frames_thin   = [pool_frames[i] for i in thin_idx]
+            F_pool_thin        = mu_L_pool[thin_idx].astype(float)
+            mu_E_pool_thin     = mu_E_pool[thin_idx].astype(float)
+            sigma_E_pool_thin  = sigma_E_pool[thin_idx].astype(float)
+            F_train_thin       = mean_L_frame[thin_idx].astype(float)   # needed by AL
             
             # ---------------------------------------------------------------------
             # DROP NaN / Inf ROWS
@@ -876,11 +855,12 @@ def run_eval(config):
             if not finite_mask.all():
                 dropped = np.where(~finite_mask)[0]
                 print(f"[Pool-AL] dropping {len(dropped)} NaN/Inf rows: {dropped.tolist()}")
-                thin_idx         = thin_idx[finite_mask]
-                pool_frames_thin = [pool_frames[i] for i in thin_idx]
-                F_pool_thin      = F_pool_thin [finite_mask]
-                F_train_thin     = F_train_thin[finite_mask]
-                mu_E_pool_thin   = mu_E_pool_thin[finite_mask]
+                thin_idx          = thin_idx[finite_mask]
+                pool_frames_thin  = [pool_frames[i] for i in thin_idx]
+                F_pool_thin       = F_pool_thin [finite_mask]
+                F_train_thin      = F_train_thin[finite_mask]
+                mu_E_pool_thin    = mu_E_pool_thin[finite_mask]
+                sigma_E_pool_thin = sigma_E_pool_thin[finite_mask]
 
             # ---------------------------------------------------------------------
             # MAP bad_global TO THINNED COORDINATES
@@ -913,8 +893,6 @@ def run_eval(config):
             fig.tight_layout()
 
             fig.savefig("pool_energy_uncertainty.png", dpi=200)
-            plotly_fig = tls.mpl_to_plotly(fig)
-            pio.write_html(plotly_fig, "pool_energy_uncertainty_plotly.html", auto_open=False)
 
             # ----------------------------------------------------------------------
             # ❶  Build training design matrix and targets
@@ -949,19 +927,24 @@ def run_eval(config):
                 sigma_E_pool_cal = None  # latent path will compute its own σ
     
             # windowed pool AL ----------------------------------------------
+            print(f"sigma_comp shape: {sigma_comp.shape}")
+            print(f"mu_F_pool shape: {ens_F_pool.shape}")
+
             Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
                 pool_frames_thin,
                 F_pool_thin,
                 F_train_thin,
                 alpha_sq,
                 L_chol,
+                forces_train  = all_true_F, 
+                sigma_energy  = sigma_E_raw, 
+                sigma_force   = sigma_comp, 
                 mu_E_pool    = mu_E_pool_thin,
-                thresholds   = thresholds,
-                neighbor_list= neighbour_list,
+                sigma_E_pool = sigma_E_pool_thin,
+                mu_F_pool    = mu_F_pool,
+                sigma_F_pool = sigma_F_pool,
                 bad_global   = bad_rel,
                 rho_eV       = 0.002,
-                beta         = 0.0,
-                drop_init    = 1.0,
                 min_k        = 5,
                 window_size  = eval_cfg.get("pool_window", 100),
                 base         = "al_pool_v1")
@@ -992,8 +975,6 @@ def run_eval(config):
                 print(f"Saved {len(sel_objs)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
             else:
                 print("No pool frames selected; nothing to save.")
-
-
 
     # 9) GMM UQ
     if "GMM" in uq_methods and stats_base is not None and all_latent is not None:

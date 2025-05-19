@@ -462,7 +462,6 @@ def adaptive_learning_mig_calibrated(
 def adaptive_learning_ensemble_calibrated(
         all_frames: List,
         eval_mask: np.ndarray,
-        sigma_E_cal: np.ndarray,
         delta_E_frame: np.ndarray,
         mean_l_al: np.ndarray,
         *,
@@ -531,7 +530,7 @@ def adaptive_learning_ensemble_calibrated(
     plt.tight_layout()
     
     outpath = 'distance_distributions.png'
-    plt.savefig(outpath)
+#    plt.savefig(outpath)
     print(f"Saved distance distributions plot to {outpath}")
     
     # 3) per-frame max-RMSE_F
@@ -548,22 +547,18 @@ def adaptive_learning_ensemble_calibrated(
 
     rmse_F_train = rmse_F_pf_max[train_idx]
     rmse_Fmean_train = rmse_F_pf_mean[train_idx]
-    sigma_E_train = sigma_E_cal[train_idx]
     delta_E_train = np.abs(delta_E_frame[train_idx])
 
     rmse_F_eval  = rmse_F_pf_max[eval_idx]
     rmse_Fmean_eval = rmse_F_pf_mean[eval_idx]
-    sigma_E_eval = sigma_E_cal[eval_idx]
     delta_E_eval = np.abs(delta_E_frame[eval_idx])
 
     print(f"[3] rmse_Fmax_train: mean={rmse_F_train.mean():.3f}, std={rmse_F_train.std():.3f}, min={rmse_F_train.min():.3f}, max={rmse_F_train.max():.3f}")
     print(f"[3] rmse_Fmean_train: mean={rmse_Fmean_train.mean():.3f}, std={rmse_Fmean_train.std():.3f}, min={rmse_Fmean_train.min():.3f}, max={rmse_Fmean_train.max():.3f}")
-    print(f"[3] sigma_E_train: mean={sigma_E_train.mean():.3f}, std={sigma_E_train.std():.3f}, min={sigma_E_train.min():.3f}, max={sigma_E_train.max():.3f}")
     print(f"[3] delta_E_train: mean={delta_E_train.mean():.3f}, std={delta_E_train.std():.3f}, min={delta_E_train.min():.3f}, max={delta_E_train.max():.3f}")
 
     print(f"[3] rmse_F_eval: mean={rmse_F_eval.mean():.3f}, std={rmse_F_eval.std():.3f}, min={rmse_F_eval.min():.3f}, max={rmse_F_eval.max():.3f}")
     print(f"[3] rmse_Fmean_eval: mean={rmse_Fmean_eval.mean():.3f}, std={rmse_Fmean_eval.std():.3f}, min={rmse_Fmean_eval.min():.3f}, max={rmse_Fmean_eval.max():.3f}")
-    print(f"[3] sigma_E_eval: mean={sigma_E_eval.mean():.3f}, std={sigma_E_eval.std():.3f}, min={sigma_E_eval.min():.3f}, max={sigma_E_eval.max():.3f}")
     print(f"[3] delta_E_eval: mean={delta_E_eval.mean():.3f}, std={delta_E_eval.std():.3f}, min={delta_E_eval.min():.3f}, max={delta_E_eval.max():.3f}")
 
     # Assess tolerance from reference true values
@@ -1007,7 +1002,7 @@ def compute_bond_thresholds(
         print(f"  {elems}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
 
     # 3) Save cache
-    np.savez_compressed(cache_path, thresholds=thresholds)
+#    np.savez_compressed(cache_path, thresholds=thresholds)
     print(f"[compute_bond_thresholds] Saved thresholds to {cache_path}")
     return thresholds
 
@@ -1016,7 +1011,7 @@ def filter_unrealistic_indices(
         frames,
         neighbor_list,
         thresholds,
-        pct_tol=0.15,
+        pct_tol=0.40,
         first_shell_cutoff=3.0,
         device=None,
         cache_path="bad_globals.npz"
@@ -1086,10 +1081,23 @@ def filter_unrealistic_indices(
     bad_set = set(bad)
 
     # 3) Save cache
-    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
+#    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
     print(f"[filter_unrealistic_indices] Saved bad_global to {cache_path}")
     return bad_set
 
+def _compute_relative_thresholds(
+        sigma_energy_train: np.ndarray,
+        sigma_force_train:  np.ndarray,
+        F_train:            np.ndarray,
+        f_E: float = 1.30,          # 30 % above current worst train σ(E)
+        f_F: float = 1.30,          # 30 % above current worst σ(F)
+        f_Fmag: float = 1.20        # 20 % above current worst |F|max
+):
+    """Return absolute thresholds derived from training statistics."""
+    thr_sigma_E = f_E    * float(sigma_energy_train.max())
+    thr_sigma_F = f_F    * float(sigma_force_train.max())
+    thr_Fmag    = f_Fmag * float(np.linalg.norm(F_train, axis=1).max())
+    return thr_sigma_E, thr_sigma_F, thr_Fmag
 
 def adaptive_learning_mig_pool_windowed(
         pool_frames: list,
@@ -1097,19 +1105,18 @@ def adaptive_learning_mig_pool_windowed(
         F_train: np.ndarray,
         alpha_sq: float,
         L: np.ndarray,
+        forces_train: np.ndarray,
+        sigma_energy: np.ndarray,
+        sigma_force:  np.ndarray,
         mu_E_pool: np.ndarray,
-        thresholds: dict,
-        neighbor_list,
+        sigma_E_pool: np.ndarray,
+        mu_F_pool: np.ndarray,
+        sigma_F_pool: np.ndarray,
         bad_global: set,
-        *,
         rho_eV: float = 0.0025,
-        beta: float = 0.0,
-        drop_init: float = 1.0,
         min_k: int = 5,
         window_size: int = 100,
         base: str = "al_mig_pool_v6",
-        first_shell_cutoff: float = 3.0,
-        pct_tol: float = 0.15
     ) -> tuple[list, list]:
     """
     Pool-based AL with windowed FPS and bond sanity filter via precomputed bad_global.
@@ -1118,13 +1125,54 @@ def adaptive_learning_mig_pool_windowed(
     F_train = np.asarray(F_train, dtype=np.float64)
     L       = np.asarray(L,       dtype=np.float64)
 
-    sigma_pool = predict_sigma_from_L(F_pool, L, alpha_sq)
     G_train = solve_triangular(L, F_train.T, lower=True).T
     G_pool = solve_triangular(L, F_pool.T, lower=True).T
 
+    total_entries = mu_F_pool.shape[0]
     n_atoms = getattr(pool_frames[0], 'get_positions', lambda: pool_frames[0]).__call__().shape[0] if pool_frames else 0
-    sigma_emp = rho_eV * np.sqrt(n_atoms)
-    print(f"[Pool-AL] σ_emp = {sigma_emp:.5f} eV")
+    n_pool_frames = total_entries // n_atoms
+
+    # ──────────────
+    # SET FACTORS INSIDE FUNCTION
+    f_E    = 1.20    # 30% above max train uncertainty in energy
+    f_F    = 1.20    # 30% above max train uncertainty in force
+    f_Fmag = 1.10    # 20% above max train force magnitude
+
+    thr_sigma_E  = f_E    * float(sigma_energy.max())
+
+    n_train_frames = sigma_force.shape[0] // (n_atoms * 3) 
+    sigma_F_train_max = (sigma_force.reshape(n_train_frames, n_atoms, 3).max(axis=(1, 2)))       # → shape (n_train_frames,)
+    thr_sigma_F  = f_F    * float(sigma_F_train_max.max()) 
+
+    force_magnitudes_train = np.linalg.norm(forces_train, axis=2)
+    frame_max_force_train = force_magnitudes_train.max(axis=1)
+    thr_Fmag = f_Fmag * frame_max_force_train.max()
+    
+    print(f"[Pool-AL] σE threshold  = {thr_sigma_E:.4f} eV")
+    print(f"[Pool-AL] σF threshold  = {thr_sigma_F:.4f} eV/Å")
+    print(f"[Pool-AL] |F|max thresh = {thr_Fmag:.4f} eV/Å")
+
+    # For reporting and possible convergence
+    n_hi_E    = int((sigma_E_pool   > thr_sigma_E).sum())
+
+    sigma_F_pool_max = sigma_F_pool.reshape(n_pool_frames, n_atoms, 3).max(axis=(1, 2))
+    n_hi_F    = int((sigma_F_pool_max   > thr_sigma_F).sum())
+
+    mu_F_pool = mu_F_pool.reshape(n_pool_frames, n_atoms, 3)
+
+    pool_force_magnitudes = np.linalg.norm(mu_F_pool, axis=2)
+    frame_max_force_pool = pool_force_magnitudes.max(axis=1)
+    n_hi_Fmag = int((frame_max_force_pool > thr_Fmag).sum())
+
+    print(f"[AL] frames above σE_thr : {n_hi_E}")
+    print(f"[AL] frames above σF_thr : {n_hi_F}")
+    print(f"[AL] frames above |F|_thr: {n_hi_Fmag}")
+
+    if (n_hi_E + n_hi_F + n_hi_Fmag) < 10:
+        print("[AL] Convergence reached — nothing significant left to label.")
+        return [], []
+
+    # Rest of your code follows unchanged...
 
     good_frames = len(pool_frames) - len(bad_global)
     print(f"[AL] analyzing {good_frames}/{len(pool_frames)} good frames (excluded {len(bad_global)} bad frames)")
@@ -1134,19 +1182,22 @@ def adaptive_learning_mig_pool_windowed(
     # ------------------------------------------------------------------
     cand_global = []
     records     = []
-    n_frames    = len(pool_frames)
     
-    for w0 in range(0, n_frames, window_size):
-        w1  = min(w0 + window_size, n_frames)
+    for w0 in range(0, n_pool_frames, window_size):
+        w1  = min(w0 + window_size, n_pool_frames)
         win = list(range(w0, w1))
         print(f"\n[Pool-AL] Window {w0}-{w1}: {len(win)} total frames")
-    
-        # σ filter + bad-frame filter
-        high = [i for i in win if sigma_pool[i] > sigma_emp and i not in bad_global]
-        print(f"[Pool-AL]   {len(high)} after σ>σ_emp & sanity filter")
+
+        # NEW FILTER: Only candidates exceeding any threshold and not in bad_global
+        high = [i for i in win if (
+                    (sigma_E_pool[i]          > thr_sigma_E) or
+                    (sigma_F_pool_max[i]      > thr_sigma_F) or
+                    (frame_max_force_pool[i]  > thr_Fmag)
+                 ) and i not in bad_global]
+        print(f"[Pool-AL]   {len(high)} after σ/force thresholds & sanity filter")
         if not high:
             continue
-    
+
         sub_G = G_pool[high].astype(np.float64)
         print(f"[Pool-AL]   sub_G shape = {sub_G.shape}")
     
@@ -1183,6 +1234,40 @@ def adaptive_learning_mig_pool_windowed(
     
         # map back to global indices
         picks = [high[i] for i in kept_local]
+
+        if len(picks) > 1:
+            # Get latent reps for these picks
+            X_local = G_pool[picks].astype(np.float64)
+            # pick a seed that is in `high` but NOT in `picks`
+            outside = [i for i in high if i not in picks]
+            if outside:
+                init_global = outside[0]                       # or np.random.choice(outside)
+            else:
+                init_global = picks[0]
+            # Run D-optimal ordering *within* these picks
+            # (re-use your existing D-optimal ordering function)
+            X_train_local = G_pool[init_global].reshape(1,-1) 
+            order_local, gains_local, _ = d_optimal_full_order(
+                X_cand = X_local,
+                X_train= X_train_local,   # 1 × d dummy “training” seed 
+                reg    = 1e-6
+            )
+            print(f"[Local-AL] gains_local: min={gains_local.min():.3f}, max={gains_local.max():.3f}")
+            print(f"[Local-AL] gains_local[:10]: {gains_local[:10]}")
+
+            # 25% of first gain as floor
+            gain_floor = np.percentile(gains_local, 99)
+            print(f"[Local-AL] local gain_floor: {gain_floor:.3f}")
+        
+            # Keep only those above gain_floor (in D-opt order)
+            local_kept = [order_local[i] for i, gain in enumerate(gains_local) if gain > gain_floor]
+            print(f"[Local-AL] reduced {len(picks)} -> {len(local_kept)} by local diversity filter")
+        
+            # Map back to global indices
+            picks = [picks[i] for i in local_kept]
+        else:
+            print(f"[Local-AL] Only one pick, skipping local diversity filter.")
+
         cand_global.extend(picks)
     
         # record entries
@@ -1190,7 +1275,7 @@ def adaptive_learning_mig_pool_windowed(
             records.append((
                 idx,
                 mu_E_pool[idx],
-                sigma_pool[idx],
+                sigma_E_pool[idx],
                 gains_full[kept_local[j]],  # D-optimal log-det gain
                 gamma0[kept_local[j]],      # γ₀ value
                 f"{w0}-{w1}"
