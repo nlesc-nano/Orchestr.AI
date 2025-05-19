@@ -4,9 +4,12 @@
 
 src/mlff_qd.egg-info/*
 src/mlff_qd/__pycache__/*
+src/mlff_qd/fine_tuning/__pycache__/*
+src/mlff_qd/postprocessing/__pycache__/*
 src/mlff_qd/preprocessing/__pycache__/*
 src/mlff_qd/training/__pycache__/*
 src/mlff_qd/utils/__pycache__/*
 
 *png
 *log
+mlff_qd.egg-info/* 

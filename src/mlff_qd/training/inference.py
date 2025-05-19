@@ -12,7 +12,7 @@ import logging
 from schnetpack.data import ASEAtomsData
 
 from mlff_qd.utils.logging_utils import timer, setup_logging
-from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+from mlff_qd.utils.data_processing import ( preprocess_data, setup_logging_and_dataset,
         prepare_transformations, setup_data_module, show_dataset_info )
 from mlff_qd.utils.model import setup_model
 from mlff_qd.utils.helpers import load_config, parse_args

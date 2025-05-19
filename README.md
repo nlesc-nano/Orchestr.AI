@@ -122,11 +122,11 @@ This generates `nequip.yaml`, which is pre-configured for Nequip training.
 ### Training
 If an user wants to run locally the training code, one can do the following:
 ```bash
-python -m mlff_qd.training.main
+python -m mlff_qd.training
 ```
 By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
 ```bash
-python -m mlff_qd.training.main --config input_file.yaml
+python -m mlff_qd.training --config input_file.yaml
 ```
 
 In the running_files folder there is an example of file for running the training, and afterwards the inference, in a cluster using a slurm queue system.
@@ -142,7 +142,6 @@ python -m mlff_qd.training.inference --config input_file.yaml
 ```
 
 ## CLI Mode - Extract Training Metrics from TensorBoard Event Files
-
 This script, `analysis/extract_metrics.py`,  extracts scalar training metrics from TensorBoard event files and saves them to a CSV file.
 
 - **`-p/--path`**:  Path to the TensorBoard event file. **(Required)**.

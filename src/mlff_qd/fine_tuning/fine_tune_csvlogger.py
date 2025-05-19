@@ -2,15 +2,19 @@ import os
 import logging
 import torch
 import numpy as np
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, Callback
 from pytorch_lightning.loggers import CSVLogger  # Import CSVLogger
-from utils.data_processing import load_data, preprocess_data, setup_logging_and_dataset, prepare_transformations, setup_data_module, show_dataset_info
-from utils.model import setup_model
-from utils.trainer_utils import setup_task_and_trainer
-from utils.helpers import load_config, parse_args, get_optimizer_class, get_scheduler_class
-from utils.logging_utils import setup_logging
+
 import schnetpack as spk
+
+from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+        prepare_transformations, setup_data_module, show_dataset_info )
+from mlff_qd.utils.model import setup_model
+from mlff_qd.utils.trainer_utils import setup_task_and_trainer
+from mlff_qd.utils.helpers import load_config, parse_args, get_optimizer_class, get_scheduler_class
+from mlff_qd.utils.logging_utils import setup_logging
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -89,9 +93,7 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
 
-    # not tested properly 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    folder = os.path.abspath(os.path.join(script_dir, config['settings']['logging']['folder']))
+    folder = os.path.abspath(config['settings']['logging']['folder'])
     logging.info(f"Using output directory: {folder}")
 
     # some permision error, Verify folder exists and is writable
@@ -107,11 +109,11 @@ def main(args):
 
     data = load_data(config)
     use_last_n = config['settings']['data'].get('use_last_n', None) # to select sample of data
-    atoms_list, property_list = preprocess_data(data, use_last_n=use_last_n if use_last_n is not None else len(data["R"]))
+    atoms_list, property_list = preprocess_data(data)
     new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list)
     show_dataset_info(new_dataset)
     
-    transformations = prepare_transformations(config)
+    transformations = prepare_transformations(config,"train")
     custom_data = setup_data_module(
         config,
         os.path.join(folder, config['settings']['general']['database_name']),

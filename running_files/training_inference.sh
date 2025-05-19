@@ -43,7 +43,7 @@ cp *.npz $SCRATCH_DIR
 cd $SCRATCH_DIR
 
 # Run training
-python -m mlff_qd.training.main --config "$CONFIG_FILE"
+python -m mlff_qd.training --config "$CONFIG_FILE"
 
 # Check if training was successful and do the inference if it is possible
 if [ $? -eq 0 ]; then
