@@ -30,8 +30,11 @@ class CustomAtomwise(spk.atomistic.Atomwise):
         #print(f"Input shape: {feats.shape}")
         atomwise_out = self.outnet(feats)  # Use outnet
         n_atoms = inputs['_n_atoms']
-        atom_indices = torch.repeat_interleave(torch.arange(len(n_atoms), device=feats.device), n_atoms)
-        system_out = torch.zeros(len(n_atoms), 1, device=feats.device).scatter_add_(0, atom_indices.unsqueeze(1), atomwise_out)
+        atom_indices = torch.repeat_interleave(torch.arange(len(n_atoms), device=feats.device), n_atoms.long())
+        with torch.cuda.amp.autocast(enabled=False):
+           atomwise_out32 = atomwise_out.float()
+           system_out = torch.zeros(len(n_atoms), 1, device=feats.device, dtype=torch.float32)
+           system_out = system_out.scatter_add_(0, atom_indices.unsqueeze(1), atomwise_out32)
         inputs[self.output_key] = system_out.squeeze(1)
         return inputs
 
