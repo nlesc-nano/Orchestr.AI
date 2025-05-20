@@ -1001,7 +1001,7 @@ def compute_bond_thresholds(
         print(f"  {elems}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
 
     # 3) Save cache
-#    np.savez_compressed(cache_path, thresholds=thresholds)
+    np.savez_compressed(cache_path, thresholds=thresholds)
     print(f"[compute_bond_thresholds] Saved thresholds to {cache_path}")
     return thresholds
 
@@ -1080,7 +1080,7 @@ def filter_unrealistic_indices(
     bad_set = set(bad)
 
     # 3) Save cache
-#    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
+    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
     print(f"[filter_unrealistic_indices] Saved bad_global to {cache_path}")
     return bad_set
 
@@ -1127,55 +1127,99 @@ def adaptive_learning_mig_pool_windowed(
     G_train = solve_triangular(L, F_train.T, lower=True).T
     G_pool = solve_triangular(L, F_pool.T, lower=True).T
 
-    total_entries = mu_F_pool.shape[0]
-    n_atoms = getattr(pool_frames[0], 'get_positions', lambda: pool_frames[0]).__call__().shape[0] if pool_frames else 0
-    n_pool_frames = total_entries // n_atoms
+    n_pool_frames = len(pool_frames) 
+    n_atoms       = pool_frames[0].get_positions().shape[0]
 
-    # ──────────────
-    # SET FACTORS INSIDE FUNCTION
-    f_E    = 1.20    # 30% above max train uncertainty in energy
-    f_F    = 1.20    # 30% above max train uncertainty in force
-    f_Fmag = 1.10    # 20% above max train force magnitude
+    # ------------------------------------------------------------------
+    # 1 · fixed σ(E/atom) threshold  (5 meV atom⁻¹)
+    # ------------------------------------------------------------------
 
-    thr_sigma_E  = f_E    * float(sigma_energy.max())
+    sigma_E_per_atom_train = sigma_energy / n_atoms
+    sigma_E_per_atom_pool  = sigma_E_pool / n_atoms 
+    thr_sigma_E = 0.002 # 5 meV / atom 
+
+    # ------------------------------------------------------------------
+    # 2 · force–uncertainty thresholds (relative)
+    # ------------------------------------------------------------------
+    f_F      = 1.20    # 30% above max train uncertainty in force
+    f_Fmean  = 1.15   # 15 % above train max σF mean
+    f_Fmag   = 1.10    # 20% above max train force magnitude
 
     n_train_frames = sigma_force.shape[0] // (n_atoms * 3) 
-    sigma_F_train_max = (sigma_force.reshape(n_train_frames, n_atoms, 3).max(axis=(1, 2)))       # → shape (n_train_frames,)
-    thr_sigma_F  = f_F    * float(sigma_F_train_max.max()) 
 
+    sigma_F_train       = sigma_force.reshape(n_train_frames, n_atoms, 3)
+    sigma_F_train_max   = sigma_F_train.max(axis=(1, 2))
+    sigma_F_train_mean  = np.linalg.norm(sigma_F_train, axis=2).mean(axis=1)
+
+    thr_sigma_F     = f_F     * sigma_F_train_max .max()
+    thr_sigma_Fmean = f_Fmean * sigma_F_train_mean.max()
+
+    # ------------------------------------------------------------------
+    # 3 · max-|F| threshold
+    # ------------------------------------------------------------------
     force_magnitudes_train = np.linalg.norm(forces_train, axis=2)
     frame_max_force_train = force_magnitudes_train.max(axis=1)
     thr_Fmag = f_Fmag * frame_max_force_train.max()
     
-    print(f"[Pool-AL] σE threshold  = {thr_sigma_E:.4f} eV")
-    print(f"[Pool-AL] σF threshold  = {thr_sigma_F:.4f} eV/Å")
-    print(f"[Pool-AL] |F|max thresh = {thr_Fmag:.4f} eV/Å")
-
-    # For reporting and possible convergence
-    n_hi_E    = int((sigma_E_pool   > thr_sigma_E).sum())
-
-    sigma_F_pool_max = sigma_F_pool.reshape(n_pool_frames, n_atoms, 3).max(axis=(1, 2))
-    n_hi_F    = int((sigma_F_pool_max   > thr_sigma_F).sum())
-
+    # ------------------------------------------------------------------
+    # 4 · pool-side per-frame scalars
+    # ------------------------------------------------------------------
     mu_F_pool = mu_F_pool.reshape(n_pool_frames, n_atoms, 3)
+    sigma_F_pool   = sigma_F_pool.reshape(n_pool_frames, n_atoms, 3)
 
-    pool_force_magnitudes = np.linalg.norm(mu_F_pool, axis=2)
-    frame_max_force_pool = pool_force_magnitudes.max(axis=1)
-    n_hi_Fmag = int((frame_max_force_pool > thr_Fmag).sum())
+    sigma_F_pool_max  = sigma_F_pool.max(axis=(1, 2))
+    sigma_F_pool_mean = np.linalg.norm(sigma_F_pool, axis=2).mean(axis=1)
+    frame_max_force_pool = np.linalg.norm(mu_F_pool, axis=2).max(axis=1)
 
-    print(f"[AL] frames above σE_thr : {n_hi_E}")
-    print(f"[AL] frames above σF_thr : {n_hi_F}")
-    print(f"[AL] frames above |F|_thr: {n_hi_Fmag}")
+    # ------------------------------------------------------------------
+    # 5 · counts
+    # ------------------------------------------------------------------
+    n_hi_E     = int((sigma_E_per_atom_pool  > thr_sigma_E   ).sum())
+    n_hi_Fmax  = int((sigma_F_pool_max       > thr_sigma_F   ).sum())
+    n_hi_Fmean = int((sigma_F_pool_mean      > thr_sigma_Fmean).sum())
+    n_hi_Fmag  = int((frame_max_force_pool   > thr_Fmag      ).sum())
 
-    if (n_hi_E + n_hi_F + n_hi_Fmag) < 10:
-        print("[AL] Convergence reached — nothing significant left to label.")
-        return [], []
+    print(f"[Pool-AL] σE/atom  threshold = {thr_sigma_E:.4f} eV")
+    print(f"[Pool-AL] σF_max   threshold = {thr_sigma_F:.4f} eV/Å")
+    print(f"[Pool-AL] σF_mean  threshold = {thr_sigma_Fmean:.4f} eV/Å")
+    print(f"[Pool-AL] |F|_max  threshold = {thr_Fmag:.4f} eV/Å")
+    print(f"[AL] frames above σE_thr      : {n_hi_E}")
+    print(f"[AL] frames above σF_max_thr  : {n_hi_Fmax}")
+    print(f"[AL] frames above σF_mean_thr : {n_hi_Fmean}")
+    print(f"[AL] frames above |F|_thr     : {n_hi_Fmag}")
 
     # Rest of your code follows unchanged...
-
     good_frames = len(pool_frames) - len(bad_global)
     print(f"[AL] analyzing {good_frames}/{len(pool_frames)} good frames (excluded {len(bad_global)} bad frames)")
 
+    # ------------------------------------------------------------------
+    # 6 · per-frame diagnostics file
+    # ------------------------------------------------------------------
+    diag_file = f"{base}_per_frame_diagnostics.txt"
+    with open(diag_file, "w") as fh:
+        fh.write("# idx\tσE_per_atom\tσF_max\tσF_mean\t|F|_max\n")
+        for i in range(n_pool_frames):
+            fh.write(f"{i}\t"
+                     f"{sigma_E_per_atom_pool[i]:.6f}\t"
+                     f"{sigma_F_pool_max[i]:.6f}\t"
+                     f"{sigma_F_pool_mean[i]:.6f}\t"
+                     f"{frame_max_force_pool[i]:.6f}\n")
+    print(f"[AL] Wrote per-frame diagnostics to {diag_file}")
+
+    # Save diagnostics as npz for plotting
+    diag_npz = f"{base}_per_frame_diagnostics.npz"
+    np.savez(
+        diag_npz,
+        sigma_E_per_atom=sigma_E_per_atom_pool,
+        sigma_F_max=sigma_F_pool_max,
+        sigma_F_mean=sigma_F_pool_mean,
+        F_max=frame_max_force_pool,
+    )
+    print(f"[AL] Wrote per-frame diagnostics to {diag_npz}")
+
+    if (n_hi_E + n_hi_Fmax + n_hi_Fmean + n_hi_Fmag) < 10:
+        print("[AL] Convergence reached — nothing significant left to label.")
+        return [], []
     # ------------------------------------------------------------------
     # Windowed D-optimal selection (γ₀ > 1 cutoff, no D_norm)
     # ------------------------------------------------------------------
@@ -1189,9 +1233,9 @@ def adaptive_learning_mig_pool_windowed(
 
         # NEW FILTER: Only candidates exceeding any threshold and not in bad_global
         high = [i for i in win if (
-                    (sigma_E_pool[i]          > thr_sigma_E) or
-                    (sigma_F_pool_max[i]      > thr_sigma_F) or
-                    (frame_max_force_pool[i]  > thr_Fmag)
+                    (sigma_E_per_atom_pool[i]   > thr_sigma_E) or
+                    (sigma_F_pool_max[i]        > thr_sigma_F) or
+                    (frame_max_force_pool[i]    > thr_Fmag)
                  ) and i not in bad_global]
         print(f"[Pool-AL]   {len(high)} after σ/force thresholds & sanity filter")
         if not high:
@@ -1255,7 +1299,7 @@ def adaptive_learning_mig_pool_windowed(
             print(f"[Local-AL] gains_local[:10]: {gains_local[:10]}")
 
             # 25% of first gain as floor
-            gain_floor = np.percentile(gains_local, 99)
+            gain_floor = np.percentile(gains_local, 90)
             print(f"[Local-AL] local gain_floor: {gain_floor:.3f}")
         
             # Keep only those above gain_floor (in D-opt order)
