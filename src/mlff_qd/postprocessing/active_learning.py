@@ -876,7 +876,6 @@ def adaptive_learning_ensemble_calibrated_old(
 import numpy as np
 import torch
 from scipy.linalg import solve_triangular
-from postprocessing.plotting import plot_swapped_final_tight  # or wherever you keep it
 
 def predict_sigma_from_L(
         F_new: np.ndarray,
@@ -1011,7 +1010,7 @@ def filter_unrealistic_indices(
         frames,
         neighbor_list,
         thresholds,
-        pct_tol=0.40,
+        pct_tol=0.25,
         first_shell_cutoff=3.0,
         device=None,
         cache_path="bad_globals.npz"
