@@ -265,7 +265,7 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
     _reset_timers()
     print("Setting up calculator …")
     atoms.calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    MaxwellBoltzmannDistribution(atoms, temperature_K=cycle[0])
+    MaxwellBoltzmannDistribution(atoms, temperature_K=cycle[0] / 8)
 
     print(f"MD: {nsteps} steps, dt={dt_fs} fs, start T={cycle[0]} K")
     global stored_friction, stored_temperature_K

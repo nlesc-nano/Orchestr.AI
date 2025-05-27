@@ -1010,8 +1010,8 @@ def filter_unrealistic_indices(
         frames,
         neighbor_list,
         thresholds,
-        pct_tol=0.25,
-        first_shell_cutoff=3.0,
+        pct_tol=0.45,
+        first_shell_cutoff=4.4,
         device=None,
         cache_path="bad_globals.npz"
     ):
@@ -1299,7 +1299,7 @@ def adaptive_learning_mig_pool_windowed(
             print(f"[Local-AL] gains_local[:10]: {gains_local[:10]}")
 
             # 25% of first gain as floor
-            gain_floor = np.percentile(gains_local, 90)
+            gain_floor = np.percentile(gains_local, 80)
             print(f"[Local-AL] local gain_floor: {gain_floor:.3f}")
         
             # Keep only those above gain_floor (in D-opt order)
