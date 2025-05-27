@@ -56,6 +56,13 @@ pip install periodictable
 ## Installation for the training
 Some packages are requiered for running the training. Below we explain what is requiered and how to install it.
 
+### Install pandas
+pandas is requiered for performing the training. It is easy to install it using pip:
+
+```bash
+pip install pandas
+```
+
 ### Install SchNetPack with pip
 The simplest way to install SchNetPack is through pip which will automatically get the source code from PyPI:
 
