@@ -927,8 +927,8 @@ def run_eval(config):
                 sigma_E_pool_cal = None  # latent path will compute its own σ
     
             # windowed pool AL ----------------------------------------------
-            print(f"sigma_comp shape: {sigma_comp.shape}")
-            print(f"mu_F_pool shape: {ens_F_pool.shape}")
+            E_atom_max = (mu_E_frame[train_idx] / n_atoms).max()
+            thr_E_hi   = E_atom_max + 0.5              # eV per atom
 
             Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
                 pool_frames_thin,
@@ -936,14 +936,15 @@ def run_eval(config):
                 F_train_thin,
                 alpha_sq,
                 L_chol,
-                forces_train  = all_true_F, 
-                sigma_energy  = sigma_E_raw, 
-                sigma_force   = sigma_comp, 
+                forces_train = all_true_F, 
+                sigma_energy = sigma_E_raw, 
+                sigma_force  = sigma_comp, 
                 mu_E_pool    = mu_E_pool_thin,
                 sigma_E_pool = sigma_E_pool_thin,
                 mu_F_pool    = mu_F_pool,
                 sigma_F_pool = sigma_F_pool,
                 bad_global   = bad_rel,
+                thr_E_hi     = thr_E_hi, 
                 rho_eV       = 0.002,
                 min_k        = 5,
                 window_size  = eval_cfg.get("pool_window", 100),
