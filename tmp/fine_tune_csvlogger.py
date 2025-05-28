@@ -70,7 +70,7 @@ class SaveBestModelPt(Callback): # not able to save the model as we are doing in
             torch.save(pl_module.model.state_dict(), save_path)
             logging.info(f"Saved best model (.pt) with val_loss={current_val_loss:.4f} to {save_path}")
 
-def check_architecture_compatibility(state_dict, model): 
+def check_architecture_compatibility(state_dict, model):
     pretrained_keys = set(state_dict.keys())
     model_keys = set(dict(model.named_parameters()).keys())
     missing_in_model = pretrained_keys - model_keys
@@ -89,9 +89,7 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
 
-    # not tested properly 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    folder = os.path.abspath(os.path.join(script_dir, config['settings']['logging']['folder']))
+    folder = os.path.abspath(config['settings']['logging']['folder'])
     logging.info(f"Using output directory: {folder}")
 
     # some permision error, Verify folder exists and is writable
@@ -107,44 +105,44 @@ def main(args):
 
     data = load_data(config)
     use_last_n = config['settings']['data'].get('use_last_n', None) # to select sample of data
-    atoms_list, property_list = preprocess_data(data, use_last_n=use_last_n if use_last_n is not None else len(data["R"]))
+    atoms_list, property_list = preprocess_data(data)
     new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list)
     show_dataset_info(new_dataset)
-    
-    transformations = prepare_transformations(config)
+
+    transformations = prepare_transformations(config,"train")
     custom_data = setup_data_module(
         config,
         os.path.join(folder, config['settings']['general']['database_name']),
         transformations,
         property_units
     )
-    
+
     nnpot, outputs = setup_model(config)
-    
+
     # just to make sure fodler has checkpoints
     fine_tune_checkpoint = config['settings']['fine_tuning'].get('pretrained_checkpoint')
     if not fine_tune_checkpoint or not os.path.exists(fine_tune_checkpoint):
         raise FileNotFoundError(f"Pre-trained checkpoint not found at {fine_tune_checkpoint}")
-    
+
     logging.info(f"Loading pre-trained model from {fine_tune_checkpoint}")
     checkpoint = torch.load(fine_tune_checkpoint, map_location=device)
     state_dict = checkpoint['state_dict']
-    
-    # facing error but resolve by deepseek but we need to study this, 
+
+    # facing error but resolve by deepseek but we need to study this,
     for key in state_dict:
         if 'postprocessors.1.mean' in key:
             if state_dict[key].shape == torch.Size([]):
                 state_dict[key] = state_dict[key].reshape(1)
                 logging.info(f"Reshaped {key} from scalar to torch.Size([1])")
 
-    
+
     optimizer_name = config['settings']['training']['optimizer']['type']
     scheduler_name = config['settings']['training']['scheduler']['type']
     optimizer_cls = get_optimizer_class(optimizer_name)
     scheduler_cls = get_scheduler_class(scheduler_name)
     fine_tune_lr = config['settings']['fine_tuning'].get('lr', 1e-4) # if user want to change the learning rate
-    
-    # preapre the same architecture  
+
+    # preapre the same architecture
     task = spk.task.AtomisticTask(
         model=nnpot,
         outputs=outputs,
@@ -159,32 +157,32 @@ def main(args):
         },
         scheduler_monitor=config['settings']['logging']['monitor']
     )
-    
+
     if not check_architecture_compatibility(state_dict, task.model):
         logging.warning("Architecture mismatch detected. Fine-tuning may be suboptimal.")
-    
+
     task.load_state_dict(state_dict, strict=False)
     task.to(device)
     print_layer_info(task.model)
-    
+
     freeze_embedding = config['settings']['fine_tuning'].get('freeze_embedding', True)
     freeze_interactions_up_to = config['settings']['fine_tuning'].get('freeze_interactions_up_to', 0)
     freeze_all_representation = config['settings']['fine_tuning'].get('freeze_all_representation', False)
     freeze_layers(task.model, freeze_embedding, freeze_interactions_up_to, freeze_all_representation)
     log_trainable_layers(task.model) # if True mean that we are training that layers
-    
+
     # Use YAML-configured subdirectories merged with logging.folder
     folder = config['settings']['logging']['folder']
     best_model_subdir = config['settings']['fine_tuning'].get('best_model_dir', "fine_tuned_best_model")
     checkpoint_subdir = config['settings']['fine_tuning'].get('checkpoint_dir', "fine_tuned_checkpoints")
     log_name = config['settings']['fine_tuning'].get('log_name', "fine_tune_logs")
-    
+
     best_model_dir = os.path.join(folder, best_model_subdir)
     checkpoint_dir = os.path.join(folder, checkpoint_subdir)
-    
+
     os.makedirs(best_model_dir, exist_ok=True)
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
+
     callbacks = [
         ModelCheckpoint(
             dirpath=checkpoint_dir,
@@ -195,7 +193,7 @@ def main(args):
         SaveBestModelPt(save_dir=best_model_dir),
         LearningRateMonitor(logging_interval='epoch')
     ]
-    
+
     # we should add in tranining also
     early_stopping_patience = config['settings']['fine_tuning'].get('early_stopping_patience', 0)
     if early_stopping_patience > 0:
@@ -208,7 +206,7 @@ def main(args):
             )
         )
         logging.info(f"Enabled EarlyStopping with patience={early_stopping_patience}")
-    
+
     # Add CSVLogger like in trainer_utils.py
     csv_logger = CSVLogger(save_dir=folder, name="csv_logs", version="")
     tensorboard_logger = pl.loggers.TensorBoardLogger(save_dir=folder, name=log_name)
@@ -223,7 +221,7 @@ def main(args):
         precision=config['settings']['training']['precision'],
         devices=config['settings']['training']['devices']
     )
-    
+
     logging.info("Starting fine-tuning")
     trainer.fit(task, datamodule=custom_data)
 
