@@ -148,6 +148,15 @@ By default, it will look for a input file called input.yaml. Thus, if an user wa
 python -m mlff_qd.training.inference --config input_file.yaml
 ```
 
+After inference, if an user wants to use fine-tuning, that option is also available in the following way:
+```bash
+python -m mlff_qd.training.fine_tuning
+```
+If an input file different from the default one was used, the procedure is the following:
+```bash
+python -m mlff_qd.training.fine_tuning --config input_file.yaml
+```
+
 ### Postprocessing
 More details will be added in future versions, but the postprocessing code is run as:
 ```bash
