@@ -10,7 +10,7 @@
 
 # 1) Load your env
 conda deactivate 
-conda activate schnetpack-env
+conda activate env-name # make sure that the environment name is the one that was created
 
 # 2) Remember original dir
 CDIR=$(pwd)

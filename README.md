@@ -2,7 +2,7 @@
 Machine Learning Force Fields for Quantum Dots platform.
 
 ## Installation
-Some packages are required to be installed before starting using our MLFF_QD platform.
+Some packages are required to be installed before starting using our MLFF_QD platform. For the usage of the platform, we recommend to create a conda environment using Python 3.10. We recommend to install all the requiered packages, including the platform itself, in the same environment
 
 ## Installation for the preprocessing tools
 Some packages are requiered for running the preprocessing. Below we explain what is requiered and how to install it:
