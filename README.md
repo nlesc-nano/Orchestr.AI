@@ -56,6 +56,13 @@ pip install periodictable
 ## Installation for the training
 Some packages are requiered for running the training. Below we explain what is requiered and how to install it.
 
+### Install pandas
+pandas is requiered for performing the training. It is easy to install it using pip:
+
+```bash
+pip install pandas
+```
+
 ### Install SchNetPack with pip
 The simplest way to install SchNetPack is through pip which will automatically get the source code from PyPI:
 
@@ -139,6 +146,15 @@ python -m mlff_qd.training.inference
 By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
 ```bash
 python -m mlff_qd.training.inference --config input_file.yaml
+```
+
+After inference, if an user wants to use fine-tuning, that option is also available in the following way:
+```bash
+python -m mlff_qd.training.fine_tuning
+```
+If an input file different from the default one was used, the procedure is the following:
+```bash
+python -m mlff_qd.training.fine_tuning --config input_file.yaml
 ```
 
 ### Postprocessing
