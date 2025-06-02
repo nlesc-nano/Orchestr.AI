@@ -1,5 +1,5 @@
 from scm.plams import Molecule
-from CAT.recipes import replace_surface
+from nanoCAT.recipes import replace_surface
 import random
 from periodictable import elements
 
