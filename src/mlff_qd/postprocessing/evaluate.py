@@ -701,7 +701,7 @@ def run_eval(config):
               f"max={max_F_comp.max():.4f}")
     
         # histograms if plotting
-        do_plot = True 
+#        do_plot = False  
         if do_plot:
     
             # Energy histograms
@@ -738,7 +738,7 @@ def run_eval(config):
         # ——— end ensemble summary ———
 
 
-        do_plot = False 
+#        do_plot = False  
         if do_plot:
             features_all, min_dists_all, _, pca, scaler = compute_features(
                 all_frames, config, train_xyz_path, train_mask, val_mask)
@@ -748,12 +748,12 @@ def run_eval(config):
         metrics_train = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom,
                                              sigma_E_raw, "Train", "ensemble", eval_log)
         if do_plot:
-            generate_uq_plots(metrics_train["npz_path"], "Train", "error_model")
+            generate_uq_plots(metrics_train["npz_path"], "Train", "error_model", calibration="var")
 
         metrics_eval  = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom,
                                              sigma_E_raw, "Eval", "ensemble", eval_log)
         if do_plot:
-            generate_uq_plots(metrics_eval["npz_path"], "Eval", "error_model")
+            generate_uq_plots(metrics_eval["npz_path"], "Eval", "error_model", calibration="var")
     
         # averaged latents across ensemble ----------------------------------
     
@@ -820,7 +820,7 @@ def run_eval(config):
 
             sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
             mu_L_pool    = np.mean(ens_L_pool, axis=0)
-            mean_L_frame = np.mean(ens_L_pool, axis=0)
+            mean_L_pool = np.mean(ens_L_pool, axis=0)
 
             # rolling average plot (unchanged) ------------------------------
             steps  = np.arange(len(mu_E_pool))
@@ -833,11 +833,11 @@ def run_eval(config):
             train_idx     = np.where(train_mask)[0]
             train_frames  = [all_frames[i] for i in train_idx]
             thresholds    = compute_bond_thresholds(train_frames, neighbour_list,
-                                                    first_shell_cutoff=3.4)
+                                                    first_shell_cutoff=4.4)
             bad_global    = filter_unrealistic_indices(pool_frames, neighbour_list, thresholds)
     
             # thin for AL ----------------------------------------------------
-            pool_stride   = eval_cfg.get("pool_stride", 50)
+            pool_stride   = eval_cfg.get("pool_stride", 1)
             thin_idx      = np.arange(len(pool_frames))[::pool_stride]
             pool_frames_thin   = [pool_frames[i] for i in thin_idx]
             F_pool_thin        = mu_L_pool[thin_idx].astype(float)
@@ -927,8 +927,8 @@ def run_eval(config):
                 sigma_E_pool_cal = None  # latent path will compute its own σ
     
             # windowed pool AL ----------------------------------------------
-            print(f"sigma_comp shape: {sigma_comp.shape}")
-            print(f"mu_F_pool shape: {ens_F_pool.shape}")
+            E_atom_max = (mu_E_frame[train_idx] / n_atoms).max()
+            thr_E_hi   = E_atom_max + 0.5              # eV per atom
 
             Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
                 pool_frames_thin,
@@ -936,14 +936,15 @@ def run_eval(config):
                 F_train_thin,
                 alpha_sq,
                 L_chol,
-                forces_train  = all_true_F, 
-                sigma_energy  = sigma_E_raw, 
-                sigma_force   = sigma_comp, 
+                forces_train = all_true_F, 
+                sigma_energy = sigma_E_raw, 
+                sigma_force  = sigma_comp, 
                 mu_E_pool    = mu_E_pool_thin,
                 sigma_E_pool = sigma_E_pool_thin,
                 mu_F_pool    = mu_F_pool,
                 sigma_F_pool = sigma_F_pool,
                 bad_global   = bad_rel,
+                thr_E_hi     = thr_E_hi, 
                 rho_eV       = 0.002,
                 min_k        = 5,
                 window_size  = eval_cfg.get("pool_window", 100),

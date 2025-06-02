@@ -13,6 +13,7 @@ import torch
 import matplotlib.pyplot as plt
 import traceback # Make sure traceback is imported
 
+from pathlib import Path
 from ase import units
 from ase.io import write
 from ase.io.extxyz import write_extxyz
@@ -166,20 +167,60 @@ def run_geo_opt(atoms, model_obj, device, neighbor_list, config):
 
     print("Geometry Optimization Finished.")
 
+
+def _log_status_line(log_file, header, fmt, values):
+    """Append one nicely formatted line to *log_file* (create if absent)."""
+    line = fmt.format(*values)
+    if log_file:
+        fresh = not Path(log_file).exists()
+        with open(log_file, "a") as fh:
+            if fresh:
+                fh.write(header + "\n")
+            fh.write(line + "\n")
+    else:                       # fall back to console
+        print(header)
+        print(line)
+
+
+def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
+    """Append one extended-XYZ frame (with forces) to *traj_file*."""
+    if not traj_file:
+        return
+    forces = atoms.get_forces()
+    positions = atoms.get_positions()
+    symbols = atoms.get_chemical_symbols()
+
+    with open(traj_file, "a") as fh:
+        fh.write(f"{len(atoms)}\n")
+        fh.write(
+            f"Step = {step}, MD time = {md_time:.2f} fs, "
+            f"T_set = {T_set:.1f} K, Friction = {friction:.6f} fs⁻¹, "
+            f"Epot (eV) = {e_pot:.8f}\n"
+        )
+        for i, sym in enumerate(symbols):
+            x, y, z = positions[i]
+            fx, fy, fz = forces[i]
+            fh.write(
+                f"{sym:<2s} "
+                f"{x:15.8f} {y:15.8f} {z:15.8f} "
+                f"{fx:15.8f} {fy:15.8f} {fz:15.8f}\n"
+            )
+
 def print_md_status(
     dyn,
     atoms,
     log_file,
     dt_fs,
-    xyz_print_interval,
-    trajectory_file_with_forces,
     friction,
-    temperature_K
 ):
+    """
+    Log one line with energies, timing, etc.  **Do not** write XYZ here –
+    that now lives in a separate callback.
+    """
     global last_call_time, cumulative_time
 
     now = time.time()
-    step_time = now - last_call_time if last_call_time is not None else 0.0
+    step_time = now - last_call_time if last_call_time else 0.0
     last_call_time = now
     cumulative_time += step_time
 
@@ -187,147 +228,111 @@ def print_md_status(
     md_time = step * dt_fs
     e_pot = atoms.get_potential_energy()
     e_kin = atoms.get_kinetic_energy()
-    forces = atoms.get_forces()
-    temp_inst = (
-        e_kin / (1.5 * units.kB * len(atoms))
-        if len(atoms) > 0 else 0.0
-    )
+    temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
+    T_set = getattr(dyn, "temperature_K", np.nan)
 
-    # Use stored temperature_K or dyn.temperature_K if available
-    T_set = getattr(dyn, 'temperature_K', temperature_K)
-
-    if friction == 0.0 and isinstance(dyn, Langevin):
-        print(f"Warning: Friction coefficient is 0.0 at step {step}. Expected non-zero for Langevin.")
-
-    calc_results = {}
-    if hasattr(atoms, "calc") and atoms.calc and hasattr(atoms.calc, "results"):
-        calc_results = atoms.calc.results
-
-    E_ml_only = calc_results.get("E_ml_avg", np.nan)
-    E_coul = calc_results.get("coul_fn_energy", np.nan)
-    ml_time = calc_results.get("ml_time", 0.0)
+    # optional extras from calculator -------------------------------------------------
+    calc_results = getattr(atoms.calc, "results", {})
+    E_ml_only   = calc_results.get("E_ml_avg",      np.nan)
+    E_coul      = calc_results.get("coul_fn_energy", np.nan)
+    ml_time     = calc_results.get("ml_time",       0.0)
     coul_fn_time = calc_results.get("coul_fn_time", 0.0)
 
     header = (
-        f"{'Step':>5s} | {'MD_Time(fs)':>12s} | {'T_inst(K)':>9s} | {'T_set(K)':>9s} | "
-        f"{'Friction(fs⁻¹)':>13s} | {'Epot(eV)':>10s} | {'Ekin(eV)':>10s} | "
-        f"{'E_ML(eV)':>10s} | {'E_Coul(eV)':>11s} | {'ML_time(s)':>10s} | "
-        f"{'Coul_time(s)':>12s} | {'StepTime(s)':>12s} | {'CumTime(s)':>12s}"
+        f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+        f"{'Friction':>10} | {'Epot(eV)':>11} | {'Ekin(eV)':>11} | "
+        f"{'E_ML(eV)':>10} | {'E_Coul(eV)':>11} | {'ML_t(s)':>8} | "
+        f"{'Coul_t(s)':>9} | {'dt(s)':>8} | {'cum(s)':>9}"
     )
-    values_fmt = (
-        "{:5d} | {:12.2f} | {:9.2f} | {:9.2f} | {:13.6f} | "
-        "{:10.6f} | {:10.6f} | {:10.6f} | {:11.6f} | "
-        "{:10.4f} | {:12.4f} | {:12.4f} | {:12.4f}"
+    fmt = (
+        "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | {:10.6f} | "
+        "{:11.6f} | {:11.6f} | {:10.6f} | {:11.6f} | "
+        "{:8.4f} | {:9.4f} | {:8.4f} | {:9.4f}"
     )
-    values = (
-        step, md_time, temp_inst, T_set, friction,
-        e_pot, e_kin, E_ml_only, E_coul,
-        ml_time, coul_fn_time, step_time, cumulative_time
-    )
-    _log_status_line(log_file, header, values_fmt, values)
 
-    if step % xyz_print_interval == 0 and trajectory_file_with_forces:
-        try:
-            with open(trajectory_file_with_forces, "a") as f:
-                f.write(f"{len(atoms)}\n")
-                f.write(
-                    f"Step = {step}, MD time = {md_time:.2f} fs, "
-                    f"T_set = {T_set:.1f} K, Friction = {friction:.6f} fs⁻¹, "
-                    f"Epot (eV) = {e_pot:.8f}\n"
-                )
-                symbols = atoms.get_chemical_symbols()
-                positions = atoms.get_positions()
-                for i, sym in enumerate(symbols):
-                    x, y, z = positions[i]
-                    fx, fy, fz = forces[i]
-                    f.write(
-                        f"{sym:<2s} "
-                        f"{x:15.8f} {y:15.8f} {z:15.8f} "
-                        f"{fx:15.8f} {fy:15.8f} {fz:15.8f}\n"
-                    )
-        except IOError as e:
-            print(f"Warning: Failed to write trajectory frame {step}: {e}")
+    _log_status_line(
+        log_file,
+        header,
+        fmt,
+        (
+            step, md_time, temp_inst, T_set, friction,
+            e_pot, atoms.get_kinetic_energy(),
+            E_ml_only, E_coul,
+            ml_time, coul_fn_time,
+            step_time, cumulative_time,
+        ),
+    )
+
+
+
 
 def run_md(atoms, model_obj, device, neighbor_list, config):
-    md = config["md"]
-    dt_fs = md.get("timestep_fs", 2.0)
-    nsteps = md.get("steps", 5000)
-    print_int = md.get("xyz_print_interval", 50)
-    base_T = md.get("temperature_K", 300.0)
-    use_ramp = md.get("use_ramp", False)
-    temps = md.get("ramp_temps", [base_T])
-    ramp_steps = md.get("ramp_steps", 0)
-    plat_steps = md.get("plateau_steps", 0)
-    cycle = temps + temps[-2:0:-1] if use_ramp and len(temps) > 1 else [base_T]
-    traj_file = md.get("trajectory_file_md", None)
-    log_file = md.get("log_file", None)
+    """Top-level MD driver with tidy, non-overlapping callbacks."""
 
-    _reset_timers()
-    print("Setting up calculator …")
+    md            = config["md"]
+    dt_fs         = md.get("timestep_fs",      2.0)
+    nsteps        = md.get("steps",            5000)
+    log_int       = md.get("log_interval",     5)
+    xyz_int       = md.get("xyz_print_interval", 50)
+    T0            = md.get("temperature_K",    300.0)
+    use_langevin  = md.get("use_langevin",     True)
+    traj_file     = md.get("trajectory_file_md")
+    log_file      = md.get("log_file")
+
+    # -----------------------------------------------------------------
+    #  calculator + starting velocities
+    # -----------------------------------------------------------------
     atoms.calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    MaxwellBoltzmannDistribution(atoms, temperature_K=cycle[0])
+    MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
 
-    print(f"MD: {nsteps} steps, dt={dt_fs} fs, start T={cycle[0]} K")
-    global stored_friction, stored_temperature_K
-    if md.get("use_langevin", True):
-        gamma_fs = md.get("friction_coefficient", 0.01)
+    # -----------------------------------------------------------------
+    #  choose integrator
+    # -----------------------------------------------------------------
+    if use_langevin:
+        gamma_fs      = md.get("friction_coefficient", 0.01)
         dyn = Langevin(
             atoms,
-            timestep=dt_fs * units.fs,
-            temperature_K=cycle[0],
-            friction=gamma_fs
+            timestep   = dt_fs * units.fs,
+            temperature_K = T0,
+            friction   = gamma_fs,
         )
-        stored_friction = gamma_fs
-        stored_temperature_K = cycle[0]
-        print(f"Langevin friction set to: {stored_friction:.6f} fs⁻¹")
-        print(f"Langevin temperature set to: {stored_temperature_K:.2f} K")
-        attributes = dir(dyn)
-        friction_attrs = [attr for attr in attributes if 'friction' in attr.lower()]
-        print(f"Langevin attributes with 'friction': {friction_attrs}")
-        for attr in friction_attrs:
-            try:
-                value = getattr(dyn, attr)
-                print(f"Value of {attr}: {value}")
-            except AttributeError:
-                print(f"Could not access {attr}")
     else:
         from ase.md.verlet import VelocityVerlet
-        dyn = VelocityVerlet(atoms, timestep=dt_fs * units.fs)
-        stored_friction = 0.0
-        stored_temperature_K = 0.0
-        print("Using VelocityVerlet, friction set to: 0.000000 fs⁻¹")
+        dyn = VelocityVerlet(atoms, timestep = dt_fs * units.fs)
+        gamma_fs = 0.0                                 # for logging
 
-    if len(cycle) > 1 and use_ramp:
-        seg_len = ramp_steps + plat_steps
-        n_seg = len(cycle) - 1
+    # -----------------------------------------------------------------
+    #  callbacks
+    # -----------------------------------------------------------------
+    dyn.attach(
+        lambda: print_md_status(
+            dyn, atoms, log_file, dt_fs, gamma_fs
+        ),
+        interval=log_int,
+    )
 
-        def _ramp_cb():
-            i = dyn.get_number_of_steps()
-            seg = (i // seg_len) % n_seg
-            pos = i % seg_len
-            T0, T1 = cycle[seg], cycle[seg + 1]
-            if pos < ramp_steps and ramp_steps > 0:
-                frac = pos / ramp_steps
-                Tn = T0 + frac * (T1 - T0)
-            else:
-                Tn = T1
-            dyn.temperature_K = Tn
-            print(f"Step {i}: Setting temperature to {Tn:.2f} K")
-            global stored_temperature_K
-            stored_temperature_K = Tn
+    if traj_file and xyz_int > 0:
+        dyn.attach(
+            lambda: _write_xyz_frame(
+                atoms,
+                dyn.get_number_of_steps(),
+                dyn.get_number_of_steps() * dt_fs,
+                getattr(dyn, "temperature_K", np.nan),
+                gamma_fs,
+                atoms.get_potential_energy(),
+                traj_file,
+            ),
+            interval=xyz_int,
+        )
 
-        dyn.attach(_ramp_cb, interval=1)
-
-    dyn.attach(lambda: print_md_status(
-        dyn, atoms, log_file, dt_fs, print_int, traj_file, stored_friction, stored_temperature_K),
-        interval=5)
-
-    try:
-        dyn.run(nsteps)
-    except Exception as e:
-        print("MD error:", e)
-        raise
+    # -----------------------------------------------------------------
+    #  run!
+    # -----------------------------------------------------------------
+    print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {('Langevin γ = %.5f' % gamma_fs) if use_langevin else 'VelocityVerlet'}")
+    dyn.run(nsteps)
     print("MD finished.")
+
+
 
 def run_vibrational_analysis(atoms, model_obj, device, neighbor_list, config):
     """

@@ -876,7 +876,6 @@ def adaptive_learning_ensemble_calibrated_old(
 import numpy as np
 import torch
 from scipy.linalg import solve_triangular
-from postprocessing.plotting import plot_swapped_final_tight  # or wherever you keep it
 
 def predict_sigma_from_L(
         F_new: np.ndarray,
@@ -1002,7 +1001,7 @@ def compute_bond_thresholds(
         print(f"  {elems}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
 
     # 3) Save cache
-#    np.savez_compressed(cache_path, thresholds=thresholds)
+    np.savez_compressed(cache_path, thresholds=thresholds)
     print(f"[compute_bond_thresholds] Saved thresholds to {cache_path}")
     return thresholds
 
@@ -1011,8 +1010,8 @@ def filter_unrealistic_indices(
         frames,
         neighbor_list,
         thresholds,
-        pct_tol=0.40,
-        first_shell_cutoff=3.0,
+        pct_tol=0.5,
+        first_shell_cutoff=4.4,
         device=None,
         cache_path="bad_globals.npz"
     ):
@@ -1081,7 +1080,7 @@ def filter_unrealistic_indices(
     bad_set = set(bad)
 
     # 3) Save cache
-#    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
+    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
     print(f"[filter_unrealistic_indices] Saved bad_global to {cache_path}")
     return bad_set
 
@@ -1113,6 +1112,7 @@ def adaptive_learning_mig_pool_windowed(
         mu_F_pool: np.ndarray,
         sigma_F_pool: np.ndarray,
         bad_global: set,
+        thr_E_hi: float=0.02, 
         rho_eV: float = 0.0025,
         min_k: int = 5,
         window_size: int = 100,
@@ -1127,56 +1127,135 @@ def adaptive_learning_mig_pool_windowed(
 
     G_train = solve_triangular(L, F_train.T, lower=True).T
     G_pool = solve_triangular(L, F_pool.T, lower=True).T
+    reg = 1e-6                       # keep the same regulariser everywhere
+    M_inv_global = np.linalg.inv(G_train.T @ G_train + reg * np.eye(G_train.shape[1]))
 
-    total_entries = mu_F_pool.shape[0]
-    n_atoms = getattr(pool_frames[0], 'get_positions', lambda: pool_frames[0]).__call__().shape[0] if pool_frames else 0
-    n_pool_frames = total_entries // n_atoms
+    n_pool_frames = len(pool_frames) 
+    n_atoms       = pool_frames[0].get_positions().shape[0]
 
-    # ──────────────
-    # SET FACTORS INSIDE FUNCTION
-    f_E    = 1.20    # 30% above max train uncertainty in energy
-    f_F    = 1.20    # 30% above max train uncertainty in force
-    f_Fmag = 1.10    # 20% above max train force magnitude
+    # ------------------------------------------------------------------
+    # 1 · fixed σ(E/atom) threshold  (5 meV atom⁻¹)
+    # ------------------------------------------------------------------
 
-    thr_sigma_E  = f_E    * float(sigma_energy.max())
+    sigma_E_per_atom_train = sigma_energy / n_atoms
+    sigma_E_per_atom_pool  = sigma_E_pool / n_atoms 
+    thr_sigma_E_low = 0.002  # 2 meV/atom lower floor (as before)
+
+    # ------------------------------------------------------------------
+    # 2 · force–uncertainty thresholds (relative)
+    # ------------------------------------------------------------------
+    f_F      = 1.20    # 30% above max train uncertainty in force
+    f_Fmean  = 1.15   # 15 % above train max σF mean
+    f_Fmag   = 1.10    # 20% above max train force magnitude
 
     n_train_frames = sigma_force.shape[0] // (n_atoms * 3) 
-    sigma_F_train_max = (sigma_force.reshape(n_train_frames, n_atoms, 3).max(axis=(1, 2)))       # → shape (n_train_frames,)
-    thr_sigma_F  = f_F    * float(sigma_F_train_max.max()) 
 
+    sigma_F_train       = sigma_force.reshape(n_train_frames, n_atoms, 3)
+    sigma_F_train_max   = sigma_F_train.max(axis=(1, 2))
+    sigma_F_train_mean  = np.linalg.norm(sigma_F_train, axis=2).mean(axis=1)
+
+    thr_sigma_F     = f_F     * sigma_F_train_max .max()
+    thr_sigma_Fmean = f_Fmean * sigma_F_train_mean.max()
+
+    # ------------------------------------------------------------------
+    # 3 · max-|F| threshold
+    # ------------------------------------------------------------------
     force_magnitudes_train = np.linalg.norm(forces_train, axis=2)
     frame_max_force_train = force_magnitudes_train.max(axis=1)
     thr_Fmag = f_Fmag * frame_max_force_train.max()
+
+    # Upper bounds (more conservative, 2x typical)
+    sigma_E_per_atom_train_max = sigma_E_per_atom_train.max()
+    sigma_F_train_max_max = sigma_F_train_max.max()
+    sigma_F_train_mean_max = sigma_F_train_mean.max()
+    frame_max_force_train_max = frame_max_force_train.max()
+
+    thr_sigma_E_hi  = 0.05 # Hard cap. 3.0 * sigma_E_per_atom_train_max 
+    thr_sigma_F_hi  = 2.0 * sigma_F_train_max_max
+    thr_sigma_Fmean_hi = 2.0 * sigma_F_train_mean_max
+    thr_Fmag_hi     = 2.0 * frame_max_force_train_max
+
+    print(f"[Pool-AL] Lower/Upper bounds for metrics:")
+    print(f"  sigma_E/atom:  > {thr_sigma_E_low:.4f}  < {thr_sigma_E_hi:.4f} eV")
+    print(f"  sigma_F_max:   > {thr_sigma_F:.4f}  < {thr_sigma_F_hi:.4f} eV/Å")
+    print(f"  sigma_F_mean:  > {thr_sigma_Fmean:.4f}  < {thr_sigma_Fmean_hi:.4f} eV/Å")
+    print(f"  |F|_max:       > {thr_Fmag:.4f}  < {thr_Fmag_hi:.4f} eV/Å")
     
-    print(f"[Pool-AL] σE threshold  = {thr_sigma_E:.4f} eV")
-    print(f"[Pool-AL] σF threshold  = {thr_sigma_F:.4f} eV/Å")
-    print(f"[Pool-AL] |F|max thresh = {thr_Fmag:.4f} eV/Å")
-
-    # For reporting and possible convergence
-    n_hi_E    = int((sigma_E_pool   > thr_sigma_E).sum())
-
-    sigma_F_pool_max = sigma_F_pool.reshape(n_pool_frames, n_atoms, 3).max(axis=(1, 2))
-    n_hi_F    = int((sigma_F_pool_max   > thr_sigma_F).sum())
-
+    # ------------------------------------------------------------------
+    # 4 · pool-side per-frame scalars
+    # ------------------------------------------------------------------
     mu_F_pool = mu_F_pool.reshape(n_pool_frames, n_atoms, 3)
+    sigma_F_pool   = sigma_F_pool.reshape(n_pool_frames, n_atoms, 3)
 
-    pool_force_magnitudes = np.linalg.norm(mu_F_pool, axis=2)
-    frame_max_force_pool = pool_force_magnitudes.max(axis=1)
-    n_hi_Fmag = int((frame_max_force_pool > thr_Fmag).sum())
+    sigma_F_pool_max  = sigma_F_pool.max(axis=(1, 2))
+    sigma_F_pool_mean = np.linalg.norm(sigma_F_pool, axis=2).mean(axis=1)
+    frame_max_force_pool = np.linalg.norm(mu_F_pool, axis=2).max(axis=1)
+    E_atom_pool = mu_E_pool / n_atoms
 
-    print(f"[AL] frames above σE_thr : {n_hi_E}")
-    print(f"[AL] frames above σF_thr : {n_hi_F}")
-    print(f"[AL] frames above |F|_thr: {n_hi_Fmag}")
+    # ------------------------------------------------------------------
+    # 5 · counts
+    # ------------------------------------------------------------------
 
-    if (n_hi_E + n_hi_F + n_hi_Fmag) < 10:
-        print("[AL] Convergence reached — nothing significant left to label.")
-        return [], []
-
-    # Rest of your code follows unchanged...
-
+    n_hi_E      = int((sigma_E_per_atom_pool  > thr_sigma_E_low).sum())
+    n_hi_Fmax   = int((sigma_F_pool_max       > thr_sigma_F).sum())
+    n_hi_Fmean  = int((sigma_F_pool_mean      > thr_sigma_Fmean).sum())
+    n_hi_Fmag   = int((frame_max_force_pool   > thr_Fmag).sum())
+    
+    n_lo_E      = int((sigma_E_per_atom_pool  < thr_sigma_E_hi).sum())
+    n_lo_Fmax   = int((sigma_F_pool_max       < thr_sigma_F_hi).sum())
+    n_lo_Fmean  = int((sigma_F_pool_mean      < thr_sigma_Fmean_hi).sum())
+    n_lo_Fmag   = int((frame_max_force_pool   < thr_Fmag_hi).sum())
+    
+    # Count frames in *both* bounds (eligible for selection, before OOD etc)
+    n_in_E      = int(((sigma_E_per_atom_pool > thr_sigma_E_low) & (sigma_E_per_atom_pool < thr_sigma_E_hi)).sum())
+    n_in_Fmax   = int(((sigma_F_pool_max > thr_sigma_F) & (sigma_F_pool_max < thr_sigma_F_hi)).sum())
+    n_in_Fmean  = int(((sigma_F_pool_mean > thr_sigma_Fmean) & (sigma_F_pool_mean < thr_sigma_Fmean_hi)).sum())
+    n_in_Fmag   = int(((frame_max_force_pool > thr_Fmag) & (frame_max_force_pool < thr_Fmag_hi)).sum())
+    
+    print(f"[AL] Frames above sigma_E/atom lower  : {n_hi_E}")
+    print(f"[AL] Frames above sigma_F_max lower   : {n_hi_Fmax}")
+    print(f"[AL] Frames above sigma_F_mean lower  : {n_hi_Fmean}")
+    print(f"[AL] Frames above |F|_max lower       : {n_hi_Fmag}")
+    print(f"[AL] Frames below sigma_E/atom upper  : {n_lo_E}")
+    print(f"[AL] Frames below sigma_F_max upper   : {n_lo_Fmax}")
+    print(f"[AL] Frames below sigma_F_mean upper  : {n_lo_Fmean}")
+    print(f"[AL] Frames below |F|_max upper       : {n_lo_Fmag}")
+    print(f"[AL] Frames in (lower, upper) for sigma_E/atom: {n_in_E}")
+    print(f"[AL] Frames in (lower, upper) for sigma_F_max : {n_in_Fmax}")
+    print(f"[AL] Frames in (lower, upper) for sigma_F_mean: {n_in_Fmean}")
+    print(f"[AL] Frames in (lower, upper) for |F|_max     : {n_in_Fmag}")
+    
     good_frames = len(pool_frames) - len(bad_global)
     print(f"[AL] analyzing {good_frames}/{len(pool_frames)} good frames (excluded {len(bad_global)} bad frames)")
+    
+    # ------------------------------------------------------------------
+    # 6 · per-frame diagnostics file
+    # ------------------------------------------------------------------
+    diag_file = f"{base}_per_frame_diagnostics.txt"
+    with open(diag_file, "w") as fh:
+        fh.write("# idx\tσE_per_atom\tσF_max\tσF_mean\t|F|_max\n")
+        for i in range(n_pool_frames):
+            fh.write(f"{i}\t"
+                     f"{sigma_E_per_atom_pool[i]:.6f}\t"
+                     f"{sigma_F_pool_max[i]:.6f}\t"
+                     f"{sigma_F_pool_mean[i]:.6f}\t"
+                     f"{frame_max_force_pool[i]:.6f}\n")
+    print(f"[AL] Wrote per-frame diagnostics to {diag_file}")
 
+    # Save diagnostics as npz for plotting
+    diag_npz = f"{base}_per_frame_diagnostics.npz"
+    np.savez(
+        diag_npz,
+        sigma_E_per_atom=sigma_E_per_atom_pool,
+        sigma_F_max=sigma_F_pool_max,
+        sigma_F_mean=sigma_F_pool_mean,
+        F_max=frame_max_force_pool,
+    )
+    print(f"[AL] Wrote per-frame diagnostics to {diag_npz}")
+
+    if (n_hi_E + n_hi_Fmax + n_hi_Fmean + n_hi_Fmag) < 10:
+        print("[AL] Convergence reached — nothing significant left to label.")
+        return [], []
     # ------------------------------------------------------------------
     # Windowed D-optimal selection (γ₀ > 1 cutoff, no D_norm)
     # ------------------------------------------------------------------
@@ -1189,98 +1268,106 @@ def adaptive_learning_mig_pool_windowed(
         print(f"\n[Pool-AL] Window {w0}-{w1}: {len(win)} total frames")
 
         # NEW FILTER: Only candidates exceeding any threshold and not in bad_global
-        high = [i for i in win if (
-                    (sigma_E_pool[i]          > thr_sigma_E) or
-                    (sigma_F_pool_max[i]      > thr_sigma_F) or
-                    (frame_max_force_pool[i]  > thr_Fmag)
-                 ) and i not in bad_global]
-        print(f"[Pool-AL]   {len(high)} after σ/force thresholds & sanity filter")
+        # 1. Not in bad_global (geometry)
+        win_good = [i for i in win if i not in bad_global]
+        print(f"[Pool-AL]   {len(win_good)} pass bad_global (loose geometry)")
+
+        # 2. Energy cap
+        win_E = [i for i in win_good if E_atom_pool[i] < thr_E_hi]
+        print(f"[Pool-AL]   {len(win_E)} below E/atom cap ({thr_E_hi:.3f} eV)")
+
+        # 3. Uncertainty/force/energy upper caps
+        win_sigmaE = [i for i in win_E if sigma_E_per_atom_pool[i] < thr_sigma_E_hi]
+        print(f"[Pool-AL]   {len(win_sigmaE)} below sigma_E/atom cap ({thr_sigma_E_hi:.3f} eV)")
+
+        win_sigmaF = [i for i in win_sigmaE if sigma_F_pool_max[i] < thr_sigma_F_hi]
+        print(f"[Pool-AL]   {len(win_sigmaF)} below sigma_F cap ({thr_sigma_F_hi:.3f} eV/Å)")
+
+        win_sigmaFmean = [i for i in win_sigmaF if sigma_F_pool_mean[i] < thr_sigma_Fmean_hi]
+        print(f"[Pool-AL]   {len(win_sigmaFmean)} below sigma_Fmean cap ({thr_sigma_Fmean_hi:.3f} eV/Å)")
+
+        win_Fmag = [i for i in win_sigmaFmean if frame_max_force_pool[i] < thr_Fmag_hi]
+        print(f"[Pool-AL]   {len(win_Fmag)} below |F| cap ({thr_Fmag_hi:.3f} eV/Å)")
+
+        # 4. LOWER bounds: "interesting" (at least one metric above its lower bound)
+        high = [
+            i for i in win_Fmag if (
+                (sigma_E_per_atom_pool[i]   > thr_sigma_E_low) or
+                (sigma_F_pool_max[i]        > thr_sigma_F) or
+                (sigma_F_pool_mean[i]       > thr_sigma_Fmean) or
+                (frame_max_force_pool[i]    > thr_Fmag)
+            )
+        ]
+        print(f"[Pool-AL]   {len(high)} above at least one 'interesting' threshold (lower bounds)")
+
         if not high:
+            print(f"[Pool-AL]   No high-uncertainty frames in this window.")
             continue
 
         sub_G = G_pool[high].astype(np.float64)
         print(f"[Pool-AL]   sub_G shape = {sub_G.shape}")
-    
-        # D-optimal ranking
-        order, gains_full, gamma0 = d_optimal_full_order(
-            X_cand = sub_G,
-            X_train= G_train.astype(np.float64),
-            reg    = 1e-6
+   
+        # raw Mahalanobis distances w.r.t. *current* training set
+        quad0  = np.einsum("id,dk,ik->i", sub_G, M_inv_global, sub_G)
+        gamma0 = np.sqrt(quad0)
+        gamma_thr = 1.0  
+        print(f"[Pool-AL]   Mahalanobis γ₀: mean={gamma0.mean():.3f}, "
+              f"std={gamma0.std():.3f}, min={gamma0.min():.3f}, max={gamma0.max():.3f}")
+        keep = np.where(gamma0 > gamma_thr)[0]
+        print(f"[Pool-AL]   {len(keep)} frames are OOD (γ₀ > {gamma_thr:.2f})")
+        if keep.size == 0:
+           print(f"[Pool-AL]   Skipping window; no OOD candidates.")
+           continue
+        # ---- D-optimal ordering on OOD subset ----
+        X_cand_OOD = sub_G[keep]
+        order, gains_full, gamma0_sub = d_optimal_full_order(
+            X_cand=X_cand_OOD,
+            X_train=G_train,
+            reg=reg,
         )
         print(
-            f"[Pool-AL]   D-opt got {len(order)} candidates, "
-            f"gains ∈ [{gains_full.min():.3f}, {gains_full.max():.3f}], "
-            f"γ₀ ∈ [{gamma0.min():.3f}, {gamma0.max():.3f}]"
+            f"[Pool-AL]   D-opt got {len(order)} OOD candidates, "
+            f"gains ∈ [{gains_full.min():.3f}, {gains_full.max():.3f}]"
         )
     
-        # find the raw gain at γ₀≈1
-        idx_gamma1 = np.argmin(np.abs(gamma0 - 1.0))
-        gain_floor = gains_full[idx_gamma1]
-        print(f"[DEBUG]  raw gain floor @ γ₀≈1: {gain_floor:.3f}")
-        
-        # keep any candidate with gain above that floor
+        # Optional: print some of the top OOD γ₀/gain values
+        for n in range(min(3, len(order))):
+            idx = order[n]
+            print(f"  [DEBUG][OOD]   Pick {n+1}: γ₀={gamma0[keep[idx]]:.3f}, Dgain={gains_full[n]:.3f}")
+
+        # --- Hybrid gain threshold + min_k fallback ---
+        gain_floor = np.percentile(gains_full, 80)  # top 20% only
         idx_keep = np.where(gains_full > gain_floor)[0]
-        print(f"[DEBUG]  {len(idx_keep)} frames with gain > gain_floor")
+        print(f"[Pool-AL]   {len(idx_keep)} frames above gain_floor={gain_floor:.3f}")
         
-        if idx_keep.size:
-            # in D-opt order
-            kept_local = [i for i in order if i in idx_keep]
-        else:
-            # fallback
-            print(f"[Pool-AL]   no OOD frames: falling back to first {min_k}")
-            kept_local = order[:min_k]
-
-        print(f"[Pool-AL]   selected {len(kept_local)} in this window")
-    
-        # map back to global indices
-        picks = [high[i] for i in kept_local]
-
-        if len(picks) > 1:
-            # Get latent reps for these picks
-            X_local = G_pool[picks].astype(np.float64)
-            # pick a seed that is in `high` but NOT in `picks`
-            outside = [i for i in high if i not in picks]
-            if outside:
-                init_global = outside[0]                       # or np.random.choice(outside)
-            else:
-                init_global = picks[0]
-            # Run D-optimal ordering *within* these picks
-            # (re-use your existing D-optimal ordering function)
-            X_train_local = G_pool[init_global].reshape(1,-1) 
-            order_local, gains_local, _ = d_optimal_full_order(
-                X_cand = X_local,
-                X_train= X_train_local,   # 1 × d dummy “training” seed 
-                reg    = 1e-6
-            )
-            print(f"[Local-AL] gains_local: min={gains_local.min():.3f}, max={gains_local.max():.3f}")
-            print(f"[Local-AL] gains_local[:10]: {gains_local[:10]}")
-
-            # 25% of first gain as floor
-            gain_floor = np.percentile(gains_local, 99)
-            print(f"[Local-AL] local gain_floor: {gain_floor:.3f}")
+        if idx_keep.size == 0:
+            # No gains above floor; fallback to first min_k picks
+            idx_keep = order[:min_k]
+            print(f"[Pool-AL]   Fallback: taking first {min_k} by D-opt order.")
+        elif idx_keep.size < min_k:
+            # If not enough, pad with next-best frames (by D-opt order)
+            extras = [i for i in order if i not in idx_keep][: (min_k - idx_keep.size)]
+            idx_keep = list(idx_keep) + extras
+            print(f"[Pool-AL]   Padded to min_k={min_k} with D-opt order.")
         
-            # Keep only those above gain_floor (in D-opt order)
-            local_kept = [order_local[i] for i, gain in enumerate(gains_local) if gain > gain_floor]
-            print(f"[Local-AL] reduced {len(picks)} -> {len(local_kept)} by local diversity filter")
-        
-            # Map back to global indices
-            picks = [picks[i] for i in local_kept]
-        else:
-            print(f"[Local-AL] Only one pick, skipping local diversity filter.")
+        # Map back to global indices
+        picks = [high[keep[i]] for i in idx_keep]
+        print(f"[Pool-AL]   Selected {len(picks)} frames in this window (hybrid logic).")
 
         cand_global.extend(picks)
-    
-        # record entries
-        for j, idx in enumerate(picks):
+
+        for idx_local, pick in enumerate(picks):
+            gain_val  = gains_full[idx_local]
+            gamma_val = gamma0[keep[idx_keep[idx_local]]]
             records.append((
-                idx,
-                mu_E_pool[idx],
-                sigma_E_pool[idx],
-                gains_full[kept_local[j]],  # D-optimal log-det gain
-                gamma0[kept_local[j]],      # γ₀ value
+                pick,
+                mu_E_pool[pick],
+                sigma_E_pool[pick],
+                gain_val,
+                gamma_val,
                 f"{w0}-{w1}"
             ))
-    
+        
     # ------------------------------------------------------------------
     # Write out the selection log
     # ------------------------------------------------------------------

@@ -1,59 +1,67 @@
 #!/bin/bash
-
-#SBATCH --qos=regular
 #SBATCH --job-name=train
 #SBATCH --time=1-00:00:00  
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=24
-#SBATCH --cpus-per-task=1
-#SBATCH --gpus=1
-#SBATCH --constraint=a100-pcie
+#SBATCH -c 32 
+#SBATCH -p medium  
+#SBATCH --mem=64GB 
+#SBATCH --gres=gpu:a100
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
-module load Anaconda3
-source activate #path of the corresponding anaconda environment
+# 1) Load your env
+conda deactivate 
+conda activate env-name # make sure that the environment name is the one that was created
 
-CDIR=`pwd`
+# 2) Remember original dir
+CDIR=$(pwd)
 
-# Generate calculations folder
-export SCRATCH_DIR=/scratch/$USER/wrktmp/$SLURM_JOBID
-mkdir -p $SCRATCH_DIR
+# 3) Use SLURM's node-local tmp (guaranteed local disk)
+SCRATCH_DIR=${TMPDIR:-/scratch/$SLURM_JOB_ID}
+mkdir -p "$SCRATCH_DIR"
 
-# Get config file from input parameter
-CONFIG_FILE=$1
-
-# If config file is not provided, set the default one
-if [ -z "$CONFIG_FILE" ]; then
-    CONFIG_FILE="input.yaml"
-fi
-
-# Check if the config file exists
+# 4) Copy code & static data (no .db yet)
+CONFIG_FILE=${1:-input.yaml}
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Configuration file '$CONFIG_FILE' does not exist."
-    exit 1
+  echo "Error: config '$CONFIG_FILE' not found"
+  exit 1
+fi
+echo "Using config: $CONFIG_FILE"
+
+cp "$CONFIG_FILE" *.npz *.hdf5 "$SCRATCH_DIR"
+
+# 5) cd into the local node scratch
+cd "$SCRATCH_DIR"
+
+# 6) Prepare results folder on local disk
+mkdir -p results
+
+# 7) Extract your DB name from the YAML
+DB_NAME=$(grep -Po "(?<=database_name:\s').*(?=')" "$CONFIG_FILE")
+if [ -z "$DB_NAME" ]; then
+  echo "Error: couldn't parse database_name"
+  exit 1
 fi
 
-echo "Using configuration file: $CONFIG_FILE"
+# 8) Patch the YAML so logging.folder → ./results
+sed -i "s|^\(\s*folder:\s*\).*|\1'./results'|g" "$CONFIG_FILE"
 
-# Copy necessary files to SCRATCH_DIR
-cp "$CONFIG_FILE" $SCRATCH_DIR
-cp *.npz $SCRATCH_DIR
+echo "→ logging.folder set to './results'"
+echo "→ DB will be created at: $SCRATCH_DIR/results/$DB_NAME"
 
-cd $SCRATCH_DIR
-
-# Run training
-python -m mlff_qd.training --config "$CONFIG_FILE"
-
-# Check if training was successful and do the inference if it is possible
+# 9) Run training & inference in the node-local scratch
+srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CONFIG_FILE"
 if [ $? -eq 0 ]; then
-    echo "Training completed successfully. Starting inference."
-    # Run inference
-    python -m mlff_qd.training.inference --config "$CONFIG_FILE"
+  echo "✔ Training succeeded — running inference"
+  srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training.inference --config "$CONFIG_FILE"
 else
-    echo "Training failed. Skipping inference."
+  echo "✘ Training failed — skipping inference"
 fi
 
-mkdir -p $CDIR/$SLURM_JOB_ID
-cp -r * $CDIR/$SLURM_JOB_ID
-rm -fr $SCRATCH_DIR
+# 10) Copy back all outputs (including results/*.db)
+cp -r ./results *.npz *.pkl *.csv "$CDIR"
+
+# 11) Clean up
+rm -rf "$SCRATCH_DIR"
+
+
+
