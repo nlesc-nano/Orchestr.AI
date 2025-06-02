@@ -75,7 +75,6 @@ def prepare_transformations(config, task_type):
     
     return transformations
     
-    
 def setup_data_module(config, db_path, transformations, property_units):
     custom_data = spk.data.AtomsDataModule(
         db_path,
@@ -95,8 +94,6 @@ def setup_data_module(config, db_path, transformations, property_units):
     
     return custom_data
     
-    
-
 def show_dataset_info(dataset):
     """
     Display information about the dataset, including available properties and an example molecule.
