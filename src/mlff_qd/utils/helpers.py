@@ -7,6 +7,25 @@ def load_config(path):
     with open(path, 'r') as file:
         return yaml.safe_load(file)
 
+def load_config_preproc(config_file=None):
+    # If no config file is specified, use a default path relative to this script.
+    if config_file is None:
+        # Adjust parents[...] as necessary based on your directory structure
+        default_path = "preprocess_config.yaml"
+        config_file = str(default_path)  # convert Path object to string if needed
+
+    try:
+        # Load user-defined configuration
+        with open(config_file, "r") as file:
+            user_config = yaml.safe_load(file)
+            if user_config is None:
+                user_config = {}
+    except FileNotFoundError:
+        print(f"Configuration file '{config_file}' not found. Using only default settings.")
+        user_config = {}
+
+    return user_config
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Machine Learning Force Field Training with SchNetPack")
     parser.add_argument("--config", type=str, default="input.yaml", help="Path to the configuration YAML file")
