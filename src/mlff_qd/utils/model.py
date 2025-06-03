@@ -39,6 +39,7 @@ class CustomAtomwise(spk.atomistic.Atomwise):
         return inputs
 
 def setup_model(config):
+    model_type = config.get('settings', {}).get('model', {}).get('model_type') or 'schnet'
     cutoff = config['settings']['model']['cutoff']
     n_rbf = config['settings']['model']['n_rbf']
     n_atom_basis = config['settings']['model']['n_atom_basis']
@@ -49,14 +50,28 @@ def setup_model(config):
 
     pairwise_distance = spk.atomistic.PairwiseDistances()
     radial_basis = spk.nn.GaussianRBF(n_rbf=n_rbf, cutoff=cutoff)
-
-    schnet = spk.representation.SchNet(
-        n_atom_basis=n_atom_basis,
-        n_interactions=n_interactions,
-        radial_basis=radial_basis,
-        cutoff_fn=spk.nn.CosineCutoff(cutoff)
-    )
-
+    input_modules = [pairwise_distance]
+    
+    if model_type.lower() == 'schnet':
+        representation = spk.representation.SchNet(
+            n_atom_basis=n_atom_basis,
+            n_interactions=n_interactions,
+            radial_basis=radial_basis,
+            cutoff_fn=spk.nn.CosineCutoff(cutoff)
+        )
+        print("Using SchNet Model")
+    elif model_type.lower() == 'painn':
+        representation = spk.representation.PaiNN(
+            n_atom_basis=n_atom_basis,
+            n_interactions=n_interactions,
+            radial_basis=radial_basis,
+            cutoff_fn=spk.nn.CosineCutoff(cutoff),
+        )
+        print("Using PaiNN Model")
+    else:
+        raise ValueError(f"Invalid model_type '{model_type}'. Choose from: schnet, painn")
+        
+        
     output_modules = [
         CustomAtomwise(
             n_in=n_atom_basis,
@@ -72,8 +87,8 @@ def setup_model(config):
     postprocessors = [trn.CastTo64(), trn.AddOffsets('energy', add_mean=True, add_atomrefs=False)]
 
     nnpot = spk.model.NeuralNetworkPotential(
-        representation=schnet,
-        input_modules=[pairwise_distance],
+        representation=representation,
+        input_modules=input_modules,
         output_modules=output_modules,
         postprocessors=postprocessors
     )
