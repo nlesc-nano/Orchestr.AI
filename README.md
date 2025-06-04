@@ -32,14 +32,18 @@ conda install -c conda-forge dscribe
 
 One can find more information [here](https://singroup.github.io/dscribe/latest/install.html).
 
-### Install Compound Attachment Tool (CAT), nano-CAT and auto-FOX
+### Install Compound Attachment Tool (CAT), nano-CAT, auto-FOX, QMFlows and Nano-QMFlows
 To install these packages we recommend to download the latest versions from their original repositories in the links below:
 
 * [CAT](https://github.com/nlesc-nano/CAT);
 
 * [nano-CAT](https://github.com/nlesc-nano/nano-CAT);
 
-* [auto-FOX](https://github.com/nlesc-nano/auto-FOX).
+* [auto-FOX](https://github.com/nlesc-nano/auto-FOX);
+
+* [QMFlows](https://github.com/SCM-NV/qmflows);
+
+* [Nano-QMFlows](https://github.com/SCM-NV/nano-qmflows).
 
 Then, to install them one can do the following in each folder:
 ```bash
