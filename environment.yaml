@@ -1,0 +1,15 @@
+name: D_MLFF_new3
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - schnetpack
+      - pandas
+      - scikit-learn
+      - e3nn
+      - git+https://github.com/mir-group/nequip.git@v0.6.1
+      - wandb
+      - git+https://github.com/mir-group/allegro.git@v0.3.0
+      - mace-torch==0.3.13

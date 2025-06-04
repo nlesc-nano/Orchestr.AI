@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import logging
 import os
-
+import yaml 
 from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
         prepare_transformations, setup_data_module, show_dataset_info )
 from mlff_qd.utils.model import setup_model
@@ -30,8 +30,25 @@ def print_model_summary(model, model_name="Model"):
     print(f"Total trainable parameters: {total_params:,}")
     print(f"{'=' * 50}\n")
     
-def main(args):
-    config = load_config(args.config)
+def run_schnet_training(config_path):
+    #config = load_config(args.config)
+    
+    try:
+        # Load config
+        with open(config_path, "r") as f:
+            config_dict = yaml.safe_load(f) or {}
+        
+        # Validate config
+        if not config_dict or "settings" not in config_dict:
+            raise ValueError("SchNet config must contain a 'settings' key")
+        
+        config = config_dict # Extract the settings dictionary
+            
+    except Exception as e:
+        logging.error(f"SchNet training failed with config {config_path}: {str(e)}")
+        raise
+        
+
     set_seed(config['settings']['general']['seed'])
 
     data = load_data(config)

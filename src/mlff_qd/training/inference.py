@@ -147,10 +147,13 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
         print("MLFF not yet converged. Continuing training...")
 
 @timer
-def main():
-    args = parse_args()
-    config = load_config(args.config)
-
+def run_schnet_inference(config_file=None):
+    if config_file is None:
+        args = parse_args()  # Use your helper function
+        config_file = args.config  # Get the config file path
+        
+    config = load_config(config_file)
+    
     trained_model_path = config['settings']['testing']['trained_model_path']
     print(f"Trained model path: {trained_model_path}")
     db_path = os.path.join(trained_model_path, config['settings']['general']['database_name'])
@@ -199,4 +202,4 @@ def main():
 if __name__ == '__main__':
     setup_logging()  # Initialize logging before main
     logging.info(f"{'*' * 30} Started... {'*' * 30}")
-    main()
+    run_schnet_inference()
