@@ -16,8 +16,8 @@ from ase.io import read
 
 from mlff_qd.postprocessing.calculator import setup_neighbor_list, assign_charges
 from mlff_qd.postprocessing.simulation import run_md, run_geo_opt, run_vibrational_analysis
-from mlff_qd.postprocessing.config_loader import load_config
 from mlff_qd.postprocessing.evaluate import run_eval
+from mlff_qd.utils.helpers import load_config
 
 # === Setup Logging and Unbuffered Output ===
 sys.path.insert(0, os.getcwd())

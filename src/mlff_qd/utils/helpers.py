@@ -1,11 +1,8 @@
 import argparse
+import os
 import yaml
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_sched
-
-def load_config(path):
-    with open(path, 'r') as file:
-        return yaml.safe_load(file)
 
 def load_config_preproc(config_file=None):
     # If no config file is specified, use a default path relative to this script.
@@ -25,6 +22,29 @@ def load_config_preproc(config_file=None):
         user_config = {}
 
     return user_config
+
+def load_config(config_file="config.yaml"):
+    """
+    Loads configuration from a YAML file.
+
+    Parameters:
+        config_file (str): Path to the YAML configuration file (default: "config.yaml").
+
+    Returns:
+        dict or None: Configuration dictionary if loaded successfully, or None if there was an error.
+    """
+    if not os.path.exists(config_file):
+        print(f"Error: Configuration file '{config_file}' not found.")
+        return None
+
+    try:
+        with open(config_file, "r") as f:
+            config = yaml.safe_load(f)
+        print(f"Configuration loaded successfully from {config_file}.")
+        return config
+    except Exception as e:
+        print(f"Error loading configuration from '{config_file}': {e}")
+        return None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Machine Learning Force Field Training with SchNetPack")
