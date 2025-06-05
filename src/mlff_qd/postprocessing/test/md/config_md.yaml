@@ -1,30 +1,35 @@
 # config.yaml
-model_path: "./models/best_inference_cd68se55_model_1"
+model_path: "../models_painn/best_inference_cspbbr3_model_1"
 cutoff: 12.0
 skin: 2.0 
 prefactor: 14.39964
 log_file: "simulation.log"
 cache_path: "neighbor_cache"
 include_electrostatic: False 
-initial_xyz: "Cd68Se55.xyz"
+initial_xyz: "../CsPbBr3_opt.xyz"
 
 run_type: "MD"  # Change to "GEO_OPT" for geometry optimization
 
 eval:
   batch_size: 16  
   uncertainty: ["ensemble"]  
-  training_data: "updated_training_data_100.xyz"  # Replace with actual path
-  eval_input_xyz: "dataset_pos_frc_ev_500.xyz"
+  training_data: "../consolidated_dataset_100.xyz"  # Replace with actual path
+  eval_input_xyz: "../consolidated_dataset_150.xyz"
   eval_output_file: "output.xyz"
   eval_log_file: "eval_log.txt"
+#  unlabeled_pool_path: "md_trajectory.xyz"
   error_estimate: False 
-  ensemble_folder: "./models"
-  ensemble_size: 10  
+  plot: False  
+  ensemble_folder: "../models_painn"
+  ensemble_size: 10 
   test_ensemble: False
-  active_learning: "Influence"  
-  num_active_frames: 250 
+  active_learning: "influence"  
+#  plot_smooth_window: 50     # (optional) window for the rolling‐mean plot
+  pool_stride:       1      # thin the pool by this many frames
+  pool_window:       200     # frames per AL window
+#  pool_max_per_window: 5     # max picks per window
   SOAP:
-    species: ["Cd", "Se", "Cl"]
+    species: ["Cs", "Pb", "Br"]
     r_cut: 12.0
     n_max: 7
     l_max: 3
@@ -33,13 +38,14 @@ eval:
     sparse: False
 
 md:
-  timestep_fs: 2.0
+  timestep_fs: 1.0
   temperature_K: 300.0
   trajectory_file_md: "md_trajectory.xyz"
+  log_file: "simulation_md.log" 
   use_langevin: true
   friction_coefficient: 0.01
-  steps: 10000  
-  xyz_print_interval: 100   
+  steps: 1000  
+  xyz_print_interval: 5  
 
 geo_opt:
   geo_opt_fmax: 0.02
