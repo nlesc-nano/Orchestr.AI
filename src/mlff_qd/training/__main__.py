@@ -1,8 +1,8 @@
 import logging
 
+from mlff_qd.training.training import main
 from mlff_qd.utils.helpers import parse_args
 from mlff_qd.utils.logging_utils import setup_logging
-from mlff_qd.utils.training import main
 
 if __name__ == "__main__":
     args = parse_args()
