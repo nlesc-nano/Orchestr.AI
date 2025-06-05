@@ -833,7 +833,7 @@ def run_eval(config):
             train_idx     = np.where(train_mask)[0]
             train_frames  = [all_frames[i] for i in train_idx]
             thresholds    = compute_bond_thresholds(train_frames, neighbour_list,
-                                                    first_shell_cutoff=4.4)
+                                                    first_shell_cutoff=5.0)
             bad_global    = filter_unrealistic_indices(pool_frames, neighbour_list, thresholds)
     
             # thin for AL ----------------------------------------------------
@@ -843,25 +843,8 @@ def run_eval(config):
             F_pool_thin        = mu_L_pool[thin_idx].astype(float)
             mu_E_pool_thin     = mu_E_pool[thin_idx].astype(float)
             sigma_E_pool_thin  = sigma_E_pool[thin_idx].astype(float)
-            F_train_thin       = mean_L_frame[thin_idx].astype(float)   # needed by AL
+            F_train_thin       = mean_L_frame[train_idx].astype(float)   # needed by AL
             
-            # ---------------------------------------------------------------------
-            # DROP NaN / Inf ROWS
-            # ---------------------------------------------------------------------
-            mask_pool  = np.isfinite(F_pool_thin).all(axis=1)
-            mask_train = np.isfinite(F_train_thin).all(axis=1)
-            finite_mask = mask_pool & mask_train
-            
-            if not finite_mask.all():
-                dropped = np.where(~finite_mask)[0]
-                print(f"[Pool-AL] dropping {len(dropped)} NaN/Inf rows: {dropped.tolist()}")
-                thin_idx          = thin_idx[finite_mask]
-                pool_frames_thin  = [pool_frames[i] for i in thin_idx]
-                F_pool_thin       = F_pool_thin [finite_mask]
-                F_train_thin      = F_train_thin[finite_mask]
-                mu_E_pool_thin    = mu_E_pool_thin[finite_mask]
-                sigma_E_pool_thin = sigma_E_pool_thin[finite_mask]
-
             # ---------------------------------------------------------------------
             # MAP bad_global TO THINNED COORDINATES
             # ---------------------------------------------------------------------
@@ -936,19 +919,19 @@ def run_eval(config):
                 F_train_thin,
                 alpha_sq,
                 L_chol,
-                forces_train = all_true_F, 
-                sigma_energy = sigma_E_raw, 
-                sigma_force  = sigma_comp, 
-                mu_E_pool    = mu_E_pool_thin,
-                sigma_E_pool = sigma_E_pool_thin,
-                mu_F_pool    = mu_F_pool,
-                sigma_F_pool = sigma_F_pool,
-                bad_global   = bad_rel,
-                thr_E_hi     = thr_E_hi, 
-                rho_eV       = 0.002,
-                min_k        = 5,
-                window_size  = eval_cfg.get("pool_window", 100),
-                base         = "al_pool_v1")
+                forces_train     = all_true_F, 
+                sigma_energy     = sigma_E_raw, 
+                sigma_force      = sigma_comp, 
+                mu_E_frame_train = mu_E_frame[train_idx], 
+                mu_E_pool        = mu_E_pool_thin,
+                sigma_E_pool     = sigma_E_pool_thin,
+                mu_F_pool        = mu_F_pool,
+                sigma_F_pool     = sigma_F_pool,
+                bad_global       = bad_rel,
+                rho_eV           = 0.002,
+                min_k            = 5,
+                window_size      = eval_cfg.get("pool_window", 100),
+                base             = "al_pool_v1")
     
             # pool window log -----------------------------------------------
             n_thin = len(thin_idx)
