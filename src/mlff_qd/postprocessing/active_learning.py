@@ -1355,7 +1355,7 @@ def adaptive_learning_mig_pool_windowed(
             print(f"  [DEBUG][OOD]   Pick {n+1}: γ₀={gamma0[keep[idx]]:.3f}, Dgain={gains_full[n]:.3f}")
 
         # --- Hybrid gain threshold + min_k fallback ---
-        gain_floor = np.percentile(gains_full, 85)  # top 20% only
+        gain_floor = np.percentile(gains_full, 90)  # top 20% only
         idx_keep = np.where(gains_full > gain_floor)[0]
         print(f"[Pool-AL]   {len(idx_keep)} frames above gain_floor={gain_floor:.3f}")
         
