@@ -2,10 +2,7 @@ import yaml
 import re
 import argparse
 
-def load_config(yaml_file):
-    with open(yaml_file, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+import mlff_qd.utils.helpers import load_config
 
 def save_neuqip_config_to_temp_yaml(neuqip_config, temp_file_name): # Modified to accept filename as arg
     with open(temp_file_name, 'w') as f:

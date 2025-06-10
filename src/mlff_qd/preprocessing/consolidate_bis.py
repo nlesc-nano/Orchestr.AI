@@ -8,11 +8,7 @@ import matplotlib.pyplot as plt
 from ase import Atoms
 from dscribe.descriptors import SOAP
 
-def load_config(config_file):
-    """Load input parameters from a YAML configuration file."""
-    with open(config_file, "r") as file:
-        config = yaml.safe_load(file)
-    return config
+from mlff_qd.utils.helpers import load_config
 
 def save_to_npz(filename, atomic_numbers, positions, energies, forces):
     """

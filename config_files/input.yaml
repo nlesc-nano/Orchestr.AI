@@ -10,6 +10,7 @@ settings:
     use_last_n: 100  # current testing
   # Model architecture settings
   model:
+    model_type: schnet # schnet , painn
     cutoff: 12.
     n_rbf: 20
     n_atom_basis: 128
