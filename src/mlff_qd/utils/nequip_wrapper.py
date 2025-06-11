@@ -7,39 +7,40 @@ from nequip.scripts.train import main as nequip_train_main
 
 def run_nequip_training(config_path):
     """
-    Run NequIP training with the specified config file using the latest NequIP version with Hydra.
+    Run NequIP or Allegro training with the specified config file using the latest NequIP version with Hydra.
     
     Args:
-        config_path (str): Path to the NequIP YAML config file.
+        config_path (str): Path to the NequIP or Allegro YAML config file.
     """
     try:
-        # Load config to check for specific settings
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
         
-        # Convert optimizer_betas to tuple if it exists
         if "optimizer_betas" in config and isinstance(config["optimizer_betas"], list):
             config["optimizer_betas"] = tuple(config["optimizer_betas"])
         
-        # Write updated config to a temporary file in the scratch directory
-        temp_dir = os.path.dirname(config_path)  # Use the existing scratch directory
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w", dir=temp_dir)
-        yaml.dump(config, temp_file)
+        if "data" in config and "split_dataset" in config["data"] and "p_mlff_qd_input_xyz" in config:
+            from mlff_qd.utils.data_conversion import preprocess_data_for_platform
+            converted_file = preprocess_data_for_platform(config["p_mlff_qd_input_xyz"], "nequip" if config.get("model", {}).get("_target_") != "allegro.model.AllegroModel" else "allegro")
+            config["data"]["split_dataset"]["file_path"] = converted_file
+        
+        temp_dir = os.path.dirname(config_path)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w", encoding="utf-8", dir=temp_dir)
+        yaml.dump(config, temp_file, allow_unicode=True)
+        temp_file.flush()
         temp_file.close()
         updated_config_path = temp_file.name
-        config_name = os.path.basename(updated_config_path)  # e.g., tmpm9p3l_h9.yaml
+        config_name = os.path.basename(updated_config_path)
 
-        # Construct argv with -cp and -cn
         argv = ["nequip-train", "-cp", temp_dir, "-cn", config_name]
         
-        # Preserve original sys.argv
         original_argv = sys.argv
         sys.argv = argv
         try:
             nequip_train_main()
         finally:
             sys.argv = original_argv
-            os.unlink(updated_config_path)  # Clean up temporary file
+            os.unlink(updated_config_path)
     except Exception as e:
-        logging.error(f"NequIP training failed with config {config_path}: {str(e)}")
+        logging.error(f"NequIP/Allegro training failed with config {config_path}: {str(e)}")
         raise
