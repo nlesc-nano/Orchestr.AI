@@ -1,24 +1,10 @@
 import numpy as np
 import argparse
 
-from mlff_qd.utils.io import parse_positions_xyz
+from mlff_qd.utils.io import parse_positions_xyz, parse_forces_xyz
 
 HARTREE_TO_EV = 27.2114
 HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
-
-def parse_forces_xyz(filename, num_atoms):
-    print(f"Parsing forces XYZ file: {filename}")
-    forces = []
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2
-        for i in range(0, len(lines), num_lines_per_frame):
-            frame_forces = []
-            for j in range(2, 2 + num_atoms):
-                parts = lines[i + j].split()
-                frame_forces.append(list(map(float, parts[1:4])))
-            forces.append(frame_forces)
-    return np.array(forces)
 
 def get_num_atoms(filename):
     with open(filename, "r") as f:
