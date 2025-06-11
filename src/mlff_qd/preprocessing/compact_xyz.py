@@ -1,38 +1,10 @@
 import numpy as np
 import argparse
 
+from mlff_qd.utils.io import parse_positions_xyz
+
 HARTREE_TO_EV = 27.2114
 HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
-
-def parse_positions_xyz(filename, num_atoms):
-    print(f"Parsing positions XYZ file: {filename}")
-    positions = []
-    atom_types = []
-    total_energies = []
-
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2
-
-        for i in range(0, len(lines), num_lines_per_frame):
-            atom_lines = lines[i + 2:i + 2 + num_atoms]
-            comment_line = lines[i + 1]
-
-            try:
-                total_energy = float(comment_line.split("=")[-1].strip())
-                total_energies.append(total_energy)
-            except ValueError:
-                total_energies.append(None)
-
-            frame_positions = []
-            for line in atom_lines:
-                parts = line.split()
-                atom_types.append(parts[0])
-                frame_positions.append([float(x) for x in parts[1:4]])
-
-            positions.append(frame_positions)
-
-    return np.array(positions), atom_types[:num_atoms], total_energies
 
 def parse_forces_xyz(filename, num_atoms):
     print(f"Parsing forces XYZ file: {filename}")
