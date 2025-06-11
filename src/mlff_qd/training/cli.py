@@ -12,14 +12,14 @@ from mlff_qd.training.inference import run_schnet_inference
 def parse_args():
     parser = argparse.ArgumentParser(description="MLFF-QD CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
-    parser.add_argument("--engine", required=True, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
+    parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
     return parser.parse_args()
 
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO)
     config = load_config(args.config)
-    platform = args.engine.lower() 
+    platform = (args.engine or config.get("platform", "")).lower()
 
     # List of all supported platforms
     all_platforms = ["nequip", "allegro", "mace", "schnet", "painn", "fusion"]
