@@ -28,8 +28,8 @@ def extract_engine_yaml(master_yaml_path, platform):
             engine_cfg.update(config)  # Use the entire individual YAML for mace
         else:
             raise ValueError(f"No '{platform}' section found in the YAML config")
-    # For SchNet-based platforms (painn, fusion, nequip_painn_fusion), handle overrides
-    elif platform in ["painn", "fusion", "nequip_painn_fusion"]:
+    # For SchNet-based platforms (painn, fusion), handle overrides
+    elif platform in ["painn", "fusion"]:
         if is_unified and "schnet" in config and isinstance(config["schnet"], dict):
             engine_cfg.update(config["schnet"])
         elif not is_unified:
@@ -59,8 +59,8 @@ def extract_engine_yaml(master_yaml_path, platform):
         elif not is_unified:
             engine_cfg.update(config)  # Use the entire individual YAML
     
-    # For SchNet, PAINN, FUSION, and NEQUIP_PAINN_FUSION, wrap the configuration under 'settings', but avoid double wrapping
-    if platform in ["schnet", "painn", "fusion", "nequip_painn_fusion"]:
+    # For SchNet, PAINN and FUSION, wrap the configuration under 'settings', but avoid double wrapping
+    if platform in ["schnet", "painn", "fusion"]:
         if "settings" in engine_cfg:
             engine_cfg = {"settings": resolve_placeholders(engine_cfg["settings"], config)}
         else:
