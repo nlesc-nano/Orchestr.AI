@@ -1,16 +1,10 @@
 import numpy as np
 import argparse
 
-from mlff_qd.utils.io import parse_positions_xyz, parse_forces_xyz
+from mlff_qd.utils.io import parse_positions_xyz, parse_forces_xyz, get_num_atoms
 
 HARTREE_TO_EV = 27.2114
 HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
-
-def get_num_atoms(filename):
-    with open(filename, "r") as f:
-        num_atoms = int(f.readline().strip())
-    print(f"Number of atoms: {num_atoms}")
-    return num_atoms
 
 def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
     num_atoms = get_num_atoms(pos_file)
