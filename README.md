@@ -170,7 +170,7 @@ If an user wants to use an input file different from the default config.yaml, th
 ```bash
 python -m mlff_qd.training.fine_tuning --config input_file.yaml
 ```
-The postprocessing part of the code, requieres also to install the following packages: plotly, kneed-
+The postprocessing part of the code, requieres also to install the following packages: plotly, kneed.
 
 ## Extract Training Metrics from TensorBoard Event Files
 
