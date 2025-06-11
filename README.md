@@ -166,6 +166,11 @@ More details will be added in future versions, but the postprocessing code is ru
 ```bash
 python -m mlff_qd.postprocessing
 ```
+If an user wants to use an input file different from the default config.yaml, the procedure is the following:
+```bash
+python -m mlff_qd.training.fine_tuning --config input_file.yaml
+```
+The postprocessing part of the code, requieres also to install the following packages: plotly, kneed-
 
 ## Extract Training Metrics from TensorBoard Event Files
 
