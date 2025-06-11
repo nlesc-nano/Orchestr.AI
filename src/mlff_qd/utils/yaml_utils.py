@@ -67,7 +67,9 @@ def extract_engine_yaml(master_yaml_path, platform):
             engine_cfg = {"settings": resolve_placeholders(engine_cfg, config)}
     
     # Write to temp YAML
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w")
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{platform}.yaml", mode="w")
     yaml.dump(engine_cfg, temp)
     temp.close()
-    return temp.name
+    temp_path = temp.name
+    
+    return temp_path
