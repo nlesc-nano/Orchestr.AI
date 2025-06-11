@@ -6,7 +6,7 @@ from mlff_qd.utils.helpers import load_config
 from mlff_qd.utils.yaml_utils import extract_engine_yaml
 from mlff_qd.utils.nequip_wrapper import run_nequip_training
 from mlff_qd.utils.mace_wrapper import run_mace_training
-from mlff_qd.utils.training import run_schnet_training
+from mlff_qd.training.training import run_schnet_training
 from mlff_qd.training.inference import run_schnet_inference
 
 
