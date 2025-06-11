@@ -22,49 +22,45 @@ def extract_engine_yaml(master_yaml_path, platform):
     
     # For MACE, only use the platform-specific section, ignoring 'common'
     if platform == "mace":
-        if platform in config and isinstance(config[platform], dict):
+        if is_unified and platform in config and isinstance(config[platform], dict):
             engine_cfg.update(config[platform])
+        elif not is_unified:
+            engine_cfg.update(config)  # Use the entire individual YAML for mace
         else:
             raise ValueError(f"No '{platform}' section found in the YAML config")
-    else:
-        # For PAINN, use the 'schnet' section and override model_type
+    # For SchNet-based platforms (painn, fusion, nequip_painn_fusion), handle overrides
+    elif platform in ["painn", "fusion", "nequip_painn_fusion"]:
+        if is_unified and "schnet" in config and isinstance(config["schnet"], dict):
+            engine_cfg.update(config["schnet"])
+        elif not is_unified:
+            engine_cfg.update(config)  # Use the entire individual YAML
+            
+        # Apply platform-specific model overrides
+        if "model" not in engine_cfg:
+            engine_cfg["model"] = {}
         if platform == "painn":
-            if "schnet" in config and isinstance(config["schnet"], dict):
-                engine_cfg.update(config["schnet"])
-                if "model" not in engine_cfg:
-                    engine_cfg["model"] = {}
-                engine_cfg["model"]["model_type"] = "painn"
-            else:
-                raise ValueError("No 'schnet' section found in the YAML config for platform 'painn'")
-        # For FUSION (nequip_mace_interaction_fusion), use the 'schnet' section and merge model parameters
+            engine_cfg["model"]["model_type"] = "painn"
         elif platform == "fusion":
-            if "schnet" in config and isinstance(config["schnet"], dict):
-                engine_cfg.update(config["schnet"])
-                # Define new model parameters
-                new_model_params = {
-                    "model_type": "nequip_mace_interaction_fusion",
-                    "lmax": 2,
-                    "n_interactions_nequip": 1,
-                    "n_interactions_mace": 1
-                }
-                # Merge with existing model parameters
-                if "model" not in engine_cfg:
-                    engine_cfg["model"] = {}
-                engine_cfg["model"].update(new_model_params)
-            else:
-                raise ValueError("No 'schnet' section found in the YAML config for platform 'fusion'")
-
-        # For other platforms, merge 'common' and platform-specific sections
-        else:
-            if "common" in config:
-                engine_cfg.update(config["common"])
-            if is_unified and platform in config and isinstance(config[platform], dict):
-                engine_cfg.update(config[platform])
-            elif not is_unified:
-                engine_cfg.update(config)
+            engine_cfg["model"].update({
+                "model_type": "nequip_mace_interaction_fusion",
+                "lmax": 2,
+                "cutoff": 12.0,
+                "n_rbf": 40,
+                "n_atom_basis": 192,
+                "n_interactions_nequip": 1,
+                "n_interactions_mace": 1
+            })
+    # For other platforms (schnet, nequip, allegro), merge 'common' and platform-specific or use individual YAML
+    else:
+        if "common" in config:
+            engine_cfg.update(config["common"])
+        if is_unified and platform in config and isinstance(config[platform], dict):
+            engine_cfg.update(config[platform])
+        elif not is_unified:
+            engine_cfg.update(config)  # Use the entire individual YAML
     
     # For SchNet, PAINN, FUSION, and NEQUIP_PAINN_FUSION, wrap the configuration under 'settings', but avoid double wrapping
-    if platform in ["schnet", "painn", "fusion"]:
+    if platform in ["schnet", "painn", "fusion", "nequip_painn_fusion"]:
         if "settings" in engine_cfg:
             engine_cfg = {"settings": resolve_placeholders(engine_cfg["settings"], config)}
         else:
