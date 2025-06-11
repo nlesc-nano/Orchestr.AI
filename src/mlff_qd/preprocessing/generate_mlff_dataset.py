@@ -8,8 +8,7 @@ from pathlib import Path
 from dscribe.descriptors import SOAP
 
 from mlff_qd.utils.cluster import cluster_trajectory, compute_soap_descriptors
-from mlff_qd.utils.constants import ( hartree_bohr_to_eV_angstrom, hartree_to_eV,
-        bohr_to_angstrom, amu_to_kg, c )
+from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV
 from mlff_qd.utils.helpers import load_config_preproc
 from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz,
         parse_forces_xyz, get_num_atoms )

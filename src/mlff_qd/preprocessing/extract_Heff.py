@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import logging
 
+from mlff_qd.utils.constants import hartree_to_eV
+
 # Set up logging: log to both console and file.
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -20,9 +22,6 @@ logger.addHandler(file_handler)
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
-
-# Conversion factor
-HARTREE_TO_EV = 27.2114
 
 ########################
 # HDF5 Reading Section #
@@ -176,8 +175,8 @@ def process_all_frames(matrix_size, device=torch.device("cpu")):
             U, mo_energies = mo_data[point_label]
             H_eff = compute_effective_ks_matrix(H, U)
             eigvals, eigvecs = diagonalize_heff(H_eff)
-            eigvals_eV = eigvals.cpu().numpy() * HARTREE_TO_EV
-            mo_energies_eV = mo_energies * HARTREE_TO_EV
+            eigvals_eV = eigvals.cpu().numpy() * hartree_to_eV
+            mo_energies_eV = mo_energies * hartree_to_eV
 
             # In case of duplicate point labels, the last one will override.
             results[point_label] = {
@@ -212,4 +211,5 @@ if __name__ == "__main__":
     logger.info("Starting processing...")
     results = process_all_frames(args.matrix_size, device=device)
     logger.info("Processing completed.")
+
 

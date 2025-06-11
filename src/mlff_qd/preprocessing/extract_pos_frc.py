@@ -3,9 +3,7 @@ import argparse
 import re
 import glob
 
-# Conversion factors
-HARTREE_TO_EV = 27.211386245988
-HARTREE_BOHR_TO_EV_ANGSTROM = 51.42208619083232
+from mlff_qd.utils.constants import hartree_to_eV, hartree_bohr_to_eV_angstrom
 
 def extract_forces(forces_path):
     """Extract forces from forces.xyz file."""
@@ -170,7 +168,7 @@ def process_cp2k_jobs():
             forces_ev_block = f"{len(forces)}\nFrame = {frame_number}, units = eV/Å"
             for e, x, y, z in forces:
                 forces_hartree_block += f"\n{e} {x:12.8f} {y:12.8f} {z:12.8f}"
-                forces_ev_block += f"\n{e} {x * HARTREE_BOHR_TO_EV_ANGSTROM:12.8f} {y * HARTREE_BOHR_TO_EV_ANGSTROM:12.8f} {z * HARTREE_BOHR_TO_EV_ANGSTROM:12.8f}"
+                forces_ev_block += f"\n{e} {x * hartree_bohr_to_eV_angstrom:12.8f} {y * hartree_bohr_to_eV_angstrom:12.8f} {z * hartree_bohr_to_eV_angstrom:12.8f}"
             all_forces_hartree.append(forces_hartree_block)
             all_forces_ev.append(forces_ev_block)
 
@@ -187,7 +185,7 @@ def process_cp2k_jobs():
                 coords_block += f"\n{e} {x:12.8f} {y:12.8f} {z:12.8f}"
             
             all_coords_hartree.append((total_energy, coordinates, coords_block))
-            all_coords_ev.append((total_energy * HARTREE_TO_EV, coordinates, coords_block))
+            all_coords_ev.append((total_energy * hartree_to_eV, coordinates, coords_block))
 
             processed_frames[frame_number] = folder
 

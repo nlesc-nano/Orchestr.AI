@@ -1,10 +1,8 @@
 import numpy as np
 import argparse
 
+from mlff_qd.utils.constants import hartree_to_eV, hartree_bohr_to_eV_angstrom
 from mlff_qd.utils.io import parse_positions_xyz, parse_forces_xyz, get_num_atoms
-
-HARTREE_TO_EV = 27.2114
-HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
 
 def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
     num_atoms = get_num_atoms(pos_file)
@@ -12,8 +10,8 @@ def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
     forces = parse_forces_xyz(frc_file, num_atoms)
     assert positions.shape == forces.shape, "Mismatch in number of frames between positions and forces."
 
-    total_energies_ev = [e * HARTREE_TO_EV if e is not None else None for e in total_energies]
-    forces_ev = forces * HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM
+    total_energies_ev = [e * hartree_to_eV if e is not None else None for e in total_energies]
+    forces_ev = forces * hartree_bohr_to_eV_angstrom
 
     print(f"Creating stacked XYZ file in Hartree: {output_file_hartree}")
     with open(output_file_hartree, "w") as f:
