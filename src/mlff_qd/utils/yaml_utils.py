@@ -1,5 +1,4 @@
 import yaml
-import tempfile
 import os
 import logging
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
@@ -22,7 +21,6 @@ def extract_engine_yaml(master_yaml_path, platform):
     
     engine_cfg = {}
     is_unified = "common" in config
-    has_settings = "settings" in config
 
     # Extract p_mlff_qd_input_xyz from common (for unified) or root (for individual)
     input_xyz = config.get("common", {}).get("p_mlff_qd_input_xyz") or config.get("p_mlff_qd_input_xyz")
@@ -37,25 +35,31 @@ def extract_engine_yaml(master_yaml_path, platform):
     # For MACE, use the platform-specific section, ignoring 'common' for individual YAMLs
     if platform == "mace":
         if is_unified and platform in config and isinstance(config[platform], dict):
-            engine_cfg.update(config[platform])
+            engine_cfg.update(config[platform] or {})
         elif not is_unified:
-            engine_cfg.update(config)
+            engine_cfg.update(config or {})
         else:
             raise ValueError(f"No '{platform}' section found in the YAML config")
+        if "train_file" not in engine_cfg:
+            engine_cfg["train_file"] = {}
         if input_xyz and not engine_cfg.get("train_file"):
             engine_cfg["train_file"] = converted_file
-    # For SchNet-based platforms (painn, fusion, schnet), merge into a flat dictionary
+    # For SchNet-based platforms (painn, fusion, schnet), use schnet as base
     elif platform in ["painn", "fusion", "schnet"]:
-        # Start with platform-specific config if unified, or the whole config if individual
-        if is_unified and platform in config and isinstance(config[platform], dict):
-            engine_cfg.update(config[platform])
-        elif has_settings and "settings" in config:
-            engine_cfg.update(config["settings"])  # Use existing settings for individual YAMLs
-        elif not is_unified:
-            engine_cfg.update(config)
-        # Apply model overrides
+        # Initialize key dictionaries
         if "model" not in engine_cfg:
             engine_cfg["model"] = {}
+        if "data" not in engine_cfg:
+            engine_cfg["data"] = {}
+        # Start with platform-specific config if unified, or the whole config if individual
+        if is_unified and "schnet" in config and isinstance(config["schnet"], dict):
+            engine_cfg.update(config["schnet"] or {})
+        elif not is_unified:
+            engine_cfg.update(config or {})
+        # Re-initialize model to ensure it's a dictionary
+        if "model" not in engine_cfg or engine_cfg["model"] is None:
+            engine_cfg["model"] = {}
+        # Apply model overrides
         if platform == "painn":
             engine_cfg["model"]["model_type"] = "painn"
         elif platform == "fusion":
@@ -68,12 +72,14 @@ def extract_engine_yaml(master_yaml_path, platform):
                 "n_interactions_nequip": 1,
                 "n_interactions_mace": 1
             })
-        # Merge with common settings if unified
+        # Merge only specific common settings for unified YAMLs, ensuring general is a dictionary
         if is_unified and "common" in config:
-            engine_cfg.update(config["common"])
+            if "seed" in config["common"]:
+                engine_cfg["general"] = engine_cfg.get("general", {})
+                engine_cfg["general"]["seed"] = config["common"]["seed"]
+            if "p_mlff_qd_input_xyz" in config["common"]:
+                engine_cfg["p_mlff_qd_input_xyz"] = config["common"]["p_mlff_qd_input_xyz"]
         if input_xyz:
-            if "data" not in engine_cfg:
-                engine_cfg["data"] = {}
             engine_cfg["data"]["dataset_path"] = converted_file
     # For other platforms (nequip, allegro), merge 'common' and platform-specific or use individual YAML
     else:
@@ -81,10 +87,8 @@ def extract_engine_yaml(master_yaml_path, platform):
             engine_cfg.update(config["common"])
         if is_unified and platform in config and isinstance(config[platform], dict):
             engine_cfg.update(config[platform])
-        elif has_settings and "settings" in config:
-            engine_cfg.update(config["settings"])  # Use existing settings for individual YAMLs
         elif not is_unified:
-            engine_cfg.update(config)
+            engine_cfg.update(config or {})
         if platform in ["nequip", "allegro"] and input_xyz:
             if "data" not in engine_cfg:
                 engine_cfg["data"] = {}
@@ -97,11 +101,4 @@ def extract_engine_yaml(master_yaml_path, platform):
     if "p_mlff_qd_input_xyz" in engine_cfg:
         del engine_cfg["p_mlff_qd_input_xyz"]
     
-    # Write to temp YAML
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{platform}.yaml", mode="w", encoding="utf-8")
-    yaml.dump(engine_cfg, temp, allow_unicode=True)
-    temp.flush()
-    temp.close()
-    temp_path = temp.name
-    
-    return temp_path
+    return engine_cfg

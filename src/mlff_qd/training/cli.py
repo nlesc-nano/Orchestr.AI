@@ -14,7 +14,7 @@ from mlff_qd.training.inference import run_schnet_inference
 def parse_args():
     parser = argparse.ArgumentParser(description="MLFF-QD CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
-    parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
+    parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")  # Made required
     return parser.parse_args()
 
 def main():
@@ -30,54 +30,35 @@ def main():
     if platform not in all_platforms:
         raise ValueError(f"Unknown platform/engine: {platform}. Supported platforms are {all_platforms}")
 
+    # Use SCRATCH_DIR for temporary files if set, otherwise use default temp directory
+    scratch_dir = os.environ.get("SCRATCH_DIR", tempfile.gettempdir())
+    os.makedirs(scratch_dir, exist_ok=True)
+
     # Generate engine-specific YAML with updated config
-    engine_yaml = extract_engine_yaml(args.config, platform)
+    engine_yaml = os.path.join(scratch_dir, f"engine_{platform}.yaml")
+    engine_cfg = extract_engine_yaml(args.config, platform)
+    with open(engine_yaml, "w", encoding="utf-8") as f:
+        yaml.dump(engine_cfg, f)
+        logging.debug(f"Written engine_cfg for {platform}: {engine_cfg}")
+        with open(engine_yaml, "r", encoding="utf-8") as vf:
+            written_content = yaml.safe_load(vf)
+            logging.debug(f"Verified content of {engine_yaml}: {written_content}")
 
     try:
-        # Load the engine-specific config to adjust for training.py
-        with open(engine_yaml, "r", encoding="utf-8") as f:
-            engine_config = yaml.safe_load(f) or {}
-        
-        # For SchNet-based platforms, wrap flat or existing settings into a single settings structure
         if platform in ["schnet", "painn", "fusion"]:
-            adjusted_config = {"settings": {}}
-            # Merge settings from the original config (unified) or engine_config (individual)
-            settings_source = {}
-            if "common" in config:  # Unified YAML
-                settings_source.update(config["common"])
-            if platform in config and isinstance(config[platform], dict):  # Platform-specific settings
-                settings_source.update(config[platform])
-            settings_source.update(engine_config)  # Merge with engine_config (converted settings)
-            # Explicitly include general if present
-            if "general" in settings_source or "general" in engine_config:
-                adjusted_config["settings"]["general"] = settings_source.get("general", engine_config.get("general", {}))
-            # Copy other relevant keys
-            for key in ["data", "model", "outputs", "training", "logging", "testing", "resume_training", "fine_tuning"]:
-                if key in settings_source or key in engine_config:
-                    adjusted_config["settings"][key] = settings_source.get(key, engine_config.get(key, {}))
-            # Write adjusted config to a new temporary file
-            temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{platform}_adjusted.yaml", mode="w", encoding="utf-8")
-            yaml.dump(adjusted_config, temp, allow_unicode=True)
-            temp.flush()
-            temp.close()
-            adjusted_engine_yaml = temp.name
-            try:
-                run_schnet_training(adjusted_engine_yaml)
-                run_schnet_inference(adjusted_engine_yaml)
-            finally:
-                os.unlink(adjusted_engine_yaml)
-        else:
-            if platform == "nequip":
-                run_nequip_training(engine_yaml)
-            elif platform == "mace":
-                run_mace_training(engine_yaml)
-            elif platform == "allegro":
-                run_nequip_training(engine_yaml)
+            run_schnet_training(engine_yaml)
+            run_schnet_inference(engine_yaml)
+        elif platform == "nequip":
+            run_nequip_training(engine_yaml)
+        elif platform == "mace":
+            run_mace_training(engine_yaml)
+        elif platform == "allegro":
+            run_nequip_training(engine_yaml)
     except Exception as e:
         logging.error(f"Training or inference failed for platform {platform}: {str(e)}")
         raise
-    finally:
-        os.unlink(engine_yaml)  # Clean up the original engine YAML
+    # Delay cleanup to allow SLURddM job to access files (remove manually or via job script)
+    # os.unlink(engine_yaml)  # Commented out for now
 
 if __name__ == "__main__":
     main()

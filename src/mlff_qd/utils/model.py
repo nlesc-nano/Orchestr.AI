@@ -2842,24 +2842,24 @@ class CustomAtomwise(spk.atomistic.Atomwise):
         return inputs
 
 def setup_model(config):
-    model_type = config['settings']['model'].get('model_type', 'schnet')
-    cutoff = config['settings']['model']['cutoff']
-    n_rbf = config['settings']['model']['n_rbf']
-    n_atom_basis = config['settings']['model']['n_atom_basis']
-    #n_interactions = config['settings']['model']['n_interactions']
-    n_interactions = config['settings']['model'].get('n_interactions', 3) if model_type.lower() != 'fused_hybrid' else None
-    dropout_rate = config['settings']['model'].get('dropout_rate', 0.2)
-    n_layers = config['settings']['model'].get('n_layers', 2)
-    n_neurons = config['settings']['model'].get('n_neurons', None)
-    lmax = config['settings']['model'].get('lmax', 2)
+    model_type = config['model'].get('model_type', 'schnet')
+    cutoff = config['model']['cutoff']
+    n_rbf = config['model']['n_rbf']
+    n_atom_basis = config['model']['n_atom_basis']
+    #n_interactions = config['model']['n_interactions']
+    n_interactions = config['model'].get('n_interactions', 3) if model_type.lower() != 'fused_hybrid' else None
+    dropout_rate = config['model'].get('dropout_rate', 0.2)
+    n_layers = config['model'].get('n_layers', 2)
+    n_neurons = config['model'].get('n_neurons', None)
+    lmax = config['model'].get('lmax', 2)
 
     
-    n_interactions_e3nn = config['settings']['model'].get('n_interactions_e3nn', 1)
-    n_interactions_schnet = config['settings']['model'].get('n_interactions_schnet', 1)
-    n_interactions_nequip = config['settings']['model'].get('n_interactions_nequip', 1)
-    n_interactions_mace = config['settings']['model'].get('n_interactions_mace', 1)
-    n_interactions_painn = config['settings']['model'].get('n_interactions_painn', 1)
-    n_interactions_schnet = config['settings']['model'].get('n_interactions_schnet', 1)
+    n_interactions_e3nn = config['model'].get('n_interactions_e3nn', 1)
+    n_interactions_schnet = config['model'].get('n_interactions_schnet', 1)
+    n_interactions_nequip = config['model'].get('n_interactions_nequip', 1)
+    n_interactions_mace = config['model'].get('n_interactions_mace', 1)
+    n_interactions_painn = config['model'].get('n_interactions_painn', 1)
+    n_interactions_schnet = config['model'].get('n_interactions_schnet', 1)
     
     pairwise_distance = spk.atomistic.PairwiseDistances()
     precompute_harmonics = PrecomputeSphericalHarmonics(lmax=lmax)
@@ -3251,14 +3251,14 @@ def setup_model(config):
     output_energy = spk.task.ModelOutput(
         name="energy",
         loss_fn=torch.nn.MSELoss(),
-        loss_weight=config["settings"]["outputs"]["energy"]["loss_weight"],
+        loss_weight=config["outputs"]["energy"]["loss_weight"],
         metrics={"MAE": torchmetrics.MeanAbsoluteError()},
     )
 
     output_forces = spk.task.ModelOutput(
         name="forces",
         loss_fn=torch.nn.MSELoss(),
-        loss_weight=config["settings"]["outputs"]["forces"]["loss_weight"],
+        loss_weight=config["outputs"]["forces"]["loss_weight"],
         metrics={"MAE": torchmetrics.MeanAbsoluteError()},
     )
 

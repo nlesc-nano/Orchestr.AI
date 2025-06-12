@@ -154,12 +154,12 @@ def run_schnet_inference(config_file=None):
         
     config = load_config(config_file)
     
-    trained_model_path = config['settings']['testing']['trained_model_path']
+    trained_model_path = config['testing']['trained_model_path']
     print(f"Trained model path: {trained_model_path}")
-    db_path = os.path.join(trained_model_path, config['settings']['general']['database_name'])
+    db_path = os.path.join(trained_model_path, config['general']['database_name'])
     property_units = {
-        'energy': config['settings']['model']['property_unit_dict']['energy'],
-        'forces': config['settings']['model']['property_unit_dict']['forces']
+        'energy': config['model']['property_unit_dict']['energy'],
+        'forces': config['model']['property_unit_dict']['forces']
     }
     # Prepare transformations and data module   
     transformations = prepare_transformations(config,"infer")
@@ -185,7 +185,7 @@ def run_schnet_inference(config_file=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    model_name = config['settings']['logging']['checkpoint_dir']
+    model_name = config['logging']['checkpoint_dir']
     best_model_path = os.path.join(trained_model_path, model_name)
     best_model = torch.load(best_model_path, map_location=device)
 

@@ -119,3 +119,4 @@ def preprocess_data_for_platform(input_xyz, platform, output_dir="./converted_da
         return convert_to_mace_xyz(input_xyz, out_file)
     else:
         raise ValueError(f"Unsupported platform: {platform}")
+        
