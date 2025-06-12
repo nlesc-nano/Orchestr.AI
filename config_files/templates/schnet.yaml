@@ -1,0 +1,81 @@
+# General settings
+general:
+    seed: 42  # Random seed for reproducibility
+    database_name: 'CdSe.db'  # Name of the database file
+
+# Data handling settings
+data:
+    dataset_path: 
+    use_last_n: 100  # current testing
+# Model architecture settings
+model:
+    model_type: schnet   # Options: nequip_mace_so3tensor_fusion
+    cutoff: 12.
+    n_rbf: 40
+    n_atom_basis: 192
+    n_interactions: 2
+    
+    dropout_rate: null # Default is 0.1 but it will not work when you select only 1 layer
+    n_layers: 1  # Default is 1
+    n_neurons: null # [256, 128, 64, 32] (if null then n_neurons == n_atom_basis)
+    distance_unit: 'Ang'
+    property_unit_dict:
+      energy: 'eV'
+      forces: 'eV/Ang'
+
+# Output settings
+outputs:
+    energy:
+      loss_weight: 0.05
+      metrics: "MAE"
+    forces:
+      loss_weight: 0.95
+      metrics: "MAE"
+
+# Training settings
+training:
+    accelerator: 'gpu'
+    devices: 1
+    precision: 32
+    batch_size: 16
+    num_train: 800
+    num_val: 200
+    max_epochs: 3
+    num_workers: 24
+    pin_memory: true
+    optimizer:
+      type: 'AdamW'
+      lr: 0.0001 #changed 0.0001 to 0.001
+    scheduler:
+      type: 'ReduceLROnPlateau'
+      factor: 0.8
+      patience: 30
+      verbose: true
+
+# Logging and checkpoint settings
+logging:
+    folder: './results'
+    log_dir: "lightning_logs"
+    checkpoint_dir: "best_inference_model"
+    monitor: "val_loss"
+
+# Testing settings
+testing:
+    trained_model_path: './results'  # Path to load the trained model
+    csv_file_name: 'actual_vs_predicted_enrgforc.csv'  # Path to save the predictions CSV
+
+# Resume training settings
+resume_training:
+    resume_checkpoint_dir: null # Path to model checkpoint file if required 
+
+# Fine Tuning settings
+fine_tuning:
+    pretrained_checkpoint: # checkpoint file path
+    freeze_embedding: true
+    freeze_interactions_up_to: 2 # add no of layers
+    freeze_all_representation: true
+    lr: 0.00005
+    early_stopping_patience: 10
+    best_model_dir: fine_tuned_best_model  # Subdirectory only
+    checkpoint_dir: fine_tuned_checkpoints  # Subdirectory only
+    log_name: fine_tune_logs  # Subdirectory for TensorBoard logs
