@@ -14,7 +14,8 @@ from mlff_qd.training.inference import run_schnet_inference
 def parse_args():
     parser = argparse.ArgumentParser(description="MLFF-QD CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
-    parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")  # Made required
+    parser.add_argument("--engine", required=True, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
+    parser.add_argument("--input", help="Path to input XYZ file (overrides p_mlff_qd_input_xyz in YAML)")
     return parser.parse_args()
 
 def main():
@@ -36,7 +37,7 @@ def main():
 
     # Generate engine-specific YAML with updated config
     engine_yaml = os.path.join(scratch_dir, f"engine_{platform}.yaml")
-    engine_cfg = extract_engine_yaml(args.config, platform)
+    engine_cfg = extract_engine_yaml(args.config, platform, input_xyz=args.input)
     with open(engine_yaml, "w", encoding="utf-8") as f:
         yaml.dump(engine_cfg, f)
         logging.debug(f"Written engine_cfg for {platform}: {engine_cfg}")
@@ -57,8 +58,6 @@ def main():
     except Exception as e:
         logging.error(f"Training or inference failed for platform {platform}: {str(e)}")
         raise
-    # Delay cleanup to allow SLURddM job to access files (remove manually or via job script)
-    # os.unlink(engine_yaml)  # Commented out for now
 
 if __name__ == "__main__":
     main()
