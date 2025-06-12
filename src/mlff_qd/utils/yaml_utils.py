@@ -22,24 +22,24 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     engine_cfg = {}
     is_unified = "common" in config
 
-    # Extract p_mlff_qd_input_xyz from command line, common (for unified), or root (for individual)
+    # Extract input_xyz_file from command line, common (for unified), or root (for individual)
     if input_xyz is not None:
-        p_mlff_qd_input_xyz = input_xyz
-    elif is_unified and "common" in config and "p_mlff_qd_input_xyz" in config["common"]:
-        p_mlff_qd_input_xyz = config["common"]["p_mlff_qd_input_xyz"]
-        if p_mlff_qd_input_xyz is None or p_mlff_qd_input_xyz == "":
-            raise ValueError("p_mlff_qd_input_xyz in unified YAML 'common' section is empty or null. Please provide a valid path via --input argument.")
-    elif "p_mlff_qd_input_xyz" in config:
-        p_mlff_qd_input_xyz = config["p_mlff_qd_input_xyz"]
+        input_xyz_file = input_xyz
+    elif is_unified and "common" in config and "input_xyz_file" in config["common"]:
+        input_xyz_file = config["common"]["input_xyz_file"]
+        if input_xyz_file is None or input_xyz_file == "":
+            raise ValueError("input_xyz_file in unified YAML 'common' section is empty or null. Please provide a valid path via --input argument.")
+    elif "input_xyz_file" in config:
+        input_xyz_file = config["input_xyz_file"]
     else:
-        raise ValueError("p_mlff_qd_input_xyz not found in config or --input argument")
+        raise ValueError("input_xyz_file not found in config or --input argument")
 
-    if p_mlff_qd_input_xyz and not os.path.exists(p_mlff_qd_input_xyz):
-        raise ValueError(f"Input XYZ file not found or does not exist: {p_mlff_qd_input_xyz}")
+    if input_xyz_file and not os.path.exists(input_xyz_file):
+        raise ValueError(f"Input XYZ file not found or does not exist: {input_xyz_file}")
     
     # Preprocess data based on platform if input_xyz is provided
-    if p_mlff_qd_input_xyz:
-        converted_file = preprocess_data_for_platform(p_mlff_qd_input_xyz, platform, output_dir=os.path.join(os.path.dirname(p_mlff_qd_input_xyz), "converted_data"))
+    if input_xyz_file:
+        converted_file = preprocess_data_for_platform(input_xyz_file, platform, output_dir=os.path.join(os.path.dirname(input_xyz_file), "converted_data"))
         logging.info(f"Converted data file for {platform}: {converted_file}")
 
     # For MACE, use the platform-specific section, ignoring 'common' for individual YAMLs
@@ -52,7 +52,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
             raise ValueError(f"No '{platform}' section found in the YAML config")
         if "train_file" not in engine_cfg:
             engine_cfg["train_file"] = {}
-        if p_mlff_qd_input_xyz and not engine_cfg.get("train_file"):
+        if input_xyz_file and not engine_cfg.get("train_file"):
             engine_cfg["train_file"] = converted_file
     # For SchNet-based platforms (painn, fusion, schnet), use schnet as base
     elif platform in ["painn", "fusion", "schnet"]:
@@ -84,7 +84,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
             if "seed" in config["common"]:
                 engine_cfg["general"] = engine_cfg.get("general", {})
                 engine_cfg["general"]["seed"] = config["common"]["seed"]
-        if p_mlff_qd_input_xyz:
+        if input_xyz_file:
             engine_cfg["data"]["dataset_path"] = converted_file
     # For other platforms (nequip, allegro), merge 'common' and platform-specific or use individual YAML
     else:
@@ -94,7 +94,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
             engine_cfg.update(config[platform])
         elif not is_unified:
             engine_cfg.update(config or {})
-        if platform in ["nequip", "allegro"] and p_mlff_qd_input_xyz:
+        if platform in ["nequip", "allegro"] and input_xyz_file:
             if "data" not in engine_cfg:
                 engine_cfg["data"] = {}
             if "split_dataset" not in engine_cfg["data"]:
@@ -102,8 +102,8 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
             if not engine_cfg["data"]["split_dataset"].get("file_path"):
                 engine_cfg["data"]["split_dataset"]["file_path"] = converted_file
     
-    # Remove p_mlff_qd_input_xyz from the final config to avoid conflicts with downstream packages
-    if "p_mlff_qd_input_xyz" in engine_cfg:
-        del engine_cfg["p_mlff_qd_input_xyz"]
+    # Remove input_xyz_file from the final config to avoid conflicts with downstream packages
+    if "input_xyz_file" in engine_cfg:
+        del engine_cfg["input_xyz_file"]
     
     return engine_cfg

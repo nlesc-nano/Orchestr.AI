@@ -15,7 +15,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="MLFF-QD CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--engine", required=True, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
-    parser.add_argument("--input", help="Path to input XYZ file (overrides p_mlff_qd_input_xyz in YAML)")
+    parser.add_argument("--input", help="Path to input XYZ file (overrides input_xyz_file in YAML)")
     return parser.parse_args()
 
 def main():
