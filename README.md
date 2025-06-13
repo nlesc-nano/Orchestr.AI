@@ -1,8 +1,18 @@
 # MLFF_QD
-Machine Learning Force Fields for Quantum Dots platform.
+Machine Learning Force Fields for Quantum Dots platform. 🚀
 
 ## Installation
-Some packages are required to be installed before starting using our MLFF_QD platform. For the usage of the platform, we recommend to create a conda environment using Python 3.10. We recommend to install all the requiered packages, including the platform itself, in the same environment
+Some packages are required to be installed before starting using our MLFF_QD platform. For the usage of the platform, we recommend to create a conda environment using Python 3.10. We recommend to install all the required packages, including the platform itself, in the same environment.
+
+### Setting up the Conda Environment 🛠️
+To set up the environment, use the provided `environment.yaml` file to create a conda environment, activate it, and install the `mace-torch` package. Run the following commands:
+
+```diff
++ conda env create -f environment.yaml 🟢
++ conda activate <env_name> 🟢
++ pip install mace-torch==0.3.13 🟢
+```
+------
 
 ## Installation for the preprocessing tools
 Some packages are requiered for running the preprocessing. Below we explain what is requiered and how to install it:
@@ -108,39 +118,61 @@ However, if an user wants to specify a different custom configuration file for t
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
 ```
-### YAML Generation for SchNet and Nequip Training
 
-Use the `generate_scripts.py` script to automatically create a YAML configuration file for training. The script requires two parameters: the platform (`-p`) and the output file (`-o`).
+## MLFF-QD Training Guide
 
-#### Generate YAML for SchNet
-
-To generate a configuration file for SchNet, run:
-
+This loads the unified.yaml config and optionally overrides the engine at runtime.
+You can run any engine by changing `--engine` to one of:
 ```bash
-python generate_scripts.py -p schnet -o schnet.yaml
+schnet, painn, nequip, allegro, mace, fusion
 ```
+We are showing examples with nequip, you can choose anyone. **The training process will automatically convert the data format according to the platform (engine) selected.**
 
-This command produces `schnet.yaml` with all necessary settings for training using SchNet.
+### 🚀 Running Training Jobs
 
-#### Generate YAML for Nequip
+You can launch training jobs using either **`sbatch`** or directly through **Python** with a unified or engine-specific YAML configuration.
 
-```bash
-python generate_scripts.py -p nequip -o nequip.yaml
-```
+#### 🔧 Direct Python Execution
 
-This generates `nequip.yaml`, which is pre-configured for Nequip training.
-
-### Training
-If an user wants to run locally the training code, one can do the following:
+To run the training code locally, use the following command, which by default looks for a config file named `input.yaml`:
 ```bash
 python -m mlff_qd.training
 ```
-By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
+
+To specify a different config file, such as `unifiedYaml.yaml` with a specific engine (e.g., nequip), use:
 ```bash
-python -m mlff_qd.training --config input_file.yaml
+python -m mlff_qd.training --config unifiedYaml.yaml --engine nequip
 ```
 
-In the running_files folder there is an example of file for running the training, and afterwards the inference, in a cluster using a slurm queue system.
+Alternatively, for any other custom config file, you can specify it as follows:
+```bash
+python -m mlff_qd.training nequip.yaml --engine nequip
+```
+---
+
+#### 🟩 Commands Using Unified YAML (`unifiedYaml.yaml`)
+
+> `unifiedYaml.yaml` should contain `platform: nequip` and optionally `input_xyz_file`.
+
+| Use Case | Command | Notes |
+|----------|---------|-------|
+| Engine and input both defined in YAML | `sbatch run_idv.sh unifiedYaml.yaml` | `unifiedYaml.yaml` contains `platform: nequip` and `input_xyz_file` |
+| Engine overridden via CLI, input from YAML | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip` | Use if YAML has `input_xyz_file` but platform may vary |
+| Engine and input both overridden via CLI | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip --input ./basic.xyz` | Most flexible: ignores YAML settings |
+| Engine overridden, input missing | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip` | ❌ Will fail if `input_xyz_file` is missing from YAML |
+| Input passed via `--input`, YAML has no dataset | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip --input ./basic.xyz` | ✅ Safe way to inject input without editing YAML |
+
+---
+
+#### 🟦 Commands Using Engine-Specific YAML (e.g., `nequip.yaml`)
+
+> These YAMLs should include both `platform: nequip` and `input_xyz_file`.
+
+| Use Case | Command | Notes |
+|----------|---------|-------|
+| Use engine-specific YAML with `--engine` | `sbatch run_idv.sh nequip.yaml --engine nequip` | YAML must contain `input_xyz_file` |
+| Override input in engine-specific YAML | `sbatch run_idv.sh nequip.yaml --engine nequip --input ./basic.xyz` | Use to test with alternate datasets |
+
 
 ### Inference code
 After the training has finished, an user can run the inference code that generates the MLFF:
