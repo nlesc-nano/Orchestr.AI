@@ -10,11 +10,12 @@ from mlff_qd.utils.nequip_wrapper import run_nequip_training
 from mlff_qd.utils.mace_wrapper import run_mace_training
 from mlff_qd.training.training import run_schnet_training
 from mlff_qd.training.inference import run_schnet_inference
+from mlff_qd.utils.standardize_output import standardize_output
 
 def parse_args():
     parser = argparse.ArgumentParser(description="MLFF-QD CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
-    parser.add_argument("--engine", required=True, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
+    parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
     parser.add_argument("--input", help="Path to input XYZ file (overrides input_xyz_file in YAML)")
     return parser.parse_args()
 
@@ -55,6 +56,15 @@ def main():
             run_mace_training(engine_yaml)
         elif platform == "allegro":
             run_nequip_training(engine_yaml)
+            
+            
+        
+        #Standardize output after training/inference
+        #standardized_dir = os.path.join(scratch_dir, "standardized")
+        #standardize_output(platform, scratch_dir, standardized_dir)
+        #logging.info(f"Output standardized to {standardized_dir}")
+
+
     except Exception as e:
         logging.error(f"Training or inference failed for platform {platform}: {str(e)}")
         raise
