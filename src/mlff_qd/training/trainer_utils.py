@@ -72,7 +72,8 @@ def setup_task_and_trainer(config, nnpot, outputs, folder):
         max_epochs=config['training']['max_epochs'],
         accelerator=config['training']['accelerator'],
         precision=config['training']['precision'],
-        devices=config['training']['devices']
+        devices=config['training']['devices'],
+        log_every_n_steps=config['training']['log_every_n_steps']
     )
     
     logging.info("Task and trainer set up")
