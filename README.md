@@ -2,15 +2,15 @@
 Machine Learning Force Fields for Quantum Dots platform. 🚀
 
 ## Installation
-Some packages are required to be installed before starting using our MLFF_QD platform. For the usage of the platform, we recommend to create a conda environment using Python 3.10. We recommend to install all the required packages, including the platform itself, in the same environment.
+For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conde environment using Python 3.12. Details will be provided in the following sections.
 
 ### Setting up the Conda Environment 🛠️
-To set up the environment, use the provided `environment.yaml` file to create a conda environment, activate it, and install the `mace-torch` package. Run the following commands:
+To set up the conda environment, we recommend to use the provided `environment.yaml` file. Once the package is activated, we also recommend to install the `mace-torch` package. One can run the following commands:
 
-```diff
-+ conda env create -f environment.yaml 🟢
-+ conda activate <env_name> 🟢
-+ pip install mace-torch==0.3.13 🟢
+```bash
+conda env create -f environment.yaml
+conda activate mlff
+pip install mace-torch==0.3.13
 ```
 ------
 
