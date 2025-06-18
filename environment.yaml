@@ -1,4 +1,4 @@
-name: D_MLFF_latest3
+name: mlff
 channels:
   - defaults
   - conda-forge
