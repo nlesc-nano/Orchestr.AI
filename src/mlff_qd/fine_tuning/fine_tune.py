@@ -88,12 +88,12 @@ def check_architecture_compatibility(state_dict, model):
 
 def main(args):
     config = load_config(args.config)
-    set_seed(config['settings']['general']['seed'])
+    set_seed(config['general']['seed'])
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
 
-    folder = os.path.abspath(config['settings']['logging']['folder'])
+    folder = os.path.abspath(config['logging']['folder'])
     logging.info(f"Using output directory: {folder}")
 
     # some permision error, Verify folder exists and is writable
@@ -108,7 +108,7 @@ def main(args):
         raise
 
     data = load_data(config)
-    use_last_n = config['settings']['data'].get('use_last_n', None) # to select sample of data
+    use_last_n = config['data'].get('use_last_n', None) # to select sample of data
     atoms_list, property_list = preprocess_data(data)
     new_dataset, property_units = setup_logging_and_dataset(config, atoms_list, property_list)
     show_dataset_info(new_dataset)
@@ -116,7 +116,7 @@ def main(args):
     transformations = prepare_transformations(config,"train")
     custom_data = setup_data_module(
         config,
-        os.path.join(folder, config['settings']['general']['database_name']),
+        os.path.join(folder, config['general']['database_name']),
         transformations,
         property_units
     )
@@ -124,7 +124,7 @@ def main(args):
     nnpot, outputs = setup_model(config)
     
     # just to make sure fodler has checkpoints
-    fine_tune_checkpoint = config['settings']['fine_tuning'].get('pretrained_checkpoint')
+    fine_tune_checkpoint = config['fine_tuning'].get('pretrained_checkpoint')
     if not fine_tune_checkpoint or not os.path.exists(fine_tune_checkpoint):
         raise FileNotFoundError(f"Pre-trained checkpoint not found at {fine_tune_checkpoint}")
     
@@ -140,11 +140,11 @@ def main(args):
                 logging.info(f"Reshaped {key} from scalar to torch.Size([1])")
 
     
-    optimizer_name = config['settings']['training']['optimizer']['type']
-    scheduler_name = config['settings']['training']['scheduler']['type']
+    optimizer_name = config['training']['optimizer']['type']
+    scheduler_name = config['training']['scheduler']['type']
     optimizer_cls = get_optimizer_class(optimizer_name)
     scheduler_cls = get_scheduler_class(scheduler_name)
-    fine_tune_lr = config['settings']['fine_tuning'].get('lr', 1e-4) # if user want to change the learning rate
+    fine_tune_lr = config['fine_tuning'].get('lr', 1e-4) # if user want to change the learning rate
     
     # preapre the same architecture  
     task = spk.task.AtomisticTask(
@@ -155,11 +155,11 @@ def main(args):
         scheduler_cls=scheduler_cls,
         scheduler_args={
             "mode": "min",
-            "factor": config['settings']['training']['scheduler']['factor'],
-            "patience": config['settings']['training']['scheduler']['patience'],
-            "verbose": config['settings']['training']['scheduler']['verbose']
+            "factor": config['training']['scheduler']['factor'],
+            "patience": config['training']['scheduler']['patience'],
+            "verbose": config['training']['scheduler']['verbose']
         },
-        scheduler_monitor=config['settings']['logging']['monitor']
+        scheduler_monitor=config['logging']['monitor']
     )
     
     if not check_architecture_compatibility(state_dict, task.model):
@@ -169,17 +169,17 @@ def main(args):
     task.to(device)
     print_layer_info(task.model)
     
-    freeze_embedding = config['settings']['fine_tuning'].get('freeze_embedding', True)
-    freeze_interactions_up_to = config['settings']['fine_tuning'].get('freeze_interactions_up_to', 0)
-    freeze_all_representation = config['settings']['fine_tuning'].get('freeze_all_representation', False)
+    freeze_embedding = config['fine_tuning'].get('freeze_embedding', True)
+    freeze_interactions_up_to = config['fine_tuning'].get('freeze_interactions_up_to', 0)
+    freeze_all_representation = config['fine_tuning'].get('freeze_all_representation', False)
     freeze_layers(task.model, freeze_embedding, freeze_interactions_up_to, freeze_all_representation)
     log_trainable_layers(task.model) # if True mean that we are training that layers
     
     # Use YAML-configured subdirectories merged with logging.folder
-    folder = config['settings']['logging']['folder']
-    best_model_subdir = config['settings']['fine_tuning'].get('best_model_dir', "fine_tuned_best_model")
-    checkpoint_subdir = config['settings']['fine_tuning'].get('checkpoint_dir', "fine_tuned_checkpoints")
-    log_name = config['settings']['fine_tuning'].get('log_name', "fine_tune_logs")
+    folder = config['logging']['folder']
+    best_model_subdir = config['fine_tuning'].get('best_model_dir', "fine_tuned_best_model")
+    checkpoint_subdir = config['fine_tuning'].get('checkpoint_dir', "fine_tuned_checkpoints")
+    log_name = config['fine_tuning'].get('log_name', "fine_tune_logs")
     
     best_model_dir = os.path.join(folder, best_model_subdir)
     checkpoint_dir = os.path.join(folder, checkpoint_subdir)
@@ -191,7 +191,7 @@ def main(args):
         ModelCheckpoint(
             dirpath=checkpoint_dir,
             save_top_k=1,
-            monitor=config['settings']['logging']['monitor'],
+            monitor=config['logging']['monitor'],
             filename="fine_tuned-{epoch}-{val_loss:.4f}"
         ),
         SaveBestModelPt(save_dir=best_model_dir),
@@ -199,7 +199,7 @@ def main(args):
     ]
     
     # we should add in tranining also
-    early_stopping_patience = config['settings']['fine_tuning'].get('early_stopping_patience', 0)
+    early_stopping_patience = config['fine_tuning'].get('early_stopping_patience', 0)
     if early_stopping_patience > 0:
         callbacks.append(
             EarlyStopping(
@@ -220,10 +220,10 @@ def main(args):
         callbacks=callbacks,
         logger=logger,  # same as we do in training
         default_root_dir=folder,
-        max_epochs=config['settings']['training']['max_epochs'],
-        accelerator=config['settings']['training']['accelerator'],
-        precision=config['settings']['training']['precision'],
-        devices=config['settings']['training']['devices']
+        max_epochs=config['training']['max_epochs'],
+        accelerator=config['training']['accelerator'],
+        precision=config['training']['precision'],
+        devices=config['training']['devices']
     )
     
     logging.info("Starting fine-tuning")

@@ -1,0 +1,15 @@
+name: mlff
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.12
+  - pip
+  - pandas
+  - scikit-learn
+  - wandb
+  - pip:
+      - schnetpack
+      - nequip==0.10.0
+      - git+https://github.com/mir-group/allegro.git@v0.6.1
