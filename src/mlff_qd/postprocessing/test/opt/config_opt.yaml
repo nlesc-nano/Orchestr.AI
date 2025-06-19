@@ -6,15 +6,15 @@ prefactor: 14.39964
 log_file: "simulation.log"
 cache_path: "neighbor_cache"
 include_electrostatic: False 
-initial_xyz: "../CsPbBr3.xyz"
+initial_xyz: "CsPbBr3.xyz"
 
 run_type: "GEO_OPT"  # Change to "GEO_OPT" for geometry optimization
 
 eval:
   batch_size: 16  
   uncertainty: ["ensemble"]  
-  training_data: "../consolidated_dataset_100.xyz"  # Replace with actual path
-  eval_input_xyz: "../consolidated_dataset_150.xyz"
+  training_data: "consolidated_dataset_100.xyz"  # Replace with actual path
+  eval_input_xyz: "consolidated_dataset_150.xyz"
   eval_output_file: "output.xyz"
   eval_log_file: "eval_log.txt"
 #  unlabeled_pool_path: "md_trajectory.xyz"
