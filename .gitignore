@@ -12,4 +12,6 @@ src/mlff_qd/utils/__pycache__/*
 
 *png
 *log
-mlff_qd.egg-info/* 
+mlff_qd.egg-info/*
+
+src/mlff_qd/postprocessing/test/*/neighbor_cache/*
