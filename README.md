@@ -67,6 +67,9 @@ Apart from usual python packages such as numpy, scipy, sklearn or yaml, one need
 pip install periodictable
 ```
 
+## Installation for the postprocessing tools
+The following packages are required to be installed for using the postprocessing tools: plotly, kneed, hdbscan.
+
 ## Installation for the training
 Some packages are requiered for running the training. Below we explain what is requiered and how to install it.
 
