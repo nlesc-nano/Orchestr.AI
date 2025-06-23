@@ -158,6 +158,8 @@ KEY_MAPPINGS = {
     }
 }
 
+
+
 def update_nested_dict(d, keys, value):
     """Update a nested dictionary using a dot-separated key or list of keys."""
     if isinstance(keys, list):
@@ -202,33 +204,90 @@ def load_template(platform):
 
 # Add this new function at the top of the file, after imports
 def validate_and_fill_defaults(cfg, platform, defaults=COMMON_DEFAULTS):
-    """Recursively validate, fill missing keys, and filter out unmapped keys based on KEY_MAPPINGS."""
-    # Get all valid keys for this platform from KEY_MAPPINGS
-    valid_keys = set(KEY_MAPPINGS[platform].keys())
-    
+    """Recursively validate, fill missing keys, and filter out unmapped keys based on KEY_MAPPINGS and required keys."""
+
+    PLATFORM_MUST_KEEP = {
+        "nequip": {
+            "run", "data", "trainer", "training_module",
+            "global_options", "chemical_symbols",
+            "cutoff_radius", "model_type_names"
+        },
+        "allegro": {
+            "run", "data", "trainer", "training_module",
+            "global_options", "chemical_symbols",
+            "cutoff_radius", "model_type_names", "num_scalar_features"
+        },
+        "mace": {
+            "train_file", "valid_file", "test_file", "max_num_epochs",
+            "num_interactions", "num_channels", "optimizer", "scheduler",
+            "batch_size", "valid_batch_size", "num_workers", "device", "seed",
+            "scaling", "ema", "swa", "log_level", "model", "E0s", "r_max",
+            "lr", "start_swa", "weight_decay", "energy_weight", "forces_weight",
+            "swa_energy_weight", "swa_forces_weight", "avg_num_neighbors",
+            "compute_avg_num_neighbors", "correlation", "error_table",
+            "energy_key", "forces_key", "stress_key", "scheduler_patience",
+            "lr_scheduler_gamma", "lr_factor", "patience", "default_dtype",
+            "name", "valid_fraction", "num_cutoff_basis", "num_radial_basis",
+            "max_L", "max_ell", "eval_interval"
+        },
+        "schnet": {
+            "data", "training", "model", "general", "logging", "outputs",
+            "testing", "fine_tuning", "resume_training"
+        },
+        "painn": {
+            "data", "training", "model", "general", "logging", "outputs",
+            "testing", "fine_tuning", "resume_training"
+        },
+        "fusion": {
+            "data", "training", "model", "general", "logging", "outputs",
+            "testing", "fine_tuning", "resume_training"
+        }
+    }
+
+    must_keep_keys = PLATFORM_MUST_KEEP.get(platform, set())
+
+    # Flatten KEY_MAPPINGS to dot-path strings for comparison
+    mapped_keys_flat = {
+        mapped
+        for v in KEY_MAPPINGS[platform].values() if v
+        for mapped in (v if isinstance(v, list) else [v])
+    }
+
     def filter_dict(d, parent_keys=""):
         filtered = {}
         for key, value in list(d.items()):
-            current_path = f"{parent_keys}{key}" if not parent_keys else f"{parent_keys}.{key}"
-            
-            # Check if this key or its nested path is mapped
-            is_mapped = any(mapped_key.startswith(current_path + ".") or mapped_key == current_path 
-                           for mapped_key in [k for k in KEY_MAPPINGS[platform].values() if k])
-            
-            if isinstance(value, dict):
+            current_path = f"{parent_keys}.{key}" if parent_keys else key
+
+            is_mapped = any(
+                mapped_key.startswith(current_path + ".") or mapped_key == current_path
+                for mapped_key in mapped_keys_flat
+            )
+
+            # ✅ If this is a must-keep top-level key (e.g., training_module), keep its full subtree
+            if parent_keys == "" and key in must_keep_keys:
+                filtered[key] = value
+            elif isinstance(value, dict):
                 nested = filter_dict(value, current_path)
-                if nested or is_mapped:  # Keep nested dict if it has mapped keys or content
+                if nested or is_mapped:
                     filtered[key] = nested
-            elif key in valid_keys and key in defaults and value is None:
-                filtered[key] = defaults[key]  # Fill missing mapped keys with defaults
+            elif key in defaults and value is None:
+                filtered[key] = defaults[key]
             elif is_mapped:
-                filtered[key] = value  # Keep mapped keys with user/template values
+                # Keep only if this key wasn't meant to be remapped
+                if key not in KEY_MAPPINGS[platform]:
+                    filtered[key] = value
         return filtered
-    
-    # Apply filtering and validation
-    cfg.clear()  # Reset cfg to avoid residual template keys
-    updated_cfg = filter_dict(cfg)
-    cfg.update(updated_cfg)
+        
+    clean_cfg = filter_dict(cfg)
+    cfg.clear()
+    cfg.update(clean_cfg)
+
+    # 🔥 Remove top-level user-friendly keys after mapping
+    for user_key, mapped_path in KEY_MAPPINGS[platform].items():
+        # Do not remove keys required for interpolation like ${chemical_symbols}
+        if mapped_path and user_key not in ["chemical_symbols"]:
+            cfg.pop(user_key, None)
+
 
 # Update the extract_engine_yaml function, uncommenting validation
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
@@ -347,6 +406,6 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         del engine_cfg["input_xyz_file"]
     
     # Validate and fill missing defaults
-    # validate_and_fill_defaults(engine_cfg, platform)
+    validate_and_fill_defaults(engine_cfg, platform)
     
     return engine_cfg
