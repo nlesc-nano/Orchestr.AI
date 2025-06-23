@@ -122,15 +122,7 @@ However, if an user wants to specify a different custom configuration file for t
 python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
 ```
 
-## MLFF-QD Training Guide
-
-This loads the unified.yaml config and optionally overrides the engine at runtime.
-You can run any engine by changing `--engine` to one of:
-```bash
-schnet, painn, nequip, allegro, mace, fusion
-```
-We are showing examples with nequip, you can choose anyone. **The training process will automatically convert the data format according to the platform (engine) selected.**
-
+## Training Guide
 ### 🚀 Running Training Jobs
 
 You can launch training jobs using either **`sbatch`** or directly through **Python** with a unified or engine-specific YAML configuration.
@@ -152,6 +144,13 @@ Alternatively, for any other custom config file, you can specify it as follows:
 python -m mlff_qd.training nequip.yaml --engine nequip
 ```
 ---
+
+This loads the unified.yaml config and optionally overrides the engine at runtime.
+You can run any engine by changing `--engine` to one of:
+```bash
+schnet, painn, nequip, allegro, mace, fusion
+```
+We are showing examples with nequip, you can choose anyone. **The training process will automatically convert the data format according to the platform (engine) selected.**
 
 #### 🟩 Commands Using Unified YAML (`unifiedYaml.yaml`)
 
