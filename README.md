@@ -2,15 +2,15 @@
 Machine Learning Force Fields for Quantum Dots platform. 🚀
 
 ## Installation
-Some packages are required to be installed before starting using our MLFF_QD platform. For the usage of the platform, we recommend to create a conda environment using Python 3.10. We recommend to install all the required packages, including the platform itself, in the same environment.
+For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conde environment using Python 3.12. Details will be provided in the following sections.
 
 ### Setting up the Conda Environment 🛠️
-To set up the environment, use the provided `environment.yaml` file to create a conda environment, activate it, and install the `mace-torch` package. Run the following commands:
+To set up the conda environment, we recommend to use the provided `environment.yaml` file. Once the package is activated, we also recommend to install the `mace-torch` package. One can run the following commands:
 
-```diff
-+ conda env create -f environment.yaml 🟢
-+ conda activate <env_name> 🟢
-+ pip install mace-torch==0.3.13 🟢
+```bash
+conda env create -f environment.yaml
+conda activate mlff
+pip install mace-torch==0.3.13
 ```
 ------
 
@@ -67,6 +67,9 @@ Apart from usual python packages such as numpy, scipy, sklearn or yaml, one need
 pip install periodictable
 ```
 
+## Installation for the postprocessing tools
+The following packages are required to be installed for using the postprocessing tools: plotly, kneed, hdbscan.
+
 ## Installation for the training
 Some packages are requiered for running the training. Below we explain what is requiered and how to install it.
 
@@ -107,19 +110,31 @@ The current version of the platform is developped for being run in a cluster. Th
 This plaform is currently being subject of several changes. Thus, on the meanwhile, descriptions of the files will be included here so they can be used.
 
 ### Preprocessing tools
-An input file example for the preprocessing of the data can be found in config_files/preprocess_config.yaml. The initial data for being processed should be placed in a consistent way to the paths indicated in the input file. This preprocessing tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
+An input file example for the preprocessing of the data can be found in `config_files/preprocess_config.yaml`. The initial data for being processed should be placed in a consistent way to the paths indicated in the input file. This preprocessing tool is used for preparaing the xyz files in the useful formats after DFT calculations with CP2K.
 
-By default, the preprocessing code assumes that the input file is preprocess_config.yaml. If that is the case, it can be run as:
+By default, the preprocessing code assumes that the input file is `preprocess_config.yaml`. If that is the case, it can be run as:
 ```bash
 python -m mlff_qd.preprocessing.generate_mlff_dataset
 ```
 
 However, if an user wants to specify a different custom configuration file for the preprocessing, the code can be run as:
 ```bash
-python -m mlff_qd.preprocessing.generate_mlff_dataset --config config/my_experiment.yaml
+python -m mlff_qd.preprocessing.generate_mlff_dataset --config my_experiment.yaml
 ```
 
-## MLFF-QD Training Guide
+## Training Guide
+To run the training code, on can use the following command, which by default looks for a config file named `input.yaml`:
+```bash
+python -m mlff_qd.training
+```
+
+To specify a different config file, one should run the following command:
+```bash
+python -m mlff_qd.training nequip.yaml --engine nequip
+```
+One should note that in this case a specific engine (i.e. nequip) is added as a flag.
+
+---
 
 This loads the unified.yaml config and optionally overrides the engine at runtime.
 You can run any engine by changing `--engine` to one of:
@@ -127,28 +142,6 @@ You can run any engine by changing `--engine` to one of:
 schnet, painn, nequip, allegro, mace, fusion
 ```
 We are showing examples with nequip, you can choose anyone. **The training process will automatically convert the data format according to the platform (engine) selected.**
-
-### 🚀 Running Training Jobs
-
-You can launch training jobs using either **`sbatch`** or directly through **Python** with a unified or engine-specific YAML configuration.
-
-#### 🔧 Direct Python Execution
-
-To run the training code locally, use the following command, which by default looks for a config file named `input.yaml`:
-```bash
-python -m mlff_qd.training
-```
-
-To specify a different config file, such as `unifiedYaml.yaml` with a specific engine (e.g., nequip), use:
-```bash
-python -m mlff_qd.training --config unifiedYaml.yaml --engine nequip
-```
-
-Alternatively, for any other custom config file, you can specify it as follows:
-```bash
-python -m mlff_qd.training nequip.yaml --engine nequip
-```
----
 
 #### 🟩 Commands Using Unified YAML (`unifiedYaml.yaml`)
 
