@@ -1,352 +1,366 @@
 import yaml
 import os
 import logging
-from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 from copy import deepcopy
+from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
-# Common defaults for all platforms
-COMMON_DEFAULTS = {
-    "input_xyz_file": None,
-    "seed": 42,
-    "train_size": 800,
-    "val_size": 200,
-    "batch_size": 16,
-    "epochs": 3,
-    "output_dir": "./results",
-    "chemical_symbols": [],
-    "learning_rate": 0.001,
-    "energy_loss_weight": 0.05,
-    "forces_loss_weight": 0.95,
-    "n_rbf": 20,
-    "l_max": 1,
-    "optimizer": "AdamW",
-    "num_workers": 24,
-    "pin_memory": True,
-    "scheduler": {
-        "type": "ReduceLROnPlateau",
-        "factor": 0.8,
-        "patience": 5
-    },
-    "device": "cpu",
-    "log_every_n_steps":10
-}
-
-# Key mappings for standardized user inputs to platform-specific keys
+# Define nested key mappings for new YAML format
 KEY_MAPPINGS = {
-    "nequip": {
-        "input_xyz_file": "data.split_dataset.file_path",
-        "seed": ["data.seed", "model.seed"],
-        "train_size": "data.split_dataset.train",
-        "val_size": "data.split_dataset.val",
-        "batch_size": ["data.train_dataloader.batch_size", "data.val_dataloader.batch_size"],
-        "epochs": "trainer.max_epochs",
-        "output_dir": ["trainer.logger.save_dir", "trainer.callbacks[1].dirpath"],
-        "chemical_symbols": ["data.transforms[1].chemical_symbols", "model.type_names", "model.pair_potential.chemical_species"],
-        "learning_rate": "training_module.optimizer.lr",
-        "energy_loss_weight": "training_module.loss.coeffs.total_energy",
-        "forces_loss_weight": "training_module.loss.coeffs.forces",
-        "n_rbf": "model.num_bessels",
-        "l_max": "model.l_max",
-        "optimizer": "training_module.optimizer._target_",
-        "num_workers": "data.num_workers",
-        "pin_memory": "data.pin_memory",
-        "scheduler": "training_module.scheduler",
-        "log_every_n_steps":"trainer.log_every_n_steps",
-        "device": "trainer.accelerator"
-    },
-    "allegro": {
-        "input_xyz_file": "data.split_dataset.file_path",
-        "seed": ["data.seed", "model.seed"],
-        "train_size": "data.split_dataset.train",
-        "val_size": "data.split_dataset.val",
-        "batch_size": ["data.train_dataloader.batch_size", "data.val_dataloader.batch_size"],
-        "epochs": "trainer.max_epochs",
-        "output_dir": ["trainer.logger.save_dir", "trainer.callbacks[1].dirpath"],
-        "chemical_symbols": ["data.transforms[1].chemical_symbols", "model.type_names", "model.pair_potential.chemical_species"],
-        "learning_rate": "training_module.optimizer.lr",
-        "energy_loss_weight": "training_module.loss.coeffs.total_energy",
-        "forces_loss_weight": "training_module.loss.coeffs.forces",
-        "n_rbf": "model.radial_chemical_embed.num_bessels",
-        "l_max": "model.l_max",
-        "optimizer": "training_module.optimizer._target_",
-        "num_workers": "data.num_workers",
-        "pin_memory": "data.pin_memory",
-        "scheduler": "training_module.scheduler",
-        "log_every_n_steps":"trainer.log_every_n_steps",
-        "device": "trainer.accelerator"
-    },
-    "mace": {
-        "input_xyz_file": "train_file",
-        "seed": "seed",
-        "batch_size": "batch_size",
-        "epochs": "max_num_epochs",
-        "learning_rate": "lr",
-        "energy_loss_weight": None,
-        "forces_loss_weight": None,
-        "n_rbf": "num_radial_basis",
-        "l_max": "max_ell",
-        "optimizer": "optimizer.type",
-        "num_workers": None,
-        "pin_memory": None,
-        "scheduler": None,
-        "device": "device",
-        "layers": "num_interactions",
-        "features": "num_channels"
-    },
     "schnet": {
-        "input_xyz_file": "data.dataset_path",
-        "seed": "general.seed",
-        "train_size": "training.num_train",
-        "val_size": "training.num_val",
-        "batch_size": "training.batch_size",
-        "epochs": "training.max_epochs",
-        "output_dir": ["logging.folder", "testing.trained_model_path"],
-        "chemical_symbols": None,
-        "learning_rate": "training.optimizer.lr",
-        "energy_loss_weight": "outputs.energy.loss_weight",
-        "forces_loss_weight": "outputs.forces.loss_weight",
-        "n_rbf": "model.n_rbf",
-        "l_max": None,
-        "optimizer": "training.optimizer.type",
-        "num_workers": "training.num_workers",
-        "pin_memory": "training.pin_memory",
-        "scheduler": "training.scheduler",
-        "log_every_n_steps":"training.log_every_n_steps",
-        "device": "training.accelerator"
+        "model.cutoff": ["model.cutoff"],
+        "model.layers": ["model.num_interactions"],
+        "model.features": ["model.n_atom_basis"],
+        "model.n_rbf": ["model.n_rbf"],
+        "model.l_max": ["model.l_max"],
+        "model.chemical_symbols": ["model.chemical_symbols"],
+        "training.seed": ["general.seed"],
+        "training.batch_size": ["training.batch_size"],
+        "training.epochs": ["training.max_epochs"],
+        "training.learning_rate": ["training.optimizer.lr"],
+        "training.optimizer": ["training.optimizer.type"],
+        "training.scheduler": ["training.scheduler"],
+        "training.num_workers": ["training.num_workers"],
+        "training.pin_memory": ["training.pin_memory"],
+        "training.log_every_n_steps": ["training.log_every_n_steps"],
+        "training.device": ["training.accelerator"],
+        "training.train_size": ["training.num_train"],
+        "training.val_size": ["training.num_val"],
+        "output.output_dir": ["logging.folder", "testing.trained_model_path"],
+        "output.energy_loss_weight": ["outputs.energy.loss_weight"],
+        "output.forces_loss_weight": ["outputs.forces.loss_weight"],
+        "data.input_xyz_file": ["data.dataset_path"],
     },
-    "painn": {
-        "input_xyz_file": "data.dataset_path",
-        "seed": "general.seed",
-        "train_size": "training.num_train",
-        "val_size": "training.num_val",
-        "batch_size": "training.batch_size",
-        "epochs": "training.max_epochs",
-        "output_dir": ["logging.folder", "testing.trained_model_path"],
-        "chemical_symbols": None,
-        "learning_rate": "training.optimizer.lr",
-        "energy_loss_weight": "outputs.energy.loss_weight",
-        "forces_loss_weight": "outputs.forces.loss_weight",
-        "n_rbf": "model.n_rbf",
-        "l_max": None,
-        "optimizer": "training.optimizer.type",
-        "num_workers": "training.num_workers",
-        "pin_memory": "training.pin_memory",
-        "scheduler": "training.scheduler",
-        "log_every_n_steps":"training.log_every_n_steps",
-        "device": "training.accelerator"
+    "painn": {},  # Will inherit from schnet and apply patch in code
+    "fusion": {}, # Will inherit from schnet and apply patch in code
+    "nequip": {
+        "model.cutoff": ["training_module.model.r_max"],
+        "model.layers": ["training_module.model.num_layers"],
+        "model.features": ["training_module.model.num_features"],  
+        "model.n_rbf": ["training_module.model.num_bessels"],
+        "model.l_max": ["training_module.model.l_max"],
+        "model.chemical_symbols": [
+            "chemical_symbols",  # root-level in template
+            "training_module.model.type_names",
+            "data.transforms[1].chemical_symbols",
+            "training_module.model.pair_potential.chemical_species"
+        ],
+        "model.parity": ["training_module.model.parity"],
+        "model.model_dtype": ["training_module.model.model_dtype"],
+        "training.seed": ["data.seed", "training_module.model.seed"],
+        "training.batch_size": [
+            "data.train_dataloader.batch_size",
+            "data.val_dataloader.batch_size"
+        ],
+        "training.epochs": ["trainer.max_epochs"],
+        "training.learning_rate": ["training_module.optimizer.lr"],
+        "training.optimizer": ["training_module.optimizer._target_"],
+        "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # Or ...scheduler.type if you use a string
+        "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
+        "training.pin_memory": [],  # not in template, add if needed
+        "training.log_every_n_steps": ["trainer.log_every_n_steps"],
+        "training.device": ["device", "trainer.accelerator"],  # your template uses 'device'
+        "training.train_size": ["data.split_dataset.train"],
+        "training.val_size": ["data.split_dataset.val"],
+        "data.input_xyz_file": ["data.split_dataset.file_path"],
+        "output.output_dir": ["trainer.callbacks[1].dirpath", "trainer.logger[0].save_dir"],
+        "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
+        "loss.forces_weight": ["training_module.loss.coeffs.forces"],
     },
-    "fusion": {
-        "input_xyz_file": "data.dataset_path",
-        "seed": "general.seed",
-        "train_size": "training.num_train",
-        "val_size": "training.num_val",
-        "batch_size": "training.batch_size",
-        "epochs": "training.max_epochs",
-        "output_dir": ["logging.folder", "testing.trained_model_path"],
-        "chemical_symbols": None,
-        "learning_rate": "training.optimizer.lr",
-        "energy_loss_weight": "outputs.energy.loss_weight",
-        "forces_loss_weight": "outputs.forces.loss_weight",
-        "n_rbf": "model.n_rbf",
-        "l_max": "model.l_max",
-        "optimizer": "training.optimizer.type",
-        "num_workers": "training.num_workers",
-        "pin_memory": "training.pin_memory",
-        "scheduler": "training.scheduler",
-        "log_every_n_steps":"training.log_every_n_steps",
-        "device": "training.accelerator"
-    }
+    
+    "allegro": {
+        "model.cutoff": ["training_module.model.r_max"],
+        "model.layers": ["training_module.model.num_layers"],
+        "model.features": ["training_module.model.num_scalar_features"],  # Allegro: num_scalar_features
+        "model.n_rbf": ["training_module.model.radial_chemical_embed.num_bessels"],
+        "model.l_max": ["training_module.model.l_max"],
+        "model.chemical_symbols": [
+            "chemical_symbols",
+            "training_module.model.type_names",
+            "data.transforms[1].chemical_symbols",
+            "training_module.model.pair_potential.chemical_species"
+        ],
+        "model.parity": ["training_module.model.parity"],
+        "model.model_dtype": ["training_module.model.model_dtype"],
+        "training.seed": ["data.seed", "training_module.model.seed"],
+        "training.batch_size": [
+            "data.train_dataloader.batch_size",
+            "data.val_dataloader.batch_size"
+        ],
+        "training.epochs": ["trainer.max_epochs"],
+        "training.learning_rate": ["training_module.optimizer.lr"],
+        "training.optimizer": ["training_module.optimizer._target_"],
+        "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # same as NequIP
+        "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
+        "training.pin_memory": [],  # not in template
+        "training.log_every_n_steps": ["trainer.log_every_n_steps"],
+        "training.device": ["device", "trainer.accelerator"],
+        "training.train_size": ["data.split_dataset.train"],
+        "training.val_size": ["data.split_dataset.val"],
+        "data.input_xyz_file": ["data.split_dataset.file_path"],
+        "output.output_dir": ["trainer.callbacks[0].dirpath", "trainer.logger[0].save_dir"],
+        "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
+        "loss.forces_weight": ["training_module.loss.coeffs.forces"],
+    },
+
+    "mace": {
+        "model.cutoff": ["r_max"],
+        "model.layers": ["num_interactions"],
+        "model.features": ["num_channels"],
+        "model.n_rbf": ["num_radial_basis"],
+        "model.l_max": ["max_L"],
+        "model.chemical_symbols": ["chemical_symbols"],
+        "training.seed": ["seed"],
+        "training.batch_size": ["batch_size"],
+        "training.epochs": ["max_num_epochs"],
+        "training.learning_rate": ["lr"],
+        "training.optimizer": ["optimizer"],  # string field in your template
+        "training.scheduler": ["scheduler"],  # string field in your template
+        "training.num_workers": ["num_workers"],
+        "training.pin_memory": ["pin_memory"],
+        "training.log_every_n_steps": ["eval_interval"],
+        "training.device": ["device"],
+        "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful
+        "training.val_size": ["valid_file"],
+        "data.input_xyz_file": ["train_file"],  # (overwrites train_file path with converted dataset)
+        "output.output_dir": [],  # Not present as key, could be directory for output, add if needed
+        "loss.energy_weight": ["energy_weight"],
+        "loss.forces_weight": ["forces_weight"],
+    },
 }
 
-def update_nested_dict(d, keys, value):
-    """Update a nested dictionary using a dot-separated key or list of keys."""
-    if isinstance(keys, list):
-        for key_path in keys:
-            current = d
-            key_list = key_path.split(".")
-            for key in key_list[:-1]:
-                current = current.setdefault(key, {})
-            current[key_list[-1]] = value
-    else:
-        current = d
-        key_list = keys.split(".")
-        for key in key_list[:-1]:
-            current = current.setdefault(key, {})
-        current[key_list[-1]] = value
 
-def resolve_placeholders(config, parent_config=None):
-    if parent_config is None:
-        parent_config = config
-    if isinstance(config, dict):
-        return {k: resolve_placeholders(v, parent_config) for k, v in config.items()}
-    elif isinstance(config, list):
-        return [resolve_placeholders(item, parent_config) for item in config]
-    elif isinstance(config, str) and config.startswith("${") and config.endswith("}"):
-        key = config[2:-1]
-        keys = key.split(".")
-        current = parent_config
-        for k in keys:
-            current = current.get(k, config)
-            if current == config:
-                return config
-        return current
-    return config
+OPTIMIZER_TARGETS = {
+    "AdamW": "torch.optim.AdamW",
+    "Adam": "torch.optim.Adam",
+    "SGD": "torch.optim.SGD",
+    # add more if needed
+}
+
+def preprocess_optimizer(user_cfg):
+    # Recursively process nested user_cfg
+    if isinstance(user_cfg, dict):
+        for k, v in user_cfg.items():
+            if k == "optimizer" and isinstance(v, str) and v in OPTIMIZER_TARGETS:
+                user_cfg[k] = {"_target_": OPTIMIZER_TARGETS[v]}
+            elif isinstance(v, dict):
+                preprocess_optimizer(v)
+    return user_cfg
+    
+# Patch painn/fusion mapping to schnet (they use the same template)
+for plat in ["painn", "fusion"]:
+    KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
 def load_template(platform):
-    """Load platform-specific template from the mlff_qd/templates directory."""
-    template_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", f"{platform}.yaml")
+    """Load platform-specific template from the templates directory."""
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    template_path = os.path.join(base_dir, "templates", f"{platform if platform != 'painn' and platform != 'fusion' else 'schnet'}.yaml")
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template file for {platform} not found at {template_path}")
     with open(template_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-# Add this new function at the top of the file, after imports
-def validate_and_fill_defaults(cfg, platform, defaults=COMMON_DEFAULTS):
-    """Recursively validate, fill missing keys, and filter out unmapped keys based on KEY_MAPPINGS."""
-    # Get all valid keys for this platform from KEY_MAPPINGS
-    valid_keys = set(KEY_MAPPINGS[platform].keys())
+def set_nestedx(cfg, keys, value):
+    """Set value in cfg at nested keys (list)."""
+    current = cfg
+    for k in keys[:-1]:
+        if k not in current or not isinstance(current[k], dict):
+            current[k] = {}
+        current = current[k]
+    current[keys[-1]] = value
     
-    def filter_dict(d, parent_keys=""):
-        filtered = {}
-        for key, value in list(d.items()):
-            current_path = f"{parent_keys}{key}" if not parent_keys else f"{parent_keys}.{key}"
-            
-            # Check if this key or its nested path is mapped
-            is_mapped = any(mapped_key.startswith(current_path + ".") or mapped_key == current_path 
-                           for mapped_key in [k for k in KEY_MAPPINGS[platform].values() if k])
-            
-            if isinstance(value, dict):
-                nested = filter_dict(value, current_path)
-                if nested or is_mapped:  # Keep nested dict if it has mapped keys or content
-                    filtered[key] = nested
-            elif key in valid_keys and key in defaults and value is None:
-                filtered[key] = defaults[key]  # Fill missing mapped keys with defaults
-            elif is_mapped:
-                filtered[key] = value  # Keep mapped keys with user/template values
-        return filtered
     
-    # Apply filtering and validation
-    cfg.clear()  # Reset cfg to avoid residual template keys
-    updated_cfg = filter_dict(cfg)
-    cfg.update(updated_cfg)
+def set_nested(cfg, keys, value):
+    """Set value in cfg at nested keys (handles dicts and [list] indices)."""
+    current = cfg
+    for idx, k in enumerate(keys[:-1]):
+        # Handle lists, e.g., "callbacks[1]"
+        if "[" in k and k.endswith("]"):
+            base, idx_str = k[:-1].split("[")
+            idx_int = int(idx_str)
+            # Create the base list if it doesn't exist
+            if base not in current or not isinstance(current[base], list):
+                current[base] = []
+            # Extend list to desired length if necessary
+            while len(current[base]) <= idx_int:
+                current[base].append({})
+            current = current[base][idx_int]
+        else:
+            # Standard dict path
+            if k not in current or not isinstance(current[k], dict):
+                current[k] = {}
+            current = current[k]
+    last = keys[-1]
+    # Handle list on final key
+    if "[" in last and last.endswith("]"):
+        base, idx_str = last[:-1].split("[")
+        idx_int = int(idx_str)
+        if base not in current or not isinstance(current[base], list):
+            current[base] = []
+        while len(current[base]) <= idx_int:
+            current[base].append({})
+        current[base][idx_int] = value
+    else:
+        current[last] = value
 
-# Update the extract_engine_yaml function, uncommenting validation
+
+def get_nested(cfg, keys):
+    """Get value from cfg at nested keys (list), return None if not found."""
+    current = cfg
+    for k in keys:
+        if isinstance(current, dict) and k in current:
+            current = current[k]
+        else:
+            return None
+    return current
+
+def flatten_dict(d, parent_key="", sep="."):
+    """Flatten nested dictionary to dot-separated keys."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+def apply_key_mapping(user_cfg, engine_cfg, key_mapping):
+    """Map user (dot) keys into engine_cfg using mapping."""
+    flat_user = flatten_dict(user_cfg)
+    for user_key, value in flat_user.items():
+        if user_key in key_mapping:
+            for engine_path in key_mapping[user_key]:
+                set_nested(engine_cfg, engine_path.split("."), value)
+                
+
+def prune_to_template(cfg, template):
+    """Remove keys in cfg that do not exist in template (recursive)."""
+    if not isinstance(cfg, dict) or not isinstance(template, dict):
+        return cfg
+    pruned = {}
+    for k, v in cfg.items():
+        if k in template:
+            if isinstance(v, dict):
+                pruned[k] = prune_to_template(v, template[k])
+            else:
+                pruned[k] = v
+    return pruned
+
+def adjust_splits_for_engine(train_size, val_size, test_size, platform):
+    if platform in ["schnet", "painn", "fusion"]:
+        # Only use train/val
+        if (train_size + val_size) < 1.0:
+            missing = 1.0 - (train_size + val_size)
+            val_size += missing
+            print(f"[WARNING] {platform}: test_size will be ignored. Adjusted val_size to {val_size:.3f} so train+val=1.0")
+        elif (train_size + val_size) > 1.0:
+            total = train_size + val_size
+            train_size /= total
+            val_size /= total
+            print(f"[WARNING] {platform}: train+val > 1.0, normalized both so train+val=1.0")
+        # test_size ignored
+        test_size = 0.0
+    elif platform in ["nequip", "allegro"]:
+        # Use all three, but ensure sum to 1.0
+        total = train_size + val_size + test_size
+        if abs(total - 1.0) > 1e-6:
+            train_size /= total
+            val_size  /= total
+            test_size /= total
+            print(f"[WARNING] {platform}: train+val+test != 1.0; normalized all so they sum to 1.0")
+    return train_size, val_size, test_size
+
+def smart_round(x, ndigits=4):
+    return round(float(x), ndigits)
+
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
+    """
+    Generate an engine-specific YAML dict from the unified YAML config file and platform.
+    All overrides logic is REMOVED.
+    """
     with open(master_yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-    
-    engine_cfg = deepcopy(load_template(platform))  # Load template as base
-    is_unified = "common" in config
 
-    # Extract input_xyz_file from command line, common (for unified), or root (for individual)
-    if input_xyz is not None:
+    # Load base template for engine (always schnet for painn/fusion)
+    engine_base = load_template(platform)
+
+    # --- Flatten user config (we only look at `common` block) ---
+    if "common" not in config:
+        raise ValueError("New YAML must have a `common:` section at top level.")
+    user_cfg = config["common"]
+    
+    user_cfg = preprocess_optimizer(user_cfg)
+
+    # --- Extract and normalize splits ---
+    training_cfg = user_cfg.get("training", {})
+    train_size = training_cfg.get("train_size", 0.8)
+    val_size   = training_cfg.get("val_size", 0.2)
+    test_size  = training_cfg.get("test_size", 0.0)
+    
+    
+    train_size, val_size, test_size = adjust_splits_for_engine(
+        train_size, val_size, test_size, platform
+    )
+    
+    train_size = smart_round(train_size)
+    val_size   = smart_round(val_size)
+    test_size  = smart_round(test_size)
+
+    # -- Find input_xyz_file --
+    input_xyz_file = None
+    if "data" in user_cfg and "input_xyz_file" in user_cfg["data"]:
+        input_xyz_file = user_cfg["data"]["input_xyz_file"]
+    elif "input_xyz_file" in user_cfg:
+        input_xyz_file = user_cfg["input_xyz_file"]
+    if input_xyz:
         input_xyz_file = input_xyz
-    elif is_unified and "common" in config and "input_xyz_file" in config["common"]:
-        input_xyz_file = config["common"]["input_xyz_file"]
-        if input_xyz_file is None or input_xyz_file == "":
-            raise ValueError("input_xyz_file in unified YAML 'common' section is empty or null. Please provide a valid path via --input argument.")
-    elif "input_xyz_file" in config:
-        input_xyz_file = config["input_xyz_file"]
-    else:
-        raise ValueError("input_xyz_file not found in config or --input argument")
+    if not input_xyz_file or not os.path.exists(input_xyz_file):
+        raise ValueError(f"Input XYZ file not found: {input_xyz_file}")
 
-    if input_xyz_file and not os.path.exists(input_xyz_file):
-        raise ValueError(f"Input XYZ file not found or does not exist: {input_xyz_file}")
+    # -- Data conversion --
+    converted_file = preprocess_data_for_platform(
+        input_xyz_file, platform, output_dir=os.path.join(os.path.dirname(input_xyz_file), "converted_data")
+    )
+    logging.info(f"Converted data file for {platform}: {converted_file}")
+
+    # -- Prepare template and mapping as before --
+    engine_base = load_template(platform)
+    engine_cfg = deepcopy(engine_base)
+    apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
+
+    # Always patch in the correct data file after mapping
+    for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
+        set_nested(engine_cfg, p.split("."), converted_file)
+
+    # --- Inject split sizes at the right place in the engine config ---
+    if platform in ["nequip", "allegro"]:
+        set_nested(engine_cfg, ["data", "split_dataset", "train"], train_size)
+        set_nested(engine_cfg, ["data", "split_dataset", "val"], val_size)
+        set_nested(engine_cfg, ["data", "split_dataset", "test"], test_size)
+    elif platform in ["schnet", "painn", "fusion"]:
+        set_nested(engine_cfg, ["training", "num_train"], train_size)
+        set_nested(engine_cfg, ["training", "num_val"], val_size)
+
+    # --- schnet/painn/fusion tweaks ---
+    if platform == "painn":
+        engine_cfg["model"]["model_type"] = "painn"
+    if platform == "fusion":
+        engine_cfg["model"].update({
+            "model_type": "nequip_mace_interaction_fusion",
+            "lmax": 2,
+            "n_interactions_nequip": 1,
+            "n_interactions_mace": 1
+        })
     
-    # Preprocess data based on platform if input_xyz is provided
-    if input_xyz_file:
-        converted_file = preprocess_data_for_platform(input_xyz_file, platform, output_dir=os.path.join(os.path.dirname(input_xyz_file), "converted_data"))
-        logging.info(f"Converted data file for {platform}: {converted_file}")
-
-    # For MACE, use the platform-specific section, ignoring 'common' for individual YAMLs
-    if platform == "mace":
-        if is_unified:
-            # Use template as base and apply remapped overrides for mace
-            if "overrides" in config and platform in config["overrides"] and isinstance(config["overrides"][platform], dict):
-                overrides_mapped = {}
-                for user_key, value in config["overrides"][platform].items():
-                    if user_key in KEY_MAPPINGS[platform]:
-                        mapped_keys = KEY_MAPPINGS[platform][user_key]
-                        if mapped_keys:
-                            if isinstance(mapped_keys, list):
-                                for mapped_key in mapped_keys:
-                                    update_nested_dict(overrides_mapped, mapped_key, value)
-                            else:
-                                update_nested_dict(overrides_mapped, mapped_keys, value)
-                engine_cfg.update(overrides_mapped)
-            # Merge common settings with key mapping
-            if "common" in config:
-                common = config["common"]
-                for user_key, value in common.items():
-                    if user_key in KEY_MAPPINGS[platform]:
-                        mapped_keys = KEY_MAPPINGS[platform][user_key]
-                        if mapped_keys:
-                            update_nested_dict(engine_cfg, mapped_keys, value)
-                    elif user_key == "input_xyz_file":
-                        continue  # Handled separately
-                    elif user_key == "seed":
-                        engine_cfg["general"] = engine_cfg.get("general", {})
-                        engine_cfg["general"]["seed"] = value
-        elif not is_unified:
-            engine_cfg.update(config or {})
-        else:
-            raise ValueError(f"No '{platform}' section found in the YAML config")
-        # Ensure train_file is updated with the converted file path
-        if input_xyz_file and "train_file" in engine_cfg:
-            engine_cfg["train_file"] = converted_file
-
-    # For SchNet-based platforms (painn, fusion, schnet), use schnet template with overrides
-    elif platform in ["painn", "fusion", "schnet"]:
-        # Apply model overrides
-        if platform == "painn":
-            engine_cfg["model"]["model_type"] = "painn"
-        elif platform == "fusion":
-            engine_cfg["model"].update({
-                "model_type": "nequip_mace_interaction_fusion",
-                "lmax": 2,
-                "cutoff": 12.0,
-                "n_rbf": 40,
-                "n_atom_basis": 192,
-                "n_interactions_nequip": 1,
-                "n_interactions_mace": 1
-            })
-        # Merge common settings with key mapping and overrides
-        if is_unified and "common" in config:
-            common = config["common"]
-            overrides = config.get("overrides", {}).get(platform, {})
-            for user_key, value in {**common, **overrides}.items():
-                if user_key in KEY_MAPPINGS[platform]:
-                    mapped_keys = KEY_MAPPINGS[platform][user_key]
-                    if mapped_keys:
-                        update_nested_dict(engine_cfg, mapped_keys, value)
-                elif user_key == "input_xyz_file":
-                    continue  # Handled separately
-                elif user_key == "seed":
-                    engine_cfg["general"] = engine_cfg.get("general", {})
-                    engine_cfg["general"]["seed"] = value
-        if input_xyz_file:
-            engine_cfg["data"]["dataset_path"] = converted_file
-    # For other platforms (nequip, allegro), merge 'common' and platform-specific or use individual YAML
-    else:
-        if is_unified and "common" in config:
-            engine_cfg.update(config["common"])
-        if is_unified and platform in config and isinstance(config[platform], dict):
-            engine_cfg.update(config[platform])
-        elif not is_unified:
-            engine_cfg.update(config or {})
-        if platform in ["nequip", "allegro"] and input_xyz_file:
-            if "data" not in engine_cfg:
-                engine_cfg["data"] = {}
-            if "split_dataset" not in engine_cfg["data"]:
-                engine_cfg["data"]["split_dataset"] = {}
-            if not engine_cfg["data"]["split_dataset"].get("file_path"):
-                engine_cfg["data"]["split_dataset"]["file_path"] = converted_file
+    engine_cfg = prune_to_template(engine_cfg, engine_base)
     
-    # Remove input_xyz_file from the final config to avoid conflicts with downstream packages
+    # Remove any user-facing keys that might conflict (like 'input_xyz_file' at top)
     if "input_xyz_file" in engine_cfg:
         del engine_cfg["input_xyz_file"]
     
-    # Validate and fill missing defaults
-    # validate_and_fill_defaults(engine_cfg, platform)
-    
+    if platform == "mace":
+        engine_cfg["valid_file"] = None
+        engine_cfg["test_file"] = None
+
     return engine_cfg
+

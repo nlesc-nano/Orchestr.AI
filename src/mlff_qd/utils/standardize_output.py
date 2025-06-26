@@ -3,106 +3,126 @@ import shutil
 import logging
 import argparse
 
-def standardize_output(platform, source_dir, dest_dir):
+def move_if_exists(src, dst_dir, rename=None):
+    if os.path.exists(src):
+        dst = os.path.join(dst_dir, rename if rename else os.path.basename(src))
+        try:
+            if os.path.isdir(src):
+                # Move directory (including contents)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.move(src, dst)
+            else:
+                shutil.move(src, dst)
+            logging.info(f"Moved {src} → {dst}")
+        except Exception as e:
+            logging.warning(f"Could not move {src}: {e}")
+
+def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None):
     """Standardize the output folder structure for a given platform."""
     logging.basicConfig(level=logging.INFO)
     os.makedirs(dest_dir, exist_ok=True)
 
-    # Define standardized subdirectories
     standardized_dirs = {
         "engine_yaml": os.path.join(dest_dir, "engine_yaml"),
         "converted_data": os.path.join(dest_dir, "converted_data"),
         "best_model": os.path.join(dest_dir, "best_model"),
         "checkpoints": os.path.join(dest_dir, "checkpoints"),
         "logs": os.path.join(dest_dir, "logs"),
-        "lightning_logs": os.path.join(dest_dir, "lightning_logs")
+        "lightning_logs": os.path.join(dest_dir, "lightning_logs"),
     }
+    for d in standardized_dirs.values():
+        os.makedirs(d, exist_ok=True)
 
-    for dir_path in standardized_dirs.values():
-        os.makedirs(dir_path, exist_ok=True)
+    # ---- Always copy the YAML file actually used for this run ----
+    if config_yaml_path and os.path.exists(config_yaml_path):
+        dst = os.path.join(standardized_dirs["engine_yaml"], os.path.basename(config_yaml_path))
+        shutil.copy(config_yaml_path, dst)
+        logging.info(f"Copied config YAML: {config_yaml_path} → {dst}")
+    else:
+        logging.warning(f"No config YAML found at {config_yaml_path}; skipping YAML copy.")
 
-    # Move engine_yaml
-    engine_yaml = [f for f in os.listdir(source_dir) if f.startswith("engine_") and f.endswith(".yaml")]
-    if engine_yaml:
-        shutil.move(os.path.join(source_dir, engine_yaml[0]), standardized_dirs["engine_yaml"])
+    # Always move converted_data if it exists
+    move_if_exists(os.path.join(source_dir, "converted_data"), standardized_dirs["converted_data"])
 
-    # Move converted_data
-    converted_data = os.path.join(source_dir, "converted_data")
-    if os.path.exists(converted_data):
-        shutil.move(converted_data, standardized_dirs["converted_data"])
+    if not results_dir:
+        results_dir = os.path.join(source_dir, "results")
 
-    # Move best model (platform-specific logic)
-    best_model_moved = False
-    if platform in ["schnet", "painn", "fusion"]:
-        best_model_path = os.path.join(source_dir, "results", "best_inference_model")
-        if os.path.exists(best_model_path):
-            shutil.move(best_model_path, standardized_dirs["best_model"])
-            best_model_moved = True
-    elif platform in ["nequip", "allegro"]:
-        best_model_path = os.path.join(source_dir, "results", "best.ckpt")
-        if os.path.exists(best_model_path):
-            shutil.move(best_model_path, standardized_dirs["best_model"])
-            best_model_moved = True
+    if platform in ("schnet", "painn", "fusion"):
+        # Best model: results/best_inference_model/
+        move_if_exists(os.path.join(results_dir, "best_inference_model"), standardized_dirs["best_model"])
+        # Checkpoints: results/lightning_logs/version_*/checkpoints/
+        lightning_logs = os.path.join(results_dir, "lightning_logs")
+        if os.path.exists(lightning_logs):
+            for version_folder in os.listdir(lightning_logs):
+                vpath = os.path.join(lightning_logs, version_folder, "checkpoints")
+                if os.path.exists(vpath):
+                    move_if_exists(vpath, standardized_dirs["checkpoints"])
+            move_if_exists(lightning_logs, standardized_dirs["lightning_logs"])
+        # Logs: move .log files and hparams.yaml from results/
+        if os.path.exists(results_dir):
+            for f in os.listdir(results_dir):
+                if f.endswith(".log") or "hparams.yaml" in f:
+                    move_if_exists(os.path.join(results_dir, f), standardized_dirs["logs"])
+        for f in os.listdir(source_dir):
+            if f.endswith(".log"):
+                move_if_exists(os.path.join(source_dir, f), standardized_dirs["logs"])
+
+    elif platform in ("nequip", "allegro"):
+        # Move checkpoints (.ckpt) from results/
+        move_if_exists(os.path.join(results_dir, "best.ckpt"), standardized_dirs["best_model"])
+        move_if_exists(os.path.join(results_dir, "last.ckpt"), standardized_dirs["checkpoints"])
+        # Move lightning logs (tutorial_log/version_0) from results/
+        tutorial_log = os.path.join(results_dir, "tutorial_log")
+        if os.path.exists(tutorial_log):
+            for version_folder in os.listdir(tutorial_log):
+                vpath = os.path.join(tutorial_log, version_folder)
+                move_if_exists(vpath, standardized_dirs["lightning_logs"])
+        # Logs: outputs/<date>/<time>/train.log
+        outputs_dir = os.path.join(source_dir, "outputs")
+        if os.path.exists(outputs_dir):
+            for date_folder in os.listdir(outputs_dir):
+                date_path = os.path.join(outputs_dir, date_folder)
+                if os.path.isdir(date_path):
+                    for time_folder in os.listdir(date_path):
+                        time_path = os.path.join(date_path, time_folder)
+                        train_log = os.path.join(time_path, "train.log")
+                        if os.path.exists(train_log):
+                            move_if_exists(train_log, standardized_dirs["logs"])
+
     elif platform == "mace":
-        best_model_paths = [f for f in os.listdir(source_dir) if f.startswith("mace_") and ("epoch" in f or "compiled" in f)]
-        if best_model_paths:
-            for path in best_model_paths:
-                shutil.move(os.path.join(source_dir, path), standardized_dirs["best_model"])
-            best_model_moved = True
-
-    if not best_model_moved and os.path.exists(os.path.join(source_dir, "best_model")):
-        shutil.move(os.path.join(source_dir, "best_model"), standardized_dirs["best_model"])
-
-    # Move checkpoints
-    checkpoints_dirs = [
-        os.path.join(source_dir, "checkpoints"),
-    ]
-    for check_dir in checkpoints_dirs:
-        if os.path.exists(check_dir):
-            shutil.move(check_dir, standardized_dirs["checkpoints"])
-    checkpoint_files = [f for f in os.listdir(source_dir) if "epoch=" in f or ".ckpt" in f]
-    for file in checkpoint_files:
-        shutil.move(os.path.join(source_dir, file), standardized_dirs["checkpoints"])
-
-    # Move lightning_logs if it exists anywhere in the source directory
-    lightning_logs_found = None
-    for root, dirs, files in os.walk(source_dir):
-        if "lightning_logs" in dirs:
-            lightning_logs_found = os.path.join(root, "lightning_logs")
-            break
-    if lightning_logs_found:
-        shutil.move(lightning_logs_found, standardized_dirs["lightning_logs"])
-        logging.info(f"Moved lightning_logs from {lightning_logs_found} to {standardized_dirs['lightning_logs']}")
-
-    # Move other logs, excluding lightning_logs content
-    log_dirs = [
-        os.path.join(source_dir, "logs"),
-        os.path.join(source_dir, "results"),
-        os.path.join(source_dir, "outputs")
-    ]
-    for log_dir in log_dirs:
-        if os.path.exists(log_dir):
-            for item in os.listdir(log_dir):
-                source_path = os.path.join(log_dir, item)
-                # Skip if inside lightning_logs to avoid duplication
-                if not any(source_path.startswith(os.path.join(log_dir, subdir)) for subdir in ["lightning_logs"]):
-                    if item.endswith(".log") or "hparams.yaml" in item:
-                        shutil.move(source_path, standardized_dirs["logs"])
-    root_logs = [f for f in os.listdir(source_dir) if f.endswith(".log")]
-    for log in root_logs:
-        shutil.move(os.path.join(source_dir, log), standardized_dirs["logs"])
+        checkpoints_dir = os.path.join(source_dir, "checkpoints")
+        if os.path.exists(checkpoints_dir):
+            move_if_exists(checkpoints_dir, standardized_dirs["best_model"])
+        logs_dir = os.path.join(source_dir, "logs")
+        if os.path.exists(logs_dir):
+            for f in os.listdir(logs_dir):
+                move_if_exists(os.path.join(logs_dir, f), standardized_dirs["logs"])
+        if os.path.exists(results_dir):
+            for f in os.listdir(results_dir):
+                move_if_exists(os.path.join(results_dir, f), standardized_dirs["logs"])
+        valid_indices = os.path.join(source_dir, "valid_indices_42.txt")
+        if os.path.exists(valid_indices):
+            move_if_exists(valid_indices, standardized_dirs["logs"])
 
 def parse_args():
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Standardize output folder structure for MLFF-QD.")
     parser.add_argument("--platform", type=str, required=True, help="Platform name (e.g., schnet, mace)")
     parser.add_argument("--source_dir", type=str, required=True, help="Source directory to standardize")
     parser.add_argument("--dest_dir", type=str, required=True, help="Destination directory for standardized structure")
+    parser.add_argument("--results_dir", type=str, default=None, help="(Optional) Results/logs root for the engine")
+    parser.add_argument("--config_yaml_path", type=str, default=None, help="Path to the config YAML actually used for this run")
     return parser.parse_args()
 
 def main():
     args = parse_args()
-    standardize_output(args.platform, args.source_dir, args.dest_dir)
+    standardize_output(
+        args.platform,
+        args.source_dir,
+        args.dest_dir,
+        results_dir=args.results_dir,
+        config_yaml_path=args.config_yaml_path
+    )
 
 if __name__ == "__main__":
     main()

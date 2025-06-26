@@ -1,4 +1,4 @@
-run: [train, test]
+run: [train, val, test]
 
 
 cutoff_radius: 12.0
