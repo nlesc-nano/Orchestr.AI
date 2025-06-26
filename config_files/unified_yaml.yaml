@@ -1,50 +1,41 @@
-platform: painn  # Options: allegro, mace, nequip, schnet, painn, fusion
-
+platform: fusion  # (schnet, painn, fusion, nequip, allegro, mace)
 common:
-  input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz
-  seed: 42
-  train_size: 0.7  # 800 or 0.8
-  val_size: 0.3
-  batch_size: 16
-  epochs: 3
-  output_dir: ./results
-  chemical_symbols: [Cd, Se, Cl]
-  learning_rate: 0.001
-  energy_loss_weight: 0.05
-  forces_loss_weight: 0.95
-  num_workers: 24
-  device: cuda
-  log_every_n_steps: 10
-  #n_rbf: 20  # Optional, used by SchNet/Painn/Fusion
+  data:
+    input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz
 
-overrides:
-  schnet:
-    cutoff: 12.0
-    layers: 2
-    features: 192
-
-  painn:
-    cutoff: 12.0
-    layers: 2
-    features: 192
-
-  fusion:
-    cutoff: 12.0
-    layers: 2
-    features: 192
-    l_max: 1
-
-  nequip:
-    cutoff: 12.0
+  model:
     layers: 3
     features: 32
-
-  allegro:
     cutoff: 12.0
-    layers: 2
-    features: 64
+    n_rbf: 20
+    l_max: 1
+    parity: true
+    model_dtype: float32
+    chemical_symbols: [Cd, Se, Cl]
+    
+  training:
+    seed: 42
+    train_size: 0.8
+    val_size: 0.1
+    test_size: 0.1
+    batch_size: 16
+    epochs: 3
+    learning_rate: 0.001
+    num_workers: 24
+    device: cuda
+    log_every_n_steps: 5
+    optimizer: AdamW
+    scheduler:
+      type: ReduceLROnPlateau
+      factor: 0.8
+      patience: 5
+    pin_memory: true
+    
+  loss:
+    energy_weight: 0.05
+    forces_weight: 0.95
+    
+  output:
+    output_dir: ./resultsNewNewX
+    
 
-  mace:
-    cutoff: 12.0
-    layers: 3
-    features: 64
