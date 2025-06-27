@@ -133,7 +133,6 @@ To specify a different config file, one should run the following command:
 ```bash
 python -m mlff_qd.training --config nequip.yaml
 ```
-One should note that in this case a specific engine (i.e. nequip) is added as a flag.
 
 ---
 
