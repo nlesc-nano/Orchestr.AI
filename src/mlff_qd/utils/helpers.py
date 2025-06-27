@@ -70,3 +70,4 @@ def get_scheduler_class(name):
     if name not in schedulers_map:
         raise ValueError(f"Unsupported scheduler '{name}'. Available: {list(schedulers_map.keys())}")
     return schedulers_map[name]
+

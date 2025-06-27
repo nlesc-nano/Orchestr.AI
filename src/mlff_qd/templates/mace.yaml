@@ -1,0 +1,90 @@
+# ===========================
+# Experiment & Paths
+# ===========================
+name: mace_cdsecl_model
+seed: 42
+log_level: INFO
+error_table: PerAtomMAE   # Report validation metrics using MAE
+
+# ===========================
+# Hardware & Precision
+# ===========================
+device: cuda              # Options: cpu, cuda, mps, xpu
+default_dtype: float32
+
+# ===========================
+# Dataset & Keys
+# ===========================
+train_file:   #consolidate-cdse35_1000.xyz consolidated_dataset_1000_CdSe_new.xyz
+valid_file: null
+test_file: null
+
+energy_key: energy  #REF_energy
+forces_key: forces  #REF_forces
+stress_key: null
+
+valid_fraction: 0.2
+batch_size: 8
+num_workers: 24
+pin_memory: true        # Enables faster CPU → GPU transfer
+
+# ===========================
+# Model Configuration
+# ===========================
+model: MACE
+r_max: 12                  #cutoff
+num_radial_basis: 20           #n-rbf
+num_cutoff_basis: 6
+max_ell: 3
+num_channels: 64             #n_atom_basis
+max_L: 2
+num_interactions: 3
+correlation: 3
+avg_num_neighbors: 100.80
+
+# ===========================
+# Training Parameters
+# ===========================
+max_num_epochs: 3
+ema: true
+ema_decay: 0.99
+
+# ===========================
+# Validation & Early Stopping
+# ===========================
+valid_batch_size: 16         # Match GPU capacity
+eval_interval: 1           # Check validation every 1 epochs
+patience: 30                # Early stop if no val improvement in 30 checks
+
+# ===========================
+# Stochastic Weight Averaging
+# ===========================
+swa: true
+start_swa: 400
+swa_energy_weight: 1.0
+swa_forces_weight: 100.0
+
+# ===========================
+# Loss Weights
+# ===========================
+forces_weight: 0.95
+energy_weight: 0.05
+
+# ===========================
+# Optimizer & Scheduler
+# ===========================
+optimizer: adam
+lr: 0.001
+weight_decay: 1e-5
+
+scheduler: ReduceLROnPlateau
+lr_factor: 0.8
+scheduler_patience: 5
+lr_scheduler_gamma: 0.9993
+
+# ===========================
+# Energy Baseline & Scaling
+# ===========================
+E0s: "average"                         # Use average per-atom energy (like --E0s=average)
+scaling: rms_forces_scaling
+compute_avg_num_neighbors: true

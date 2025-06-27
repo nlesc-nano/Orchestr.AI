@@ -1,78 +1,44 @@
-settings:
-  # General settings
-  general:
-    seed: 42  # Random seed for reproducibility
-    database_name: 'cspbbr3.db'  # Name of the database file
+# Example of an unified file with the common parameters used by all
+# the engines employed by the MLFF_QD platform.
 
-  # Data handling settings
+platform: fusion  # (schnet, painn, fusion, nequip, allegro, mace)
+common:
   data:
-    dataset_path: './cspbbr3_newData_NEW_12-11-2024.npz'
-    use_last_n: 100  # current testing
-  # Model architecture settings
+    input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz
+
   model:
-    model_type: schnet # schnet , painn
-    cutoff: 12.
+    layers: 3
+    features: 32
+    cutoff: 12.0
     n_rbf: 20
-    n_atom_basis: 128
-    n_interactions: 8
-    distance_unit: 'Ang'
-    property_unit_dict:
-      energy: 'kcal/mol'
-      forces: 'kcal/mol/Ang'
-
-  # Output settings
-  outputs:
-    energy:
-      loss_weight: 0.2
-      metrics: "MAE"
-    forces:
-      loss_weight: 0.8
-      metrics: "MAE"
-
-  # Training settings
+    l_max: 1
+    parity: true
+    model_dtype: float32
+    chemical_symbols: [Cd, Se, Cl]
+    
   training:
-    accelerator: 'gpu'
-    devices: 1
-    precision: 32
-    batch_size: 8
-    num_train: 2198
-    num_val: 549
-    max_epochs: 100 
+    seed: 42
+    train_size: 0.8
+    val_size: 0.1
+    test_size: 0.1
+    batch_size: 16
+    epochs: 3
+    learning_rate: 0.001
     num_workers: 24
-    pin_memory: true
-    optimizer:
-      type: 'AdamW'
-      lr: 0.0001
+    device: cuda
+    log_every_n_steps: 5
+    optimizer: AdamW
     scheduler:
-      type: 'ReduceLROnPlateau'
+      type: ReduceLROnPlateau
       factor: 0.8
-      patience: 30
-      verbose: true
+      patience: 5
+    pin_memory: true
+    
+  loss:
+    energy_weight: 0.05
+    forces_weight: 0.95
+    
+  output:
+    output_dir: ./resultsNewNewX
+    
 
-  # Logging and checkpoint settings
-  logging:
-    folder: './cspbbr3'
-    log_dir: "lightning_logs"
-    checkpoint_dir: "best_inference_model"
-    monitor: "val_loss"
-
-  # Testing settings
-  testing:
-    trained_model_path: './cspbbr3'  # Path to load the trained model
-    csv_file_name: 'actual_vs_predicted_enrgforc.csv'  # Path to save the predictions CSV
-
-  # Resume training settings
-  resume_training:
-    resume_checkpoint_dir: null # Path to model checkpoint file if required 
-  
-  # Fine Tuning settings
-  fine_tuning:
-    pretrained_checkpoint: # checkpoint file path
-    freeze_embedding: true
-    freeze_interactions_up_to: 2 # add no of layers
-    freeze_all_representation: true
-    lr: 0.00005
-    early_stopping_patience: 10
-    best_model_dir: fine_tuned_best_model  # Subdirectory only
-    checkpoint_dir: fine_tuned_checkpoints  # Subdirectory only
-    log_name: fine_tune_logs  # Subdirectory for TensorBoard logs
