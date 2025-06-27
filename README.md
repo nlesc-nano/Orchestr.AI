@@ -127,10 +127,11 @@ To run the training code, on can use the following command, which by default loo
 ```bash
 python -m mlff_qd.training
 ```
+In `config_files/` one can find an example of the file. Here, for any of the engines available in the platform, one can find the common parameters used for setting up the model and the training.
 
 To specify a different config file, one should run the following command:
 ```bash
-python -m mlff_qd.training nequip.yaml --engine nequip
+python -m mlff_qd.training --config nequip.yaml
 ```
 One should note that in this case a specific engine (i.e. nequip) is added as a flag.
 
