@@ -273,6 +273,101 @@ def adjust_splits_for_engine(train_size, val_size, test_size, platform):
 def smart_round(x, ndigits=4):
     return round(float(x), ndigits)
 
+def path_exists_in_template(template: dict, keys: list) -> bool:
+    """Check if a nested key path exists in the template dictionary."""
+    cur = template
+    for k in keys:
+        # Support dot notation and list indexes
+        if "[" in k and k.endswith("]"):
+            base, idx = k[:-1].split("[")
+            idx = int(idx)
+            if base not in cur or not isinstance(cur[base], list):
+                return False
+            if idx >= len(cur[base]):
+                return False
+            cur = cur[base][idx]
+        else:
+            if not isinstance(cur, dict) or k not in cur:
+                return False
+            cur = cur[k]
+    return True
+
+def path_is_set_from_common(flat_common, key_mapping, dotkey):
+    """
+    Returns True if this override dotkey is set by mapping from common.
+    """
+    # For each common key that has a mapping
+    for ckey, mapped_paths in key_mapping.items():
+        if ckey in flat_common:
+            for mp in mapped_paths:
+                # If the mapped path matches the override dotkey, it's set by common!
+                if mp == dotkey:
+                    return True
+    return False
+
+
+def apply_overrides_with_common_check(
+    engine_cfg: dict,
+    overrides: dict,
+    template: dict,
+    flat_common: dict,
+    key_mapping: dict,
+    parent_path=()
+):
+    for k, v in overrides.items():
+        # Always handle dot notation
+        key_parts = k.split(".")
+        full_path = parent_path + tuple(key_parts)
+        dot_key = ".".join(full_path)
+
+        # --- 1. Check if this override key is set from the common section (directly or via key mapping) ---
+        # Check if this key is already set in common via KEY_MAPPINGS
+        if path_is_set_from_common(flat_common, key_mapping, dot_key):
+            logging.warning(f"[OVERRIDE WARNING] Key {dot_key} already set from common section; ignoring expert override.")
+            continue
+
+        # --- 2. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
+        if isinstance(v, dict) and len(key_parts) == 1:
+            engine_cfg.setdefault(k, {})
+            tmpl_sub = template.get(k, {}) if isinstance(template, dict) else {}
+            apply_overrides_with_common_check(engine_cfg[k], v, tmpl_sub, flat_common, key_mapping, parent_path + (k,))
+            continue
+
+        # --- 3. List-style keys (handled by set_nested already) ---
+        if any("[" in part and part.endswith("]") for part in key_parts):
+            pass  # The code below already handles list-style keys
+
+        # --- 4. Check if this key exists in the template ---
+        tmpl_ptr = template
+        is_in_template = True
+        for part in full_path:
+            if tmpl_ptr is None:
+                is_in_template = False
+                break
+            if "[" in part and part.endswith("]"):
+                base, idx_str = part[:-1].split("[")
+                idx = int(idx_str)
+                if (not isinstance(tmpl_ptr, dict)) or (base not in tmpl_ptr) or (not isinstance(tmpl_ptr[base], list)) or (idx >= len(tmpl_ptr[base])):
+                    is_in_template = False
+                    break
+                tmpl_ptr = tmpl_ptr[base][idx]
+            else:
+                if (not isinstance(tmpl_ptr, dict)) or (part not in tmpl_ptr):
+                    is_in_template = False
+                    break
+                tmpl_ptr = tmpl_ptr[part]
+        
+        # If the key is not in the template, skip it with a warning
+        if not is_in_template:
+            logging.warning(f"[OVERRIDE WARNING] Key {dot_key} not present in template! Skipping.")
+            continue
+
+        # --- 5. Apply the override ---
+        set_nested(engine_cfg, list(full_path), v)
+
+
+
+
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     """
     Generate an engine-specific YAML dict from the unified YAML config file and platform.
@@ -327,7 +422,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     engine_base = load_template(platform)
     engine_cfg = deepcopy(engine_base)
     apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
-
+    
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
         set_nested(engine_cfg, p.split("."), converted_file)
@@ -354,6 +449,14 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     
     engine_cfg = prune_to_template(engine_cfg, engine_base)
     
+    # ... Handle overrides section
+    flat_common = flatten_dict(user_cfg)
+    if "overrides" in config and platform in config["overrides"]:
+        overrides = config["overrides"][platform]
+        engine_base_template = load_template(platform)
+        apply_overrides_with_common_check(engine_cfg, overrides, engine_base_template, flat_common, KEY_MAPPINGS[platform])
+
+        
     # Remove any user-facing keys that might conflict (like 'input_xyz_file' at top)
     if "input_xyz_file" in engine_cfg:
         del engine_cfg["input_xyz_file"]

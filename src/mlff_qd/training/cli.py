@@ -135,8 +135,17 @@ def main():
             run_nequip_training(os.path.abspath(engine_yaml))
 
         results_dir = get_output_dir(engine_cfg, platform)
+        best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
+        
         standardized_dir = os.path.join(scratch_dir, "standardized")
-        standardize_output(platform, scratch_dir, standardized_dir, results_dir=results_dir, config_yaml_path=engine_yaml)
+        standardize_output(
+            platform,
+            scratch_dir,
+            standardized_dir,
+            results_dir=results_dir,
+            config_yaml_path=engine_yaml,
+            best_model_dir=best_model_dir,
+        )
         logging.info(f"Output standardized to {standardized_dir}")
 
     except Exception as e:

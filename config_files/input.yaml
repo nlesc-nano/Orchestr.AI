@@ -1,6 +1,3 @@
-# Example of an unified file with the common parameters used by all
-# the engines employed by the MLFF_QD platform.
-
 platform: fusion  # (schnet, painn, fusion, nequip, allegro, mace)
 common:
   data:
@@ -8,10 +5,10 @@ common:
 
   model:
     layers: 3
-    features: 32
+    features: 64
     cutoff: 12.0
-    n_rbf: 20
-    l_max: 1
+    n_rbf: 8
+    l_max: 2
     parity: true
     model_dtype: float32
     chemical_symbols: [Cd, Se, Cl]
@@ -22,8 +19,8 @@ common:
     val_size: 0.1
     test_size: 0.1
     batch_size: 16
-    epochs: 3
-    learning_rate: 0.001
+    epochs: 100
+    learning_rate: 0.0001
     num_workers: 24
     device: cuda
     log_every_n_steps: 5
@@ -40,5 +37,70 @@ common:
     
   output:
     output_dir: ./resultsNewNewX
-    
 
+overrides:
+  schnet:
+    model.n_rbf: 30
+    model.activation: relu
+    model.n_layers: 1
+    model.dropout: 0.2
+    logging.folder: ./resultsExpert
+    trainer:
+      callbacks:
+        - _target_: lightning.pytorch.callbacks.EarlyStopping
+          patience: 100
+
+  nequip:
+    model.num_bessels: 50                     
+    training_module.model.parity: false        
+    model.n_layers: 5                         
+    training_module.model.num_layers: 5        
+    model.activation: relu                      
+    model.dropout: 0.1                        
+    logging.folder: ./resultsNequIP            
+
+    trainer.logger[0].save_dir: logsNequIPX
+    trainer.callbacks[1].filename: bestNew
+    trainer.callbacks[0].patience: 100
+    
+    # Add new parameter not present in template to see warning
+    model.new_param: 12345                    
+    training_module.loss.coeffs.total_energy: 0.02  
+    
+    
+  painn:
+    model.n_atom_basis: 50
+    training.num_val: 0.3
+    outputs.forces.loss_weight: 0.91
+    logging.folder: ./resultsPainn
+    trainer.callbacks[1].monitor: val_loss
+    trainer.logger[0].save_dir: ./logsPainnX
+    fine_tuning.lr: 0.05
+
+  fusion:
+    model.n_interactions: 4
+    training.num_train: 0.65
+    outputs.energy.loss_weight: 0.09
+    logging.folder: ./resultsFusion
+    trainer.callbacks[0].min_delta: 0.01
+    trainer.logger[0].save_dir: ./logsFusionX
+
+
+  allegro:
+    training_module.model.radial_chemical_embed.num_bessels: 17
+    model.n_bessels: 50
+    model.n_rbf: 30
+    training_module.model.num_scalar_features: 48
+    training_module.model.l_max: 2
+    training_module.model.parity: false
+    trainer.callbacks[0].patience: 10
+    trainer.callbacks[2].logging_interval: epoch
+    trainer.logger[0].save_dir: ./logsAllegroX
+
+  mace:
+    num_channels: 64
+    model.n_rbf: 30
+    max_L: 1
+    lr: 0.007
+    eval_interval: 10
+    valid_file: ./converted_data/mace_val.xyz
