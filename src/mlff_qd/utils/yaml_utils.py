@@ -11,14 +11,14 @@ KEY_MAPPINGS = {
         "model.layers": ["model.num_interactions"],
         "model.features": ["model.n_atom_basis"],
         "model.n_rbf": ["model.n_rbf"],
-        "model.l_max": ["model.l_max"],
-        "model.chemical_symbols": ["model.chemical_symbols"],
         "training.seed": ["general.seed"],
         "training.batch_size": ["training.batch_size"],
         "training.epochs": ["training.max_epochs"],
         "training.learning_rate": ["training.optimizer.lr"],
         "training.optimizer": ["training.optimizer.type"],
-        "training.scheduler": ["training.scheduler"],
+        "training.scheduler.type": ["training.scheduler.type"],
+        "training.scheduler.factor": ["training.scheduler.factor"],
+        "training.scheduler.patience": ["training.scheduler.patience"],
         "training.num_workers": ["training.num_workers"],
         "training.pin_memory": ["training.pin_memory"],
         "training.log_every_n_steps": ["training.log_every_n_steps"],
@@ -26,8 +26,8 @@ KEY_MAPPINGS = {
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
         "output.output_dir": ["logging.folder", "testing.trained_model_path"],
-        "output.energy_loss_weight": ["outputs.energy.loss_weight"],
-        "output.forces_loss_weight": ["outputs.forces.loss_weight"],
+        "loss.energy_weight": ["outputs.energy.loss_weight"],
+        "loss.forces_weight": ["outputs.forces.loss_weight"],
         "data.input_xyz_file": ["data.dataset_path"],
     },
     "painn": {},  # Will inherit from schnet and apply patch in code
@@ -55,12 +55,15 @@ KEY_MAPPINGS = {
         "training.learning_rate": ["training_module.optimizer.lr"],
         "training.optimizer": ["training_module.optimizer._target_"],
         "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # Or ...scheduler.type if you use a string
+        "training.scheduler.factor": ["training_module.lr_scheduler.scheduler.factor"],
+        "training.scheduler.patience": ["training_module.lr_scheduler.scheduler.patience"],
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
         "training.device": ["device", "trainer.accelerator"],  # your template uses 'device'
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
+        "training.test_size": ["data.split_dataset.test"],
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[1].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -90,12 +93,15 @@ KEY_MAPPINGS = {
         "training.learning_rate": ["training_module.optimizer.lr"],
         "training.optimizer": ["training_module.optimizer._target_"],
         "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # same as NequIP
+        "training.scheduler.factor": ["training_module.lr_scheduler.scheduler.factor"],
+        "training.scheduler.patience": ["training_module.lr_scheduler.scheduler.patience"],
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
         "training.device": ["device", "trainer.accelerator"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
+        "training.test_size": ["data.split_dataset.test"],
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[0].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -246,32 +252,26 @@ def prune_to_template(cfg, template):
                 pruned[k] = v
     return pruned
 
+def smart_round(x, ndigits=4):
+    return round(float(x), ndigits)
+
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
     if platform in ["schnet", "painn", "fusion"]:
-        # Only use train/val
+        if (train_size + val_size + test_size) > 1.0 + 1e-6:
+            raise ValueError(f"{platform}: train+val+test > 1.0 is not allowed!")
         if (train_size + val_size) < 1.0:
             missing = 1.0 - (train_size + val_size)
             val_size += missing
             print(f"[WARNING] {platform}: test_size will be ignored. Adjusted val_size to {val_size:.3f} so train+val=1.0")
         elif (train_size + val_size) > 1.0:
-            total = train_size + val_size
-            train_size /= total
-            val_size /= total
-            print(f"[WARNING] {platform}: train+val > 1.0, normalized both so train+val=1.0")
-        # test_size ignored
+            raise ValueError(f"{platform}: train+val > 1.0 is not allowed! Please fix your splits.")
         test_size = 0.0
     elif platform in ["nequip", "allegro"]:
-        # Use all three, but ensure sum to 1.0
         total = train_size + val_size + test_size
         if abs(total - 1.0) > 1e-6:
-            train_size /= total
-            val_size  /= total
-            test_size /= total
-            print(f"[WARNING] {platform}: train+val+test != 1.0; normalized all so they sum to 1.0")
-    return train_size, val_size, test_size
+            raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
+    return smart_round(train_size), smart_round(val_size), smart_round(test_size)
 
-def smart_round(x, ndigits=4):
-    return round(float(x), ndigits)
 
 def path_exists_in_template(template: dict, keys: list) -> bool:
     """Check if a nested key path exists in the template dictionary."""
@@ -365,7 +365,19 @@ def apply_overrides_with_common_check(
         # --- 5. Apply the override ---
         set_nested(engine_cfg, list(full_path), v)
 
-
+def warn_unused_common_keys(user_cfg, platform):
+    # 1. Flatten user config
+    flat_common = flatten_dict(user_cfg)
+    # 2. Get mapped keys for platform
+    key_mapping = KEY_MAPPINGS[platform]
+    mapped_keys = set(key_mapping.keys())
+    # 3. Unused keys: in flat_common but not in mapping
+    unused_keys = [k for k in flat_common if k not in mapped_keys]
+    if unused_keys:
+        logging.info(
+            f"[INFO] The following keys from `common` are not used by platform '{platform}': {unused_keys}"
+        )
+    return unused_keys
 
 
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
@@ -422,6 +434,8 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     engine_base = load_template(platform)
     engine_cfg = deepcopy(engine_base)
     apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
+    
+    warn_unused_common_keys(user_cfg, platform)
     
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
