@@ -364,6 +364,7 @@ def apply_overrides_with_common_check(
 
         # --- 5. Apply the override ---
         set_nested(engine_cfg, list(full_path), v)
+        logging.info(f"[OVERRIDE INFO] Key {dot_key} set by expert override (value: {v!r}).")
 
 def warn_unused_common_keys(user_cfg, platform):
     # 1. Flatten user config
