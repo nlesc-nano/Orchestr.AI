@@ -8,7 +8,7 @@ from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 KEY_MAPPINGS = {
     "schnet": {
         "model.cutoff": ["model.cutoff"],
-        "model.layers": ["model.num_interactions"],
+        "model.mp_layers": ["model.num_interactions"],
         "model.features": ["model.n_atom_basis"],
         "model.n_rbf": ["model.n_rbf"],
         "training.seed": ["general.seed"],
@@ -34,7 +34,7 @@ KEY_MAPPINGS = {
     "fusion": {}, # Will inherit from schnet and apply patch in code
     "nequip": {
         "model.cutoff": ["training_module.model.r_max"],
-        "model.layers": ["training_module.model.num_layers"],
+        "model.mp_layers": ["training_module.model.num_layers"],
         "model.features": ["training_module.model.num_features"],  
         "model.n_rbf": ["training_module.model.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
@@ -72,7 +72,7 @@ KEY_MAPPINGS = {
     
     "allegro": {
         "model.cutoff": ["training_module.model.r_max"],
-        "model.layers": ["training_module.model.num_layers"],
+        "model.mp_layers": ["training_module.model.num_layers"],
         "model.features": ["training_module.model.num_scalar_features"],  # Allegro: num_scalar_features
         "model.n_rbf": ["training_module.model.radial_chemical_embed.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
@@ -110,7 +110,7 @@ KEY_MAPPINGS = {
 
     "mace": {
         "model.cutoff": ["r_max"],
-        "model.layers": ["num_interactions"],
+        "model.mp_layers": ["num_interactions"],
         "model.features": ["num_channels"],
         "model.n_rbf": ["num_radial_basis"],
         "model.l_max": ["max_L"],
@@ -450,6 +450,24 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     elif platform in ["schnet", "painn", "fusion"]:
         set_nested(engine_cfg, ["training", "num_train"], train_size)
         set_nested(engine_cfg, ["training", "num_val"], val_size)
+
+    # --- Handle pair_potential logic for NequIP/Allegro ---
+    if platform in ["nequip", "allegro"]:
+        pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
+        model_dict = engine_cfg.get("training_module", {}).get("model", {})
+
+        # Accept only ZBL (string, case-insensitive) or None/null
+        if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
+            if "pair_potential" in model_dict:
+                del model_dict["pair_potential"]
+                logging.info("Removed pair_potential from extracted YAML (pair_potential: null).")
+        elif isinstance(pair_potential_kind, str) and pair_potential_kind.strip().upper() == "ZBL":
+            logging.info("ZBL pair_potential retained in extracted YAML.")
+        else:
+            raise ValueError(
+                f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
+                "Allowed values: 'ZBL' (string) or null."
+            )
 
     # --- schnet/painn/fusion tweaks ---
     if platform == "painn":
