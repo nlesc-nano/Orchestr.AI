@@ -1,26 +1,42 @@
-platform: fusion  # (schnet, painn, fusion, nequip, allegro, mace)
+# ==============================================================================
+# Notes for users:
+#
+# - Use **dot notation** for override keys (see below for example).
+# - In case of conflict, keys from `common` always take priority over `overrides`.
+# - Keys not present in the engine template will be ignored (with a warning).
+# - n_rbf: For schnet, painn, fusion → RBF basis functions. For nequip/allegro → mapped to bessel basis.
+# ==============================================================================
+
+platform: fusion  # [schnet, painn, fusion, nequip, allegro, mace]
+
 common:
   data:
-    input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz
+    input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz   # Path to your XYZ file
 
   model:
-    layers: 3
-    features: 64
+    mp_layers: 3
+    features: 32
     cutoff: 12.0
-    n_rbf: 8
-    l_max: 2
+    n_rbf: 8           # For schnet, painn, fusion: number of RBF (radial basis functions)
+                       # For nequip, allegro: this value will be mapped to number of bessel basis functions
+    l_max: 1
     parity: true
     model_dtype: float32
     chemical_symbols: [Cd, Se, Cl]
-    
+    # pair_potential: Option to enable ZBL for NequIP/Allegro models only.
+    #   - Set to "ZBL" (as a string) to ENABLE ZBL pair potential
+    #   - Set to null to DISABLE the pair potential block (recommended for most cases)
+    #   - Any other value will raise an error
+    pair_potential: null   # Use "ZBL" (string), or null to disable
+
   training:
     seed: 42
     train_size: 0.8
     val_size: 0.1
     test_size: 0.1
     batch_size: 16
-    epochs: 100
-    learning_rate: 0.0001
+    epochs: 3
+    learning_rate: 0.001
     num_workers: 24
     device: cuda
     log_every_n_steps: 5
@@ -30,15 +46,23 @@ common:
       factor: 0.8
       patience: 5
     pin_memory: true
-    
+
   loss:
     energy_weight: 0.05
     forces_weight: 0.95
-    
+
   output:
     output_dir: ./resultsNewNewX
 
+# ------------------------------------------------------------------------------
+# Overrides section:
+# - Use dot notation for all keys (e.g., model.n_rbf, trainer.callbacks[0].patience)
+# - Only specify keys you want to override for a specific engine.
+# - If a key is in both `common` and `overrides`, `common` wins.
+# ------------------------------------------------------------------------------
+
 overrides:
+
   schnet:
     model.n_rbf: 30
     model.activation: relu
@@ -51,23 +75,21 @@ overrides:
           patience: 100
 
   nequip:
-    model.num_bessels: 50                     
-    training_module.model.parity: false        
-    model.n_layers: 5                         
-    training_module.model.num_layers: 5        
-    model.activation: relu                      
-    model.dropout: 0.1                        
-    logging.folder: ./resultsNequIP            
-
+    model.num_bessels: 50                     # dot notation for nested keys
+    training_module.model.parity: false        # disables parity in the model
+    model.n_layers: 5                         # ignored if mp_layers is set in common
+    training_module.model.num_layers: 5        # ignored if mp_layers is set in common
+    model.activation: relu                     # ignored if not in template
+    model.dropout: 0.1                         # ignored if not in template
+    logging.folder: ./resultsNequIP
     trainer.logger[0].save_dir: logsNequIPX
     trainer.callbacks[1].filename: bestNew
     trainer.callbacks[0].patience: 100
-    
-    # Add new parameter not present in template to see warning
-    model.new_param: 12345                    
-    training_module.loss.coeffs.total_energy: 0.02  
-    
-    
+
+    # Example: Add new parameter not present in template to see warning in logs
+    model.new_param: 12345
+    training_module.loss.coeffs.total_energy: 0.02
+
   painn:
     model.n_atom_basis: 50
     training.num_val: 0.3
@@ -84,7 +106,6 @@ overrides:
     logging.folder: ./resultsFusion
     trainer.callbacks[0].min_delta: 0.01
     trainer.logger[0].save_dir: ./logsFusionX
-
 
   allegro:
     training_module.model.radial_chemical_embed.num_bessels: 17
@@ -104,3 +125,4 @@ overrides:
     lr: 0.007
     eval_interval: 10
     valid_file: ./converted_data/mace_val.xyz
+
