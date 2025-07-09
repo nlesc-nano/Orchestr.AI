@@ -2,7 +2,7 @@ import os
 import shutil
 import logging
 import argparse
-
+import glob
 def move_if_exists(src, dst_dir, rename=None):
     if os.path.exists(src):
         dst = os.path.join(dst_dir, rename if rename else os.path.basename(src))
@@ -18,7 +18,30 @@ def move_if_exists(src, dst_dir, rename=None):
         except Exception as e:
             logging.warning(f"Could not move {src}: {e}")
 
-def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None):
+def move_best_model(results_dir, dest_dir, pattern="*model*"):
+    best_models = glob.glob(os.path.join(results_dir, pattern))
+    logging.info(f"Best model candidates found by pattern '{pattern}': {best_models}")
+    if not best_models:
+        # Fallback: try to guess model file if only 3 things exist
+        special_items = {"lightning_logs"}
+        candidates = [
+            f for f in os.listdir(results_dir)
+            if f not in special_items and not f.endswith('.db')
+        ]
+        logging.info(f"Fallback best model candidates: {candidates}")
+        if len(candidates) == 1:
+            bm = os.path.join(results_dir, candidates[0])
+            move_if_exists(bm, dest_dir)
+            logging.warning(f"Used fallback: moved model candidate {bm}")
+        else:
+            logging.warning(f"No best model found by pattern or fallback in {results_dir}")
+    else:
+        if len(best_models) > 1:
+            logging.warning(f"Multiple best model candidates found: {best_models}")
+        for bm in best_models:
+            move_if_exists(bm, dest_dir)
+        
+def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None, best_model_dir=None):
     """Standardize the output folder structure for a given platform."""
     logging.basicConfig(level=logging.INFO)
     os.makedirs(dest_dir, exist_ok=True)
@@ -49,8 +72,15 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
         results_dir = os.path.join(source_dir, "results")
 
     if platform in ("schnet", "painn", "fusion"):
-        # Best model: results/best_inference_model/
-        move_if_exists(os.path.join(results_dir, "best_inference_model"), standardized_dirs["best_model"])
+        # Generalized: Move best model(s) by user-supplied or default pattern
+        
+        if best_model_dir:
+            logging.info(f"Using best model dir from YAML: {best_model_dir}")
+            move_if_exists(os.path.join(results_dir, best_model_dir), standardized_dirs["best_model"])
+        else:
+            move_best_model(results_dir, standardized_dirs["best_model"])  # fallback
+        
+        
         # Checkpoints: results/lightning_logs/version_*/checkpoints/
         lightning_logs = os.path.join(results_dir, "lightning_logs")
         if os.path.exists(lightning_logs):
@@ -69,9 +99,14 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
                 move_if_exists(os.path.join(source_dir, f), standardized_dirs["logs"])
 
     elif platform in ("nequip", "allegro"):
+        # Move all .ckpt files from results/ to checkpoints/
+        for ckpt_file in glob.glob(os.path.join(results_dir, "*.ckpt")):
+            move_if_exists(ckpt_file, standardized_dirs["checkpoints"])
+
         # Move checkpoints (.ckpt) from results/
-        move_if_exists(os.path.join(results_dir, "best.ckpt"), standardized_dirs["best_model"])
-        move_if_exists(os.path.join(results_dir, "last.ckpt"), standardized_dirs["checkpoints"])
+        #move_if_exists(os.path.join(results_dir, "best.ckpt"), standardized_dirs["checkpoints"])
+        #move_if_exists(os.path.join(results_dir, "last.ckpt"), standardized_dirs["checkpoints"])
+        
         # Move lightning logs (tutorial_log/version_0) from results/
         tutorial_log = os.path.join(results_dir, "tutorial_log")
         if os.path.exists(tutorial_log):

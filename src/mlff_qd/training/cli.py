@@ -18,10 +18,11 @@ def parse_args():
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
     parser.add_argument("--input", help="Path to input XYZ file (overrides input_xyz_file in YAML)")
+    parser.add_argument("--only-generate", action="store_true", help="Only generate engine YAML, do not run training")
+    parser.add_argument("--train-after-generate", action="store_true", help="Generate engine YAML and immediately start training")
     return parser.parse_args()
 
 def get_output_dir(engine_cfg, platform):
-    # Platform-specific key paths
     key_paths = {
         "nequip":   [["trainer", "logger", 0, "save_dir"], ["output_dir"]],
         "allegro":  [["trainer", "logger", 0, "save_dir"], ["output_dir"]],
@@ -47,17 +48,9 @@ def get_output_dir(engine_cfg, platform):
             continue
     return "./results"
 
-
 def patch_and_convert_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None, write_temp=True):
-    """
-    - If xyz_path is given: convert and patch with it.
-    - If xyz_path is None: use whatever is in the YAML, convert, and patch.
-    - Writes a temp YAML.
-    """
     with open(yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-
-    # Get data path from input or YAML itself
     data_path = xyz_path
     if not data_path:
         if platform in ["schnet", "painn", "fusion"]:
@@ -71,7 +64,6 @@ def patch_and_convert_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None,
             f"YAML file {yaml_path} is missing a valid data path for platform '{platform}'.\n"
             "Either add the correct dataset path to your YAML or provide --input."
         )
-    # Convert and patch
     converted_file = preprocess_data_for_platform(
         data_path, platform, output_dir=os.path.join(os.path.dirname(data_path), "converted_data")
     )
@@ -99,7 +91,6 @@ def main():
     logging.basicConfig(level=logging.INFO)
     config = load_config(args.config)
     platform = (args.engine or config.get("platform", "")).lower()
-
     all_platforms = ["nequip", "allegro", "mace", "schnet", "painn", "fusion"]
     if platform not in all_platforms:
         raise ValueError(f"Unknown platform/engine: {platform}. Supported platforms are {all_platforms}")
@@ -111,18 +102,43 @@ def main():
         user_yaml_dict = yaml.safe_load(f)
     is_unified = "common" in user_yaml_dict
 
-    if is_unified:
+    # Always generate engine YAML for unified YAMLs, and optionally for legacy (with --only-generate)
+    if is_unified or args.only_generate:
         engine_yaml = os.path.join(scratch_dir, f"engine_{platform}.yaml")
-        engine_cfg = extract_engine_yaml(args.config, platform, input_xyz=args.input)
-        with open(engine_yaml, "w", encoding="utf-8") as f:
-            yaml.dump(engine_cfg, f)
-            logging.debug(f"Written engine_cfg for {platform}: {engine_cfg}")
+        if is_unified:
+            engine_cfg = extract_engine_yaml(args.config, platform, input_xyz=args.input)
+        else:
+            # For legacy, patch/convert but don't run training if only_generate
+            engine_cfg = None  # Will be loaded in next step
+            engine_yaml = patch_and_convert_yaml(args.config, platform, xyz_path=args.input, scratch_dir=scratch_dir, write_temp=True)
+        if is_unified:
+            with open(engine_yaml, "w", encoding="utf-8") as f:
+                yaml.dump(engine_cfg, f)
+                logging.debug(f"Written engine_cfg for {platform}: {engine_cfg}")
+
+        print(f"\n[INFO] Engine YAML generated at: {engine_yaml}\n")
+        print("[INFO] Edit the generated engine YAML if you want to tweak advanced options.")
+        print("[INFO] To launch training, run:")
+        print(f"    python cli.py --config {engine_yaml} --engine {platform}\n")
+        if args.only_generate or (is_unified and not args.train_after_generate):
+            return  # Stop here
+
+    # At this point, we know we need to train, so prepare engine_yaml path and engine_cfg
+    if is_unified or args.only_generate:
+        # Already set above
+        with open(engine_yaml, "r", encoding="utf-8") as f:
+            engine_cfg = yaml.safe_load(f)
     else:
-        # Always patch, always write temp! Handles both with/without --input
+        # Legacy mode, always patch/convert and run
         engine_yaml = patch_and_convert_yaml(args.config, platform, xyz_path=args.input, scratch_dir=scratch_dir, write_temp=True)
         with open(engine_yaml, "r", encoding="utf-8") as f:
             engine_cfg = yaml.safe_load(f)
 
+    # After YAML is written and loaded, but before starting training
+    if not (args.only_generate or (is_unified and not args.train_after_generate)):
+        print(f"[INFO] Engine YAML generated at: {engine_yaml}")
+        print(f"[INFO] Now starting training for {platform}...\n")
+        
     try:
         if platform in ["schnet", "painn", "fusion"]:
             run_schnet_training(engine_yaml)
@@ -135,8 +151,16 @@ def main():
             run_nequip_training(os.path.abspath(engine_yaml))
 
         results_dir = get_output_dir(engine_cfg, platform)
+        best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
         standardized_dir = os.path.join(scratch_dir, "standardized")
-        standardize_output(platform, scratch_dir, standardized_dir, results_dir=results_dir, config_yaml_path=engine_yaml)
+        standardize_output(
+            platform,
+            scratch_dir,
+            standardized_dir,
+            results_dir=results_dir,
+            config_yaml_path=engine_yaml,
+            best_model_dir=best_model_dir,
+        )
         logging.info(f"Output standardized to {standardized_dir}")
 
     except Exception as e:
