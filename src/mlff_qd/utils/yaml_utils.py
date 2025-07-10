@@ -8,17 +8,17 @@ from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 KEY_MAPPINGS = {
     "schnet": {
         "model.cutoff": ["model.cutoff"],
-        "model.layers": ["model.num_interactions"],
+        "model.mp_layers": ["model.num_interactions"],
         "model.features": ["model.n_atom_basis"],
         "model.n_rbf": ["model.n_rbf"],
-        "model.l_max": ["model.l_max"],
-        "model.chemical_symbols": ["model.chemical_symbols"],
         "training.seed": ["general.seed"],
         "training.batch_size": ["training.batch_size"],
         "training.epochs": ["training.max_epochs"],
         "training.learning_rate": ["training.optimizer.lr"],
         "training.optimizer": ["training.optimizer.type"],
-        "training.scheduler": ["training.scheduler"],
+        "training.scheduler.type": ["training.scheduler.type"],
+        "training.scheduler.factor": ["training.scheduler.factor"],
+        "training.scheduler.patience": ["training.scheduler.patience"],
         "training.num_workers": ["training.num_workers"],
         "training.pin_memory": ["training.pin_memory"],
         "training.log_every_n_steps": ["training.log_every_n_steps"],
@@ -26,15 +26,15 @@ KEY_MAPPINGS = {
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
         "output.output_dir": ["logging.folder", "testing.trained_model_path"],
-        "output.energy_loss_weight": ["outputs.energy.loss_weight"],
-        "output.forces_loss_weight": ["outputs.forces.loss_weight"],
+        "loss.energy_weight": ["outputs.energy.loss_weight"],
+        "loss.forces_weight": ["outputs.forces.loss_weight"],
         "data.input_xyz_file": ["data.dataset_path"],
     },
     "painn": {},  # Will inherit from schnet and apply patch in code
     "fusion": {}, # Will inherit from schnet and apply patch in code
     "nequip": {
         "model.cutoff": ["training_module.model.r_max"],
-        "model.layers": ["training_module.model.num_layers"],
+        "model.mp_layers": ["training_module.model.num_layers"],
         "model.features": ["training_module.model.num_features"],  
         "model.n_rbf": ["training_module.model.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
@@ -55,12 +55,15 @@ KEY_MAPPINGS = {
         "training.learning_rate": ["training_module.optimizer.lr"],
         "training.optimizer": ["training_module.optimizer._target_"],
         "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # Or ...scheduler.type if you use a string
+        "training.scheduler.factor": ["training_module.lr_scheduler.scheduler.factor"],
+        "training.scheduler.patience": ["training_module.lr_scheduler.scheduler.patience"],
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
         "training.device": ["device", "trainer.accelerator"],  # your template uses 'device'
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
+        "training.test_size": ["data.split_dataset.test"],
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[1].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -69,7 +72,7 @@ KEY_MAPPINGS = {
     
     "allegro": {
         "model.cutoff": ["training_module.model.r_max"],
-        "model.layers": ["training_module.model.num_layers"],
+        "model.mp_layers": ["training_module.model.num_layers"],
         "model.features": ["training_module.model.num_scalar_features"],  # Allegro: num_scalar_features
         "model.n_rbf": ["training_module.model.radial_chemical_embed.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
@@ -90,12 +93,15 @@ KEY_MAPPINGS = {
         "training.learning_rate": ["training_module.optimizer.lr"],
         "training.optimizer": ["training_module.optimizer._target_"],
         "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # same as NequIP
+        "training.scheduler.factor": ["training_module.lr_scheduler.scheduler.factor"],
+        "training.scheduler.patience": ["training_module.lr_scheduler.scheduler.patience"],
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
         "training.device": ["device", "trainer.accelerator"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
+        "training.test_size": ["data.split_dataset.test"],
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[0].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -104,7 +110,7 @@ KEY_MAPPINGS = {
 
     "mace": {
         "model.cutoff": ["r_max"],
-        "model.layers": ["num_interactions"],
+        "model.mp_layers": ["num_interactions"],
         "model.features": ["num_channels"],
         "model.n_rbf": ["num_radial_basis"],
         "model.l_max": ["max_L"],
@@ -246,32 +252,134 @@ def prune_to_template(cfg, template):
                 pruned[k] = v
     return pruned
 
+def smart_round(x, ndigits=4):
+    return round(float(x), ndigits)
+
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
     if platform in ["schnet", "painn", "fusion"]:
-        # Only use train/val
+        if (train_size + val_size + test_size) > 1.0 + 1e-6:
+            raise ValueError(f"{platform}: train+val+test > 1.0 is not allowed!")
         if (train_size + val_size) < 1.0:
             missing = 1.0 - (train_size + val_size)
             val_size += missing
             print(f"[WARNING] {platform}: test_size will be ignored. Adjusted val_size to {val_size:.3f} so train+val=1.0")
         elif (train_size + val_size) > 1.0:
-            total = train_size + val_size
-            train_size /= total
-            val_size /= total
-            print(f"[WARNING] {platform}: train+val > 1.0, normalized both so train+val=1.0")
-        # test_size ignored
+            raise ValueError(f"{platform}: train+val > 1.0 is not allowed! Please fix your splits.")
         test_size = 0.0
     elif platform in ["nequip", "allegro"]:
-        # Use all three, but ensure sum to 1.0
         total = train_size + val_size + test_size
         if abs(total - 1.0) > 1e-6:
-            train_size /= total
-            val_size  /= total
-            test_size /= total
-            print(f"[WARNING] {platform}: train+val+test != 1.0; normalized all so they sum to 1.0")
-    return train_size, val_size, test_size
+            raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
+    return smart_round(train_size), smart_round(val_size), smart_round(test_size)
 
-def smart_round(x, ndigits=4):
-    return round(float(x), ndigits)
+
+def path_exists_in_template(template: dict, keys: list) -> bool:
+    """Check if a nested key path exists in the template dictionary."""
+    cur = template
+    for k in keys:
+        # Support dot notation and list indexes
+        if "[" in k and k.endswith("]"):
+            base, idx = k[:-1].split("[")
+            idx = int(idx)
+            if base not in cur or not isinstance(cur[base], list):
+                return False
+            if idx >= len(cur[base]):
+                return False
+            cur = cur[base][idx]
+        else:
+            if not isinstance(cur, dict) or k not in cur:
+                return False
+            cur = cur[k]
+    return True
+
+def path_is_set_from_common(flat_common, key_mapping, dotkey):
+    """
+    Returns True if this override dotkey is set by mapping from common.
+    """
+    # For each common key that has a mapping
+    for ckey, mapped_paths in key_mapping.items():
+        if ckey in flat_common:
+            for mp in mapped_paths:
+                # If the mapped path matches the override dotkey, it's set by common!
+                if mp == dotkey:
+                    return True
+    return False
+
+
+def apply_overrides_with_common_check(
+    engine_cfg: dict,
+    overrides: dict,
+    template: dict,
+    flat_common: dict,
+    key_mapping: dict,
+    parent_path=()
+):
+    for k, v in overrides.items():
+        # Always handle dot notation
+        key_parts = k.split(".")
+        full_path = parent_path + tuple(key_parts)
+        dot_key = ".".join(full_path)
+
+        # --- 1. Check if this override key is set from the common section (directly or via key mapping) ---
+        # Check if this key is already set in common via KEY_MAPPINGS
+        if path_is_set_from_common(flat_common, key_mapping, dot_key):
+            logging.warning(f"[OVERRIDE WARNING] Key {dot_key} already set from common section; ignoring expert override.")
+            continue
+
+        # --- 2. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
+        if isinstance(v, dict) and len(key_parts) == 1:
+            engine_cfg.setdefault(k, {})
+            tmpl_sub = template.get(k, {}) if isinstance(template, dict) else {}
+            apply_overrides_with_common_check(engine_cfg[k], v, tmpl_sub, flat_common, key_mapping, parent_path + (k,))
+            continue
+
+        # --- 3. List-style keys (handled by set_nested already) ---
+        if any("[" in part and part.endswith("]") for part in key_parts):
+            pass  # The code below already handles list-style keys
+
+        # --- 4. Check if this key exists in the template ---
+        tmpl_ptr = template
+        is_in_template = True
+        for part in full_path:
+            if tmpl_ptr is None:
+                is_in_template = False
+                break
+            if "[" in part and part.endswith("]"):
+                base, idx_str = part[:-1].split("[")
+                idx = int(idx_str)
+                if (not isinstance(tmpl_ptr, dict)) or (base not in tmpl_ptr) or (not isinstance(tmpl_ptr[base], list)) or (idx >= len(tmpl_ptr[base])):
+                    is_in_template = False
+                    break
+                tmpl_ptr = tmpl_ptr[base][idx]
+            else:
+                if (not isinstance(tmpl_ptr, dict)) or (part not in tmpl_ptr):
+                    is_in_template = False
+                    break
+                tmpl_ptr = tmpl_ptr[part]
+        
+        # If the key is not in the template, skip it with a warning
+        if not is_in_template:
+            logging.warning(f"[OVERRIDE WARNING] Key {dot_key} not present in template! Skipping.")
+            continue
+
+        # --- 5. Apply the override ---
+        set_nested(engine_cfg, list(full_path), v)
+        logging.info(f"[OVERRIDE INFO] Key {dot_key} set by expert override (value: {v!r}).")
+
+def warn_unused_common_keys(user_cfg, platform):
+    # 1. Flatten user config
+    flat_common = flatten_dict(user_cfg)
+    # 2. Get mapped keys for platform
+    key_mapping = KEY_MAPPINGS[platform]
+    mapped_keys = set(key_mapping.keys())
+    # 3. Unused keys: in flat_common but not in mapping
+    unused_keys = [k for k in flat_common if k not in mapped_keys]
+    if unused_keys:
+        logging.info(
+            f"[INFO] The following keys from `common` are not used by platform '{platform}': {unused_keys}"
+        )
+    return unused_keys
+
 
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     """
@@ -327,7 +435,9 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     engine_base = load_template(platform)
     engine_cfg = deepcopy(engine_base)
     apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
-
+    
+    warn_unused_common_keys(user_cfg, platform)
+    
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
         set_nested(engine_cfg, p.split("."), converted_file)
@@ -340,6 +450,24 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     elif platform in ["schnet", "painn", "fusion"]:
         set_nested(engine_cfg, ["training", "num_train"], train_size)
         set_nested(engine_cfg, ["training", "num_val"], val_size)
+
+    # --- Handle pair_potential logic for NequIP/Allegro ---
+    if platform in ["nequip", "allegro"]:
+        pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
+        model_dict = engine_cfg.get("training_module", {}).get("model", {})
+
+        # Accept only ZBL (string, case-insensitive) or None/null
+        if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
+            if "pair_potential" in model_dict:
+                del model_dict["pair_potential"]
+                logging.info("Removed pair_potential from extracted YAML (pair_potential: null).")
+        elif isinstance(pair_potential_kind, str) and pair_potential_kind.strip().upper() == "ZBL":
+            logging.info("ZBL pair_potential retained in extracted YAML.")
+        else:
+            raise ValueError(
+                f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
+                "Allowed values: 'ZBL' (string) or null."
+            )
 
     # --- schnet/painn/fusion tweaks ---
     if platform == "painn":
@@ -354,6 +482,14 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     
     engine_cfg = prune_to_template(engine_cfg, engine_base)
     
+    # ... Handle overrides section
+    flat_common = flatten_dict(user_cfg)
+    if "overrides" in config and platform in config["overrides"]:
+        overrides = config["overrides"][platform]
+        engine_base_template = load_template(platform)
+        apply_overrides_with_common_check(engine_cfg, overrides, engine_base_template, flat_common, KEY_MAPPINGS[platform])
+
+        
     # Remove any user-facing keys that might conflict (like 'input_xyz_file' at top)
     if "input_xyz_file" in engine_cfg:
         del engine_cfg["input_xyz_file"]
