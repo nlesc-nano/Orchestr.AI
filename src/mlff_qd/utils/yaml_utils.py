@@ -381,38 +381,74 @@ def warn_unused_common_keys(user_cfg, platform):
     return unused_keys
 
 
-def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
-    """
-    Generate an engine-specific YAML dict from the unified YAML config file and platform.
-    All overrides logic is REMOVED.
-    """
+def get_early_stopping_monitor(platform):
+    # Defaults by engine
+    if platform in ["nequip", "allegro"]:
+        return "val0_epoch/weighted_sum"
+    else:
+        return "val_loss"
+
+def apply_early_stopping(user_cfg, engine_cfg, platform):
+    """Add or remove EarlyStopping config in engine_cfg according to unified YAML."""
+    es_cfg = user_cfg.get("training", {}).get("early_stopping", {})
+    enabled = es_cfg.get("enabled", None)
+    if enabled is True:
+        # Insert missing monitor if not set
+        if "monitor" not in es_cfg or not es_cfg["monitor"]:
+            es_cfg["monitor"] = get_early_stopping_monitor(platform)
+        # Patch into the right spot
+        if platform in ["schnet", "painn", "fusion"]:
+            # Under training.early_stopping
+            engine_cfg.setdefault("training", {})["early_stopping"] = {
+                "monitor": es_cfg["monitor"],
+                "patience": es_cfg.get("patience", 20),
+                "min_delta": es_cfg.get("min_delta", 1e-3),
+                "mode": es_cfg.get("mode", "min"),
+            }
+        elif platform in ["nequip", "allegro"]:
+            # Under callbacks: list of callback dicts, find/add EarlyStopping
+            cb = {
+                "_target_": "lightning.pytorch.callbacks.EarlyStopping",
+                "monitor": es_cfg["monitor"],
+                "min_delta": es_cfg.get("min_delta", 1e-3),
+                "patience": es_cfg.get("patience", 20),
+            }
+            # Remove any existing EarlyStopping to avoid duplicates
+            callbacks = engine_cfg.setdefault("callbacks", [])
+            callbacks = [c for c in callbacks if not (
+                isinstance(c, dict) and c.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping"
+            )]
+            callbacks.append(cb)
+            engine_cfg["callbacks"] = callbacks
+    else:
+        # Remove EarlyStopping if present
+        if platform in ["schnet", "painn", "fusion"]:
+            engine_cfg.get("training", {}).pop("early_stopping", None)
+        elif platform in ["nequip", "allegro"]:
+            callbacks = engine_cfg.get("callbacks", [])
+            callbacks = [c for c in callbacks if not (
+                isinstance(c, dict) and c.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping"
+            )]
+            engine_cfg["callbacks"] = callbacks
+
+def extract_common_config(master_yaml_path):
     with open(master_yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-
-    # Load base template for engine (always schnet for painn/fusion)
-    engine_base = load_template(platform)
-
-    # --- Flatten user config (we only look at `common` block) ---
     if "common" not in config:
         raise ValueError("New YAML must have a `common:` section at top level.")
-    user_cfg = config["common"]
-    
+    return config["common"], config
+
+def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
+    # ---- Load configs
+    user_cfg, config = extract_common_config(master_yaml_path)
     user_cfg = preprocess_optimizer(user_cfg)
 
-    # --- Extract and normalize splits ---
+    # --- Data splits ---
     training_cfg = user_cfg.get("training", {})
     train_size = training_cfg.get("train_size", 0.8)
     val_size   = training_cfg.get("val_size", 0.2)
     test_size  = training_cfg.get("test_size", 0.0)
-    
-    
-    train_size, val_size, test_size = adjust_splits_for_engine(
-        train_size, val_size, test_size, platform
-    )
-    
-    train_size = smart_round(train_size)
-    val_size   = smart_round(val_size)
-    test_size  = smart_round(test_size)
+    train_size, val_size, test_size = adjust_splits_for_engine(train_size, val_size, test_size, platform)
 
     # -- Find input_xyz_file --
     input_xyz_file = None
@@ -435,28 +471,56 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     engine_base = load_template(platform)
     engine_cfg = deepcopy(engine_base)
     apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
-    
     warn_unused_common_keys(user_cfg, platform)
-    
+
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
         set_nested(engine_cfg, p.split("."), converted_file)
 
-    # --- Inject split sizes at the right place in the engine config ---
+    # --- Patch split sizes
     if platform in ["nequip", "allegro"]:
-        set_nested(engine_cfg, ["data", "split_dataset", "train"], train_size)
-        set_nested(engine_cfg, ["data", "split_dataset", "val"], val_size)
-        set_nested(engine_cfg, ["data", "split_dataset", "test"], test_size)
+        set_nested(engine_cfg, ["data", "split_dataset", "train"], smart_round(train_size))
+        set_nested(engine_cfg, ["data", "split_dataset", "val"], smart_round(val_size))
+        set_nested(engine_cfg, ["data", "split_dataset", "test"], smart_round(test_size))
     elif platform in ["schnet", "painn", "fusion"]:
-        set_nested(engine_cfg, ["training", "num_train"], train_size)
-        set_nested(engine_cfg, ["training", "num_val"], val_size)
+        set_nested(engine_cfg, ["training", "num_train"], smart_round(train_size))
+        set_nested(engine_cfg, ["training", "num_val"], smart_round(val_size))
 
-    # --- Handle pair_potential logic for NequIP/Allegro ---
+    # --- Special patches
+    handle_pair_potential(user_cfg, engine_cfg, platform)
+    if platform == "painn":
+        engine_cfg["model"]["model_type"] = "painn"
+    if platform == "fusion":
+        engine_cfg["model"].update({
+            "model_type": "nequip_mace_interaction_fusion",
+            "lmax": 2,
+            "n_interactions_nequip": 1,
+            "n_interactions_mace": 1
+        })
+
+    # --- EarlyStopping logic
+    apply_early_stopping(user_cfg, engine_cfg, platform)
+
+    engine_cfg = prune_to_template(engine_cfg, engine_base)
+
+    # ... Handle overrides section
+    flat_common = flatten_dict(user_cfg)
+    if "overrides" in config and platform in config["overrides"]:
+        overrides = config["overrides"][platform]
+        engine_base_template = load_template(platform)
+        apply_overrides_with_common_check(engine_cfg, overrides, engine_base_template, flat_common, KEY_MAPPINGS[platform])
+
+    if "input_xyz_file" in engine_cfg:
+        del engine_cfg["input_xyz_file"]
+    if platform == "mace":
+        engine_cfg["valid_file"] = None
+        engine_cfg["test_file"] = None
+    return engine_cfg
+
+def handle_pair_potential(user_cfg, engine_cfg, platform):
     if platform in ["nequip", "allegro"]:
         pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
         model_dict = engine_cfg.get("training_module", {}).get("model", {})
-
-        # Accept only ZBL (string, case-insensitive) or None/null
         if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
             if "pair_potential" in model_dict:
                 del model_dict["pair_potential"]
@@ -468,35 +532,3 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
                 f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
                 "Allowed values: 'ZBL' (string) or null."
             )
-
-    # --- schnet/painn/fusion tweaks ---
-    if platform == "painn":
-        engine_cfg["model"]["model_type"] = "painn"
-    if platform == "fusion":
-        engine_cfg["model"].update({
-            "model_type": "nequip_mace_interaction_fusion",
-            "lmax": 2,
-            "n_interactions_nequip": 1,
-            "n_interactions_mace": 1
-        })
-    
-    engine_cfg = prune_to_template(engine_cfg, engine_base)
-    
-    # ... Handle overrides section
-    flat_common = flatten_dict(user_cfg)
-    if "overrides" in config and platform in config["overrides"]:
-        overrides = config["overrides"][platform]
-        engine_base_template = load_template(platform)
-        apply_overrides_with_common_check(engine_cfg, overrides, engine_base_template, flat_common, KEY_MAPPINGS[platform])
-
-        
-    # Remove any user-facing keys that might conflict (like 'input_xyz_file' at top)
-    if "input_xyz_file" in engine_cfg:
-        del engine_cfg["input_xyz_file"]
-    
-    if platform == "mace":
-        engine_cfg["valid_file"] = None
-        engine_cfg["test_file"] = None
-
-    return engine_cfg
-

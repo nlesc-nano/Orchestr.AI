@@ -46,6 +46,15 @@ common:
       factor: 0.8
       patience: 5
     pin_memory: true
+    
+    early_stopping:
+      enabled: true
+      patience: 30
+      min_delta: 0.003
+      monitor: val_loss
+      # monitor: val_loss         # for schnet
+      # monitor: val0_epoch/weighted_sum   # for nequip
+      # (If omitted, the code auto-inserts the correct default!)
 
   loss:
     energy_weight: 0.05

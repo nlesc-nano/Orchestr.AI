@@ -52,6 +52,12 @@ training:
       factor: 0.8
       patience: 30
       verbose: true
+    early_stopping:      # add this, default/empty
+      enabled: true
+      monitor: val_loss
+      patience: 20
+      min_delta: 0.001
+      mode: min
 
 # Logging and checkpoint settings
 logging:
