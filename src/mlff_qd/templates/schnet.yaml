@@ -52,8 +52,7 @@ training:
       factor: 0.8
       patience: 30
       verbose: true
-    early_stopping:      # add this, default/empty
-      enabled: true
+    early_stopping:      
       monitor: val_loss
       patience: 20
       min_delta: 0.001
