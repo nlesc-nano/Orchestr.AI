@@ -64,7 +64,7 @@ KEY_MAPPINGS = {
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
-        "training.device": ["device", "trainer.accelerator"],  # your template uses 'device'
+        "training.device": ["device", "trainer.accelerator"],  # template uses 'device'
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -129,13 +129,13 @@ KEY_MAPPINGS = {
         "training.batch_size": ["batch_size"],
         "training.epochs": ["max_num_epochs"],
         "training.learning_rate": ["lr"],
-        "training.optimizer": ["optimizer"],  # string field in your template
-        "training.scheduler": ["scheduler"],  # string field in your template
+        "training.optimizer": ["optimizer"],  # string field in template
+        "training.scheduler": ["scheduler"],  # string field in template
         "training.num_workers": ["num_workers"],
         "training.pin_memory": ["pin_memory"],
         "training.log_every_n_steps": ["eval_interval"],
         "training.device": ["device"],
-        "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful
+        "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful 
         "training.val_size": ["valid_file"],
         "training.early_stopping.patience": ["patience"],
         "data.input_xyz_file": ["train_file"],  # (overwrites train_file path with converted dataset)
@@ -149,7 +149,6 @@ OPTIMIZER_TARGETS = {
     "AdamW": "torch.optim.AdamW",
     "Adam": "torch.optim.Adam",
     "SGD": "torch.optim.SGD",
-    # add more if needed
 }
 
 # Patch painn/fusion mapping to schnet (they use the same template)
@@ -192,7 +191,7 @@ def update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform):
 def apply_early_stopping(user_cfg, engine_cfg, platform, key_mappings):
     es_cfg = user_cfg.get("training", {}).get("early_stopping", {})
     enabled = es_cfg.get("enabled", None)
-    if enabled is False:
+    if enabled is False or enabled is None:
         if platform == "mace":
             engine_cfg.pop("patience", None)
         else:
