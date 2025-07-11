@@ -166,6 +166,38 @@ We are showing examples with nequip, you can choose anyone. **The training proce
 | Use engine-specific YAML with `--engine` | `sbatch run_idv.sh nequip.yaml --engine nequip` | YAML must contain `input_xyz_file` |
 | Override input in engine-specific YAML | `sbatch run_idv.sh nequip.yaml --engine nequip --input ./basic.xyz` | Use to test with alternate datasets |
 
+## Additional Flags: `--only-generate` and `--train-after-generate`
+
+Control **data/config generation** and **training** phases using these flags:
+- `--only-generate`:  
+  Only generate the engine-specific YAML and/or convert data, **without starting training**.
+- `--train-after-generate`:  
+  Generate data/config, then **immediately start training** using the generated engine YAML.
+
+### Priority Rules:
+If you provide **both** flags, `--only-generate` takes precedence and training will **not** start.
+
+```bash
+# Only generate engine YAML and converted data (no training)
+sbatch run_idv.sh unifiedYaml.yaml --engine nequip --only-generate
+
+# Generate and then train (run both steps)
+sbatch run_idv.sh unifiedYaml.yaml --engine nequip --train-after-generate
+```
+
+---
+
+## 📝 Note on Engine YAMLs
+
+If you are **already using an engine-specific YAML** (e.g., `nequip.yaml`, `schnet.yaml`):
+
+- You **do not need** to use `--only-generate` or `--train-after-generate`.
+- Just run:
+```bash
+sbatch run_idv.sh nequip.yaml --engine nequip
+```
+
+---
 
 ### Inference code
 After the training has finished, an user can run the inference code that generates the MLFF:
