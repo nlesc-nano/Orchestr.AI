@@ -4,7 +4,7 @@ import logging
 from copy import deepcopy
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
-# Define nested key mappings for new YAML format
+# ======== KEY MAPPINGS =========
 KEY_MAPPINGS = {
     "schnet": {
         "model.cutoff": ["model.cutoff"],
@@ -25,6 +25,10 @@ KEY_MAPPINGS = {
         "training.device": ["training.accelerator"],
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
+        "training.early_stopping": ["training.early_stopping"],  # EarlyStopping 
+        "training.early_stopping.patience": ["training.early_stopping.patience"],
+        "training.early_stopping.min_delta": ["training.early_stopping.min_delta"],
+        "training.early_stopping.monitor": ["training.early_stopping.monitor"],
         "output.output_dir": ["logging.folder", "testing.trained_model_path"],
         "loss.energy_weight": ["outputs.energy.loss_weight"],
         "loss.forces_weight": ["outputs.forces.loss_weight"],
@@ -64,6 +68,9 @@ KEY_MAPPINGS = {
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
+        "training.early_stopping.patience": ["trainer.callbacks[0].patience"],
+        "training.early_stopping.min_delta": ["trainer.callbacks[0].min_delta"],
+        "training.early_stopping.monitor":  ["trainer.callbacks[0].monitor"],
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[1].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -102,6 +109,9 @@ KEY_MAPPINGS = {
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
+        "training.early_stopping.patience": ["trainer.callbacks[1].patience"],
+        "training.early_stopping.min_delta": ["trainer.callbacks[1].min_delta"],
+        "training.early_stopping.monitor":  ["trainer.callbacks[1].monitor"], 
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[0].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -127,6 +137,7 @@ KEY_MAPPINGS = {
         "training.device": ["device"],
         "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful
         "training.val_size": ["valid_file"],
+        "training.early_stopping.patience": ["patience"],
         "data.input_xyz_file": ["train_file"],  # (overwrites train_file path with converted dataset)
         "output.output_dir": [],  # Not present as key, could be directory for output, add if needed
         "loss.energy_weight": ["energy_weight"],
@@ -134,13 +145,71 @@ KEY_MAPPINGS = {
     },
 }
 
-
 OPTIMIZER_TARGETS = {
     "AdamW": "torch.optim.AdamW",
     "Adam": "torch.optim.Adam",
     "SGD": "torch.optim.SGD",
     # add more if needed
 }
+
+# Patch painn/fusion mapping to schnet (they use the same template)
+for plat in ["painn", "fusion"]:
+    KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
+
+# ======= EARLY STOPPING HELPERS =======
+def get_early_stopping_monitor(platform):
+    if platform in ["schnet", "painn", "fusion"]:
+        return "val_loss"
+    elif platform in ["nequip", "allegro"]:
+        return "val0_epoch/weighted_sum"
+    elif platform == "mace":
+        return None
+    else:
+        return None
+
+def remove_early_stopping_callbacks(engine_cfg):
+    for cb_path in [["callbacks"], ["trainer", "callbacks"]]:
+        ptr = engine_cfg
+        for k in cb_path[:-1]:
+            ptr = ptr.get(k, {})
+        key = cb_path[-1]
+        if key in ptr and isinstance(ptr[key], list):
+            ptr[key] = [
+                cb for cb in ptr[key]
+                if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")
+            ]
+                             
+def update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform):
+    patience = es_cfg.get("patience", 20 if platform in ["nequip", "allegro"] else 30)
+    min_delta = es_cfg.get("min_delta", 1e-3)
+    monitor = es_cfg.get("monitor", get_early_stopping_monitor(platform))
+    for param, val in [("patience", patience), ("min_delta", min_delta), ("monitor", monitor)]:
+        user_val = es_cfg.get(param, val)
+        for path in key_mappings.get(f"training.early_stopping.{param}", []):
+            set_nested(engine_cfg, path.split("."), user_val)
+
+def apply_early_stopping(user_cfg, engine_cfg, platform, key_mappings):
+    es_cfg = user_cfg.get("training", {}).get("early_stopping", {})
+    enabled = es_cfg.get("enabled", None)
+    if enabled is False:
+        if platform == "mace":
+            engine_cfg.pop("patience", None)
+        else:
+            remove_early_stopping_callbacks(engine_cfg)
+            if platform in ["schnet", "painn", "fusion"]:
+                if "training" in engine_cfg:
+                    engine_cfg["training"].pop("early_stopping", None)
+    elif enabled is True:
+        if platform == "mace":
+            patience = es_cfg.get("patience", 30)
+            engine_cfg["patience"] = patience
+        elif platform in ["schnet", "painn", "fusion"]:
+            es_cfg_clean = {k: v for k, v in es_cfg.items() if k != "enabled"}
+            if "monitor" not in es_cfg_clean or not es_cfg_clean.get("monitor"):
+                es_cfg_clean["monitor"] = get_early_stopping_monitor(platform)
+            engine_cfg.setdefault("training", {})["early_stopping"] = es_cfg_clean
+        elif platform in ["nequip", "allegro"]:
+            update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform)
 
 def preprocess_optimizer(user_cfg):
     # Recursively process nested user_cfg
@@ -152,9 +221,6 @@ def preprocess_optimizer(user_cfg):
                 preprocess_optimizer(v)
     return user_cfg
     
-# Patch painn/fusion mapping to schnet (they use the same template)
-for plat in ["painn", "fusion"]:
-    KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
 def load_template(platform):
     """Load platform-specific template from the templates directory."""
@@ -319,25 +385,45 @@ def apply_overrides_with_common_check(
         key_parts = k.split(".")
         full_path = parent_path + tuple(key_parts)
         dot_key = ".".join(full_path)
-
-        # --- 1. Check if this override key is set from the common section (directly or via key mapping) ---
+            
+        # --- 1. Handle EarlyStopping: skip override if common section has it! ---
+        if (
+            dot_key.startswith("training.early_stopping")
+            or dot_key.startswith("callbacks")
+            or dot_key.startswith("trainer.callbacks")
+        ) and any(
+            x in flat_common
+            for x in [
+                "training.early_stopping.patience",
+                "training.early_stopping.min_delta",
+                "training.early_stopping.monitor",
+                "training.early_stopping.enabled",
+                "training.early_stopping"
+            ]
+        ):
+            logging.warning(
+                f"[OVERRIDE WARNING] EarlyStopping override ignored for {dot_key}: already set from common section."
+            )
+            continue
+            
+        # --- 2. Check if this override key is set from the common section (directly or via key mapping) ---
         # Check if this key is already set in common via KEY_MAPPINGS
         if path_is_set_from_common(flat_common, key_mapping, dot_key):
             logging.warning(f"[OVERRIDE WARNING] Key {dot_key} already set from common section; ignoring expert override.")
             continue
 
-        # --- 2. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
+        # --- 3. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
         if isinstance(v, dict) and len(key_parts) == 1:
             engine_cfg.setdefault(k, {})
             tmpl_sub = template.get(k, {}) if isinstance(template, dict) else {}
             apply_overrides_with_common_check(engine_cfg[k], v, tmpl_sub, flat_common, key_mapping, parent_path + (k,))
             continue
 
-        # --- 3. List-style keys (handled by set_nested already) ---
+        # --- 4. List-style keys (handled by set_nested already) ---
         if any("[" in part and part.endswith("]") for part in key_parts):
             pass  # The code below already handles list-style keys
 
-        # --- 4. Check if this key exists in the template ---
+        # --- 5. Check if this key exists in the template ---
         tmpl_ptr = template
         is_in_template = True
         for part in full_path:
@@ -362,7 +448,7 @@ def apply_overrides_with_common_check(
             logging.warning(f"[OVERRIDE WARNING] Key {dot_key} not present in template! Skipping.")
             continue
 
-        # --- 5. Apply the override ---
+        # --- 6. Apply the override ---
         set_nested(engine_cfg, list(full_path), v)
         logging.info(f"[OVERRIDE INFO] Key {dot_key} set by expert override (value: {v!r}).")
 
@@ -380,57 +466,22 @@ def warn_unused_common_keys(user_cfg, platform):
         )
     return unused_keys
 
-
-def get_early_stopping_monitor(platform):
-    # Defaults by engine
+def handle_pair_potential(user_cfg, engine_cfg, platform):
     if platform in ["nequip", "allegro"]:
-        return "val0_epoch/weighted_sum"
-    else:
-        return "val_loss"
-
-def apply_early_stopping(user_cfg, engine_cfg, platform):
-    """Add or remove EarlyStopping config in engine_cfg according to unified YAML."""
-    es_cfg = user_cfg.get("training", {}).get("early_stopping", {})
-    enabled = es_cfg.get("enabled", None)
-    if enabled is True:
-        # Insert missing monitor if not set
-        if "monitor" not in es_cfg or not es_cfg["monitor"]:
-            es_cfg["monitor"] = get_early_stopping_monitor(platform)
-        # Patch into the right spot
-        if platform in ["schnet", "painn", "fusion"]:
-            # Under training.early_stopping
-            engine_cfg.setdefault("training", {})["early_stopping"] = {
-                "monitor": es_cfg["monitor"],
-                "patience": es_cfg.get("patience", 20),
-                "min_delta": es_cfg.get("min_delta", 1e-3),
-                "mode": es_cfg.get("mode", "min"),
-            }
-        elif platform in ["nequip", "allegro"]:
-            # Under callbacks: list of callback dicts, find/add EarlyStopping
-            cb = {
-                "_target_": "lightning.pytorch.callbacks.EarlyStopping",
-                "monitor": es_cfg["monitor"],
-                "min_delta": es_cfg.get("min_delta", 1e-3),
-                "patience": es_cfg.get("patience", 20),
-            }
-            # Remove any existing EarlyStopping to avoid duplicates
-            callbacks = engine_cfg.setdefault("callbacks", [])
-            callbacks = [c for c in callbacks if not (
-                isinstance(c, dict) and c.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping"
-            )]
-            callbacks.append(cb)
-            engine_cfg["callbacks"] = callbacks
-    else:
-        # Remove EarlyStopping if present
-        if platform in ["schnet", "painn", "fusion"]:
-            engine_cfg.get("training", {}).pop("early_stopping", None)
-        elif platform in ["nequip", "allegro"]:
-            callbacks = engine_cfg.get("callbacks", [])
-            callbacks = [c for c in callbacks if not (
-                isinstance(c, dict) and c.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping"
-            )]
-            engine_cfg["callbacks"] = callbacks
-
+        pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
+        model_dict = engine_cfg.get("training_module", {}).get("model", {})
+        if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
+            if "pair_potential" in model_dict:
+                del model_dict["pair_potential"]
+                logging.info("Removed pair_potential from extracted YAML (pair_potential: null).")
+        elif isinstance(pair_potential_kind, str) and pair_potential_kind.strip().upper() == "ZBL":
+            logging.info("ZBL pair_potential retained in extracted YAML.")
+        else:
+            raise ValueError(
+                f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
+                "Allowed values: 'ZBL' (string) or null."
+            )
+            
 def extract_common_config(master_yaml_path):
     with open(master_yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
@@ -498,9 +549,6 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
             "n_interactions_mace": 1
         })
 
-    # --- EarlyStopping logic
-    apply_early_stopping(user_cfg, engine_cfg, platform)
-
     engine_cfg = prune_to_template(engine_cfg, engine_base)
 
     # ... Handle overrides section
@@ -515,20 +563,10 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     if platform == "mace":
         engine_cfg["valid_file"] = None
         engine_cfg["test_file"] = None
+        
+    # --- EarlyStopping logic
+    apply_early_stopping(user_cfg, engine_cfg, platform, KEY_MAPPINGS[platform])
+    
     return engine_cfg
 
-def handle_pair_potential(user_cfg, engine_cfg, platform):
-    if platform in ["nequip", "allegro"]:
-        pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
-        model_dict = engine_cfg.get("training_module", {}).get("model", {})
-        if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
-            if "pair_potential" in model_dict:
-                del model_dict["pair_potential"]
-                logging.info("Removed pair_potential from extracted YAML (pair_potential: null).")
-        elif isinstance(pair_potential_kind, str) and pair_potential_kind.strip().upper() == "ZBL":
-            logging.info("ZBL pair_potential retained in extracted YAML.")
-        else:
-            raise ValueError(
-                f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
-                "Allowed values: 'ZBL' (string) or null."
-            )
+
