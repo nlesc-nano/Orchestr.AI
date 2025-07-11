@@ -25,6 +25,7 @@ KEY_MAPPINGS = {
         "training.device": ["training.accelerator"],
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
+        "training.test_size": ["training.num_test"],
         "training.early_stopping": ["training.early_stopping"],  # EarlyStopping 
         "training.early_stopping.patience": ["training.early_stopping.patience"],
         "training.early_stopping.min_delta": ["training.early_stopping.min_delta"],
@@ -322,22 +323,10 @@ def smart_round(x, ndigits=4):
     return round(float(x), ndigits)
 
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
-    if platform in ["schnet", "painn", "fusion"]:
-        if (train_size + val_size + test_size) > 1.0 + 1e-6:
-            raise ValueError(f"{platform}: train+val+test > 1.0 is not allowed!")
-        if (train_size + val_size) < 1.0:
-            missing = 1.0 - (train_size + val_size)
-            val_size += missing
-            print(f"[WARNING] {platform}: test_size will be ignored. Adjusted val_size to {val_size:.3f} so train+val=1.0")
-        elif (train_size + val_size) > 1.0:
-            raise ValueError(f"{platform}: train+val > 1.0 is not allowed! Please fix your splits.")
-        test_size = 0.0
-    elif platform in ["nequip", "allegro"]:
-        total = train_size + val_size + test_size
-        if abs(total - 1.0) > 1e-6:
-            raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
+    total = train_size + val_size + test_size
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
     return smart_round(train_size), smart_round(val_size), smart_round(test_size)
-
 
 def path_exists_in_template(template: dict, keys: list) -> bool:
     """Check if a nested key path exists in the template dictionary."""
