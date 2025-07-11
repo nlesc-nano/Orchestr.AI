@@ -168,17 +168,18 @@ def get_early_stopping_monitor(platform):
         return None
 
 def remove_early_stopping_callbacks(engine_cfg):
-    for cb_path in [["callbacks"], ["trainer", "callbacks"]]:
-        ptr = engine_cfg
-        for k in cb_path[:-1]:
-            ptr = ptr.get(k, {})
-        key = cb_path[-1]
-        if key in ptr and isinstance(ptr[key], list):
-            ptr[key] = [
-                cb for cb in ptr[key]
-                if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")
-            ]
-                             
+    # Remove from top-level 'callbacks'
+    if "callbacks" in engine_cfg and isinstance(engine_cfg["callbacks"], list):
+        engine_cfg["callbacks"] = [cb for cb in engine_cfg["callbacks"] if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")]
+        if not engine_cfg["callbacks"]:
+            del engine_cfg["callbacks"]
+    # Remove from trainer.callbacks if present
+    if "trainer" in engine_cfg and "callbacks" in engine_cfg["trainer"]:
+        if isinstance(engine_cfg["trainer"]["callbacks"], list):
+            engine_cfg["trainer"]["callbacks"] = [cb for cb in engine_cfg["trainer"]["callbacks"] if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")]
+            if not engine_cfg["trainer"]["callbacks"]:
+                del engine_cfg["trainer"]["callbacks"]
+                
 def update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform):
     patience = es_cfg.get("patience", 20 if platform in ["nequip", "allegro"] else 30)
     min_delta = es_cfg.get("min_delta", 1e-3)
