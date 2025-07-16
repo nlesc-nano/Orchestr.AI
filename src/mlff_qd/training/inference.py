@@ -177,6 +177,7 @@ def run_schnet_inference(config_file=None):
 
     train_loader = custom_data.train_dataloader()
     validation_loader = custom_data.val_dataloader()
+    test_loader = custom_data.test_dataloader()
     
     # Setup model
     nnpot, outputs = setup_model(config)
@@ -198,6 +199,7 @@ def run_schnet_inference(config_file=None):
     # Run inference on both datasets
     run_inference(train_loader, "train", best_model, device, property_units, new_dataset)
     run_inference(validation_loader, "validation", best_model, device, property_units, new_dataset)
+    run_inference(test_loader, "testing", best_model, device, property_units, new_dataset)
 
 if __name__ == '__main__':
     setup_logging()  # Initialize logging before main

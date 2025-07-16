@@ -82,6 +82,7 @@ trainer:
     - _target_: lightning.pytorch.callbacks.LearningRateMonitor
       logging_interval: epoch
 
+      
 training_module:
   _target_: nequip.train.EMALightningModule
 

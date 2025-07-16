@@ -37,10 +37,16 @@ trainer:
   log_every_n_steps: 5
   
   callbacks:
+      
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
       dirpath: ./results 
       filename: best
       save_last: true
+    
+    - _target_: lightning.pytorch.callbacks.EarlyStopping
+      monitor: val0_epoch/weighted_sum        # validation metric to monitor
+      min_delta: 1e-3                         # how much to be considered a "change"
+      patience: 20                            # how many instances of "no change" before stopping
       
   logger:
     - _target_: lightning.pytorch.loggers.TensorBoardLogger
