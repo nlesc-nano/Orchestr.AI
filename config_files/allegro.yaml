@@ -1,4 +1,4 @@
-run: [train, test]
+run: [train, val, test]
 
 
 cutoff_radius: 12.0
@@ -35,10 +35,25 @@ trainer:
   max_epochs: 3
   check_val_every_n_epoch: 1
   log_every_n_steps: 5
+  
   callbacks:
+      
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
-      dirpath: ${hydra:runtime.output_dir}
+      dirpath: ./results 
+      filename: best
       save_last: true
+    
+    - _target_: lightning.pytorch.callbacks.EarlyStopping
+      monitor: val0_epoch/weighted_sum        # validation metric to monitor
+      min_delta: 1e-3                         # how much to be considered a "change"
+      patience: 20                            # how many instances of "no change" before stopping
+      
+  logger:
+    - _target_: lightning.pytorch.loggers.TensorBoardLogger
+      save_dir: ./logs
+      name: tutorial_log
+      version: null
+      default_hp_metric: false
 
 
 # NOTE:
