@@ -39,7 +39,8 @@ training:
     precision: 32
     batch_size: 16
     num_train: 800
-    num_val: 200
+    num_val: 100
+    num_test: 100
     max_epochs: 3
     num_workers: 24
     pin_memory: true
