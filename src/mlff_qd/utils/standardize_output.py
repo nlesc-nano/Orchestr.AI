@@ -40,7 +40,26 @@ def move_best_model(results_dir, dest_dir, pattern="*model*"):
             logging.warning(f"Multiple best model candidates found: {best_models}")
         for bm in best_models:
             move_if_exists(bm, dest_dir)
-        
+ 
+def move_prediction_files(source_dir, results_dir, dest_dir):
+    """
+    Moves all .csv and .pkl files from source_dir and results_dir (recursively) to dest_dir/Prediction.
+    """
+    prediction_dir = os.path.join(dest_dir, "Prediction")
+    os.makedirs(prediction_dir, exist_ok=True)
+    n_found = 0
+    for base in [source_dir, results_dir]:
+        if base and os.path.exists(base):
+            for ext in ("**/*.csv", "**/*.pkl"):
+                for f in glob.glob(os.path.join(base, ext), recursive=True):
+                    if os.path.isfile(f):
+                        move_if_exists(f, prediction_dir)
+                        n_found += 1
+    if n_found == 0:
+        logging.warning(f"[Prediction] No .csv or .pkl files found in {source_dir} or {results_dir}.")
+    else:
+        logging.info(f"[Prediction] {n_found} .csv/.pkl prediction files moved to {prediction_dir}.")
+ 
 def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None, best_model_dir=None):
     """Standardize the output folder structure for a given platform."""
     logging.basicConfig(level=logging.INFO)
@@ -97,7 +116,10 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
         for f in os.listdir(source_dir):
             if f.endswith(".log"):
                 move_if_exists(os.path.join(source_dir, f), standardized_dirs["logs"])
-
+        
+        # Always move .csv/.pkl predictions from source/results
+        move_prediction_files(source_dir, results_dir, dest_dir)
+    
     elif platform in ("nequip", "allegro"):
         # Move all .ckpt files from results/ to checkpoints/
         for ckpt_file in glob.glob(os.path.join(results_dir, "*.ckpt")):

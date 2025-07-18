@@ -85,6 +85,7 @@ def setup_data_module(config, db_path, transformations, property_units):
         property_units=property_units,
         num_train=config['training']['num_train'],
         num_val=config['training']['num_val'],
+        num_test=config['training']['num_test'],
         transforms=transformations,
         num_workers=config['training']['num_workers'],
         pin_memory=config['training']['pin_memory']

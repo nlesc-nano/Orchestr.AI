@@ -4,7 +4,7 @@ import logging
 from copy import deepcopy
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
-# Define nested key mappings for new YAML format
+# ======== KEY MAPPINGS =========
 KEY_MAPPINGS = {
     "schnet": {
         "model.cutoff": ["model.cutoff"],
@@ -25,6 +25,11 @@ KEY_MAPPINGS = {
         "training.device": ["training.accelerator"],
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
+        "training.test_size": ["training.num_test"],
+        "training.early_stopping": ["training.early_stopping"],  # EarlyStopping 
+        "training.early_stopping.patience": ["training.early_stopping.patience"],
+        "training.early_stopping.min_delta": ["training.early_stopping.min_delta"],
+        "training.early_stopping.monitor": ["training.early_stopping.monitor"],
         "output.output_dir": ["logging.folder", "testing.trained_model_path"],
         "loss.energy_weight": ["outputs.energy.loss_weight"],
         "loss.forces_weight": ["outputs.forces.loss_weight"],
@@ -60,10 +65,13 @@ KEY_MAPPINGS = {
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
-        "training.device": ["device", "trainer.accelerator"],  # your template uses 'device'
+        "training.device": ["device", "trainer.accelerator"],  # template uses 'device'
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
+        "training.early_stopping.patience": ["trainer.callbacks[0].patience"],
+        "training.early_stopping.min_delta": ["trainer.callbacks[0].min_delta"],
+        "training.early_stopping.monitor":  ["trainer.callbacks[0].monitor"],
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[1].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -102,6 +110,9 @@ KEY_MAPPINGS = {
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
+        "training.early_stopping.patience": ["trainer.callbacks[1].patience"],
+        "training.early_stopping.min_delta": ["trainer.callbacks[1].min_delta"],
+        "training.early_stopping.monitor":  ["trainer.callbacks[1].monitor"], 
         "data.input_xyz_file": ["data.split_dataset.file_path"],
         "output.output_dir": ["trainer.callbacks[0].dirpath", "trainer.logger[0].save_dir"],
         "loss.energy_weight": ["training_module.loss.coeffs.total_energy"],
@@ -119,14 +130,15 @@ KEY_MAPPINGS = {
         "training.batch_size": ["batch_size"],
         "training.epochs": ["max_num_epochs"],
         "training.learning_rate": ["lr"],
-        "training.optimizer": ["optimizer"],  # string field in your template
-        "training.scheduler": ["scheduler"],  # string field in your template
+        "training.optimizer": ["optimizer"],  # string field in template
+        "training.scheduler": ["scheduler"],  # string field in template
         "training.num_workers": ["num_workers"],
         "training.pin_memory": ["pin_memory"],
         "training.log_every_n_steps": ["eval_interval"],
         "training.device": ["device"],
-        "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful
+        "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful 
         "training.val_size": ["valid_file"],
+        "training.early_stopping.patience": ["patience"],
         "data.input_xyz_file": ["train_file"],  # (overwrites train_file path with converted dataset)
         "output.output_dir": [],  # Not present as key, could be directory for output, add if needed
         "loss.energy_weight": ["energy_weight"],
@@ -134,13 +146,71 @@ KEY_MAPPINGS = {
     },
 }
 
-
 OPTIMIZER_TARGETS = {
     "AdamW": "torch.optim.AdamW",
     "Adam": "torch.optim.Adam",
     "SGD": "torch.optim.SGD",
-    # add more if needed
 }
+
+# Patch painn/fusion mapping to schnet (they use the same template)
+for plat in ["painn", "fusion"]:
+    KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
+
+# ======= EARLY STOPPING HELPERS =======
+def get_early_stopping_monitor(platform):
+    if platform in ["schnet", "painn", "fusion"]:
+        return "val_loss"
+    elif platform in ["nequip", "allegro"]:
+        return "val0_epoch/weighted_sum"
+    elif platform == "mace":
+        return None
+    else:
+        return None
+
+def remove_early_stopping_callbacks(engine_cfg):
+    # Remove from top-level 'callbacks'
+    if "callbacks" in engine_cfg and isinstance(engine_cfg["callbacks"], list):
+        engine_cfg["callbacks"] = [cb for cb in engine_cfg["callbacks"] if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")]
+        if not engine_cfg["callbacks"]:
+            del engine_cfg["callbacks"]
+    # Remove from trainer.callbacks if present
+    if "trainer" in engine_cfg and "callbacks" in engine_cfg["trainer"]:
+        if isinstance(engine_cfg["trainer"]["callbacks"], list):
+            engine_cfg["trainer"]["callbacks"] = [cb for cb in engine_cfg["trainer"]["callbacks"] if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")]
+            if not engine_cfg["trainer"]["callbacks"]:
+                del engine_cfg["trainer"]["callbacks"]
+                
+def update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform):
+    patience = es_cfg.get("patience", 20 if platform in ["nequip", "allegro"] else 30)
+    min_delta = es_cfg.get("min_delta", 1e-3)
+    monitor = es_cfg.get("monitor", get_early_stopping_monitor(platform))
+    for param, val in [("patience", patience), ("min_delta", min_delta), ("monitor", monitor)]:
+        user_val = es_cfg.get(param, val)
+        for path in key_mappings.get(f"training.early_stopping.{param}", []):
+            set_nested(engine_cfg, path.split("."), user_val)
+
+def apply_early_stopping(user_cfg, engine_cfg, platform, key_mappings):
+    es_cfg = user_cfg.get("training", {}).get("early_stopping", {})
+    enabled = es_cfg.get("enabled", None)
+    if enabled is False or enabled is None:
+        if platform == "mace":
+            engine_cfg.pop("patience", None)
+        else:
+            remove_early_stopping_callbacks(engine_cfg)
+            if platform in ["schnet", "painn", "fusion"]:
+                if "training" in engine_cfg:
+                    engine_cfg["training"].pop("early_stopping", None)
+    elif enabled is True:
+        if platform == "mace":
+            patience = es_cfg.get("patience", 30)
+            engine_cfg["patience"] = patience
+        elif platform in ["schnet", "painn", "fusion"]:
+            es_cfg_clean = {k: v for k, v in es_cfg.items() if k != "enabled"}
+            if "monitor" not in es_cfg_clean or not es_cfg_clean.get("monitor"):
+                es_cfg_clean["monitor"] = get_early_stopping_monitor(platform)
+            engine_cfg.setdefault("training", {})["early_stopping"] = es_cfg_clean
+        elif platform in ["nequip", "allegro"]:
+            update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform)
 
 def preprocess_optimizer(user_cfg):
     # Recursively process nested user_cfg
@@ -152,9 +222,6 @@ def preprocess_optimizer(user_cfg):
                 preprocess_optimizer(v)
     return user_cfg
     
-# Patch painn/fusion mapping to schnet (they use the same template)
-for plat in ["painn", "fusion"]:
-    KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
 def load_template(platform):
     """Load platform-specific template from the templates directory."""
@@ -256,22 +323,10 @@ def smart_round(x, ndigits=4):
     return round(float(x), ndigits)
 
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
-    if platform in ["schnet", "painn", "fusion"]:
-        if (train_size + val_size + test_size) > 1.0 + 1e-6:
-            raise ValueError(f"{platform}: train+val+test > 1.0 is not allowed!")
-        if (train_size + val_size) < 1.0:
-            missing = 1.0 - (train_size + val_size)
-            val_size += missing
-            print(f"[WARNING] {platform}: test_size will be ignored. Adjusted val_size to {val_size:.3f} so train+val=1.0")
-        elif (train_size + val_size) > 1.0:
-            raise ValueError(f"{platform}: train+val > 1.0 is not allowed! Please fix your splits.")
-        test_size = 0.0
-    elif platform in ["nequip", "allegro"]:
-        total = train_size + val_size + test_size
-        if abs(total - 1.0) > 1e-6:
-            raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
+    total = train_size + val_size + test_size
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
     return smart_round(train_size), smart_round(val_size), smart_round(test_size)
-
 
 def path_exists_in_template(template: dict, keys: list) -> bool:
     """Check if a nested key path exists in the template dictionary."""
@@ -319,25 +374,45 @@ def apply_overrides_with_common_check(
         key_parts = k.split(".")
         full_path = parent_path + tuple(key_parts)
         dot_key = ".".join(full_path)
-
-        # --- 1. Check if this override key is set from the common section (directly or via key mapping) ---
+            
+        # --- 1. Handle EarlyStopping: skip override if common section has it! ---
+        if (
+            dot_key.startswith("training.early_stopping")
+            or dot_key.startswith("callbacks")
+            or dot_key.startswith("trainer.callbacks")
+        ) and any(
+            x in flat_common
+            for x in [
+                "training.early_stopping.patience",
+                "training.early_stopping.min_delta",
+                "training.early_stopping.monitor",
+                "training.early_stopping.enabled",
+                "training.early_stopping"
+            ]
+        ):
+            logging.warning(
+                f"[OVERRIDE WARNING] EarlyStopping override ignored for {dot_key}: already set from common section."
+            )
+            continue
+            
+        # --- 2. Check if this override key is set from the common section (directly or via key mapping) ---
         # Check if this key is already set in common via KEY_MAPPINGS
         if path_is_set_from_common(flat_common, key_mapping, dot_key):
             logging.warning(f"[OVERRIDE WARNING] Key {dot_key} already set from common section; ignoring expert override.")
             continue
 
-        # --- 2. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
+        # --- 3. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
         if isinstance(v, dict) and len(key_parts) == 1:
             engine_cfg.setdefault(k, {})
             tmpl_sub = template.get(k, {}) if isinstance(template, dict) else {}
             apply_overrides_with_common_check(engine_cfg[k], v, tmpl_sub, flat_common, key_mapping, parent_path + (k,))
             continue
 
-        # --- 3. List-style keys (handled by set_nested already) ---
+        # --- 4. List-style keys (handled by set_nested already) ---
         if any("[" in part and part.endswith("]") for part in key_parts):
             pass  # The code below already handles list-style keys
 
-        # --- 4. Check if this key exists in the template ---
+        # --- 5. Check if this key exists in the template ---
         tmpl_ptr = template
         is_in_template = True
         for part in full_path:
@@ -362,7 +437,7 @@ def apply_overrides_with_common_check(
             logging.warning(f"[OVERRIDE WARNING] Key {dot_key} not present in template! Skipping.")
             continue
 
-        # --- 5. Apply the override ---
+        # --- 6. Apply the override ---
         set_nested(engine_cfg, list(full_path), v)
         logging.info(f"[OVERRIDE INFO] Key {dot_key} set by expert override (value: {v!r}).")
 
@@ -380,39 +455,40 @@ def warn_unused_common_keys(user_cfg, platform):
         )
     return unused_keys
 
-
-def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
-    """
-    Generate an engine-specific YAML dict from the unified YAML config file and platform.
-    All overrides logic is REMOVED.
-    """
+def handle_pair_potential(user_cfg, engine_cfg, platform):
+    if platform in ["nequip", "allegro"]:
+        pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
+        model_dict = engine_cfg.get("training_module", {}).get("model", {})
+        if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
+            if "pair_potential" in model_dict:
+                del model_dict["pair_potential"]
+                logging.info("Removed pair_potential from extracted YAML (pair_potential: null).")
+        elif isinstance(pair_potential_kind, str) and pair_potential_kind.strip().upper() == "ZBL":
+            logging.info("ZBL pair_potential retained in extracted YAML.")
+        else:
+            raise ValueError(
+                f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
+                "Allowed values: 'ZBL' (string) or null."
+            )
+            
+def extract_common_config(master_yaml_path):
     with open(master_yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-
-    # Load base template for engine (always schnet for painn/fusion)
-    engine_base = load_template(platform)
-
-    # --- Flatten user config (we only look at `common` block) ---
     if "common" not in config:
         raise ValueError("New YAML must have a `common:` section at top level.")
-    user_cfg = config["common"]
-    
+    return config["common"], config
+
+def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
+    # ---- Load configs
+    user_cfg, config = extract_common_config(master_yaml_path)
     user_cfg = preprocess_optimizer(user_cfg)
 
-    # --- Extract and normalize splits ---
+    # --- Data splits ---
     training_cfg = user_cfg.get("training", {})
     train_size = training_cfg.get("train_size", 0.8)
     val_size   = training_cfg.get("val_size", 0.2)
     test_size  = training_cfg.get("test_size", 0.0)
-    
-    
-    train_size, val_size, test_size = adjust_splits_for_engine(
-        train_size, val_size, test_size, platform
-    )
-    
-    train_size = smart_round(train_size)
-    val_size   = smart_round(val_size)
-    test_size  = smart_round(test_size)
+    train_size, val_size, test_size = adjust_splits_for_engine(train_size, val_size, test_size, platform)
 
     # -- Find input_xyz_file --
     input_xyz_file = None
@@ -435,41 +511,23 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     engine_base = load_template(platform)
     engine_cfg = deepcopy(engine_base)
     apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
-    
     warn_unused_common_keys(user_cfg, platform)
-    
+
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
         set_nested(engine_cfg, p.split("."), converted_file)
 
-    # --- Inject split sizes at the right place in the engine config ---
+    # --- Patch split sizes
     if platform in ["nequip", "allegro"]:
-        set_nested(engine_cfg, ["data", "split_dataset", "train"], train_size)
-        set_nested(engine_cfg, ["data", "split_dataset", "val"], val_size)
-        set_nested(engine_cfg, ["data", "split_dataset", "test"], test_size)
+        set_nested(engine_cfg, ["data", "split_dataset", "train"], smart_round(train_size))
+        set_nested(engine_cfg, ["data", "split_dataset", "val"], smart_round(val_size))
+        set_nested(engine_cfg, ["data", "split_dataset", "test"], smart_round(test_size))
     elif platform in ["schnet", "painn", "fusion"]:
-        set_nested(engine_cfg, ["training", "num_train"], train_size)
-        set_nested(engine_cfg, ["training", "num_val"], val_size)
+        set_nested(engine_cfg, ["training", "num_train"], smart_round(train_size))
+        set_nested(engine_cfg, ["training", "num_val"], smart_round(val_size))
 
-    # --- Handle pair_potential logic for NequIP/Allegro ---
-    if platform in ["nequip", "allegro"]:
-        pair_potential_kind = user_cfg.get("model", {}).get("pair_potential", None)
-        model_dict = engine_cfg.get("training_module", {}).get("model", {})
-
-        # Accept only ZBL (string, case-insensitive) or None/null
-        if pair_potential_kind is None or str(pair_potential_kind).strip().lower() == "null":
-            if "pair_potential" in model_dict:
-                del model_dict["pair_potential"]
-                logging.info("Removed pair_potential from extracted YAML (pair_potential: null).")
-        elif isinstance(pair_potential_kind, str) and pair_potential_kind.strip().upper() == "ZBL":
-            logging.info("ZBL pair_potential retained in extracted YAML.")
-        else:
-            raise ValueError(
-                f"[ERROR] Unsupported value for common.model.pair_potential: {pair_potential_kind!r}. "
-                "Allowed values: 'ZBL' (string) or null."
-            )
-
-    # --- schnet/painn/fusion tweaks ---
+    # --- Special patches
+    handle_pair_potential(user_cfg, engine_cfg, platform)
     if platform == "painn":
         engine_cfg["model"]["model_type"] = "painn"
     if platform == "fusion":
@@ -479,9 +537,9 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
             "n_interactions_nequip": 1,
             "n_interactions_mace": 1
         })
-    
+
     engine_cfg = prune_to_template(engine_cfg, engine_base)
-    
+
     # ... Handle overrides section
     flat_common = flatten_dict(user_cfg)
     if "overrides" in config and platform in config["overrides"]:
@@ -489,14 +547,15 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         engine_base_template = load_template(platform)
         apply_overrides_with_common_check(engine_cfg, overrides, engine_base_template, flat_common, KEY_MAPPINGS[platform])
 
-        
-    # Remove any user-facing keys that might conflict (like 'input_xyz_file' at top)
     if "input_xyz_file" in engine_cfg:
         del engine_cfg["input_xyz_file"]
-    
     if platform == "mace":
         engine_cfg["valid_file"] = None
         engine_cfg["test_file"] = None
-
+        
+    # --- EarlyStopping logic
+    apply_early_stopping(user_cfg, engine_cfg, platform, KEY_MAPPINGS[platform])
+    
     return engine_cfg
+
 
