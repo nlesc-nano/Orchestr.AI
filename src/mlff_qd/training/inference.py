@@ -2,12 +2,13 @@ import os
 import pandas as pd
 import torch
 import numpy as np
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from tqdm import tqdm
 import yaml
 import argparse
 import pickle
 import logging
+import math
 
 from schnetpack.data import ASEAtomsData
 
@@ -110,9 +111,13 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
     all_actual_forces_flat = np.concatenate(all_actual_forces).reshape(-1, 3)
     all_predicted_forces_flat = np.concatenate(all_predicted_forces).reshape(-1, 3)
 
-    # Compute MAEs for all properties
-    energy_mae = mean_absolute_error(np.concatenate(all_actual_energy), np.concatenate(all_predicted_energy))
+    # Compute MAEs and RMSEs for all properties
+    actual_energy_flat = np.concatenate(all_actual_energy)
+    predicted_energy_flat = np.concatenate(all_predicted_energy)
+    energy_mae = mean_absolute_error(actual_energy_flat, predicted_energy_flat)
+    energy_rmse = math.sqrt(mean_squared_error(actual_energy_flat, predicted_energy_flat))
     forces_mae = mean_absolute_error(all_actual_forces_flat, all_predicted_forces_flat)
+    forces_rmse = math.sqrt(mean_squared_error(all_actual_forces_flat, all_predicted_forces_flat))
 
     total_atoms = new_dataset[0]['_n_atoms'].item()  # Get total atoms from the dataset
     energy_mae_per_atom = (energy_mae / total_atoms)
