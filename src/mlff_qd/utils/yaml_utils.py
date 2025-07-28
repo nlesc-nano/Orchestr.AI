@@ -137,7 +137,7 @@ KEY_MAPPINGS = {
         "training.log_every_n_steps": ["eval_interval"],
         "training.device": ["device"],
         "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful 
-        "training.val_size": ["valid_file"],
+        "training.val_size": ["valid_fraction"],
         "training.early_stopping.patience": ["patience"],
         "data.input_xyz_file": ["train_file"],  # (overwrites train_file path with converted dataset)
         "output.output_dir": [],  # Not present as key, could be directory for output, add if needed
