@@ -538,6 +538,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     elif platform in ["schnet", "painn", "fusion"]:
         set_nested(engine_cfg, ["training", "num_train"], smart_round(train_size))
         set_nested(engine_cfg, ["training", "num_val"], smart_round(val_size))
+        set_nested(engine_cfg, ["training", "num_test"], smart_round(test_size))
 
     # --- Special patches
     handle_pair_potential(user_cfg, engine_cfg, platform)
@@ -568,6 +569,14 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         
     # --- EarlyStopping logic
     apply_early_stopping(user_cfg, engine_cfg, platform, KEY_MAPPINGS[platform])
+
+    # Patch for test_size=0 (after splits adjusted)
+    if test_size == 0.0:
+        if platform in ['nequip', 'allegro']:
+            engine_cfg['run'] = ['train', 'val']  # Skip test
+        elif platform == 'mace':
+            engine_cfg['test_file'] = None  # Skip test
+        print(f"Debug: Patched run for {platform}: {engine_cfg.get('run')}")  # Debug
     
     return engine_cfg
 
