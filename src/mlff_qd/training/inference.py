@@ -228,7 +228,11 @@ def run_schnet_inference(config_file=None):
     # Run inference on both datasets
     run_inference(train_loader, "train", best_model, device, property_units, new_dataset, tensorboard_logger)
     run_inference(validation_loader, "validation", best_model, device, property_units, new_dataset, tensorboard_logger)
-    run_inference(test_loader, "testing", best_model, device, property_units, new_dataset, tensorboard_logger)
+
+    if len(test_loader) > 0:
+        run_inference(test_loader, "testing", best_model, device, property_units, new_dataset, tensorboard_logger)
+    else:
+        logging.warning("Test set empty—skipping test inference.")
 
 if __name__ == '__main__':
     setup_logging()  # Initialize logging before main
