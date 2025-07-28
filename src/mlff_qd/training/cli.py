@@ -4,6 +4,9 @@ import yaml
 import os
 import tempfile
 
+import shutil
+import pandas as pd
+
 from mlff_qd.utils.helpers import load_config
 from mlff_qd.utils.yaml_utils import extract_engine_yaml
 from mlff_qd.utils.nequip_wrapper import run_nequip_training
@@ -13,6 +16,73 @@ from mlff_qd.training.inference import run_schnet_inference
 from mlff_qd.utils.standardize_output import standardize_output
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
+from mlff_qd.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
+
+
+def run_benchmark(args, scratch_dir):
+    engines = ['schnet', 'painn', 'fusion', 'nequip', 'allegro', 'mace']
+    benchmark_results_dir = './benchmark_results'
+    os.makedirs(benchmark_results_dir, exist_ok=True)
+    
+    results = []
+    for engine in engines:
+        print(f"Benchmarking {engine}...")
+        
+        # Generate engine YAML
+        engine_yaml_path = os.path.join(scratch_dir, f'engine_{engine}.yaml')
+        engine_cfg = extract_engine_yaml(args.config, engine, input_xyz=args.input)
+        
+        # Patch unique output_dir and DB for schnet/painn/fusion to fix CSV/PKL issues
+        if engine in ['schnet', 'painn', 'fusion']:
+            unique_dir = f"./results_{engine}"
+            if 'logging' in engine_cfg:
+                engine_cfg['logging']['folder'] = unique_dir
+            if 'testing' in engine_cfg:
+                engine_cfg['testing']['trained_model_path'] = unique_dir
+            if 'general' in engine_cfg and 'database_name' in engine_cfg['general']:
+                engine_cfg['general']['database_name'] = f"{engine.capitalize()}.db"
+            print(f"Patched dir/DB for {engine}: {unique_dir}/{engine_cfg.get('general', {}).get('database_name', 'CdSe.db')}")
+
+        with open(engine_yaml_path, 'w', encoding='utf-8') as f:
+            yaml.dump(engine_cfg, f)
+        
+        # Run training + inference
+        if engine in ['schnet', 'painn', 'fusion']:
+            run_schnet_training(engine_yaml_path)
+            run_schnet_inference(engine_yaml_path)
+        elif engine in ['nequip', 'allegro']:
+            import omegaconf
+            omegaconf.OmegaConf.clear_resolvers()
+            run_nequip_training(os.path.abspath(engine_yaml_path))
+        elif engine == 'mace':
+            run_mace_training(engine_yaml_path)
+        
+        # Standardize
+        results_dir = get_output_dir(engine_cfg, engine)
+        standardized_src = os.path.join(scratch_dir, 'standardized')
+        standardize_output(
+            engine,
+            scratch_dir,
+            standardized_src,
+            results_dir=results_dir,
+            config_yaml_path=engine_yaml_path
+        )
+        
+        # Move to persistent dir
+        engine_results_dir = os.path.join(benchmark_results_dir, engine)
+        shutil.copytree(standardized_src, engine_results_dir, dirs_exist_ok=True)
+        shutil.rmtree(standardized_src)
+        
+        # Extract metrics (use your extract logic here or from benchmark_mlff.py if separate)
+        engine_df = extract_metrics(engine_results_dir, engine, engine_cfg)  # Assume you have this function
+        results.append(engine_df)
+    
+    if results:
+        combined_df = pd.concat(results, ignore_index=True)
+        print("\nBenchmark Summary:\n")
+        print(combined_df.to_markdown(index=False))
+        combined_df.to_csv('benchmark_summary.csv', index_label='Engine')
+
 def parse_args():
     parser = argparse.ArgumentParser(description="MLFF-QD CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
@@ -20,6 +90,8 @@ def parse_args():
     parser.add_argument("--input", help="Path to input XYZ file (overrides input_xyz_file in YAML)")
     parser.add_argument("--only-generate", action="store_true", help="Only generate engine YAML, do not run training")
     parser.add_argument("--train-after-generate", action="store_true", help="Generate engine YAML and immediately start training")
+    parser.add_argument("--benchmark", action="store_true", help="Run benchmarking across all engines")  # New flag
+    parser.add_argument("--post-process", action="store_true", help="Post-process benchmark results and generate summary")
     return parser.parse_args()
 
 def get_output_dir(engine_cfg, platform):
@@ -98,6 +170,20 @@ def main():
     scratch_dir = os.environ.get("SCRATCH_DIR", tempfile.gettempdir())
     os.makedirs(scratch_dir, exist_ok=True)
 
+
+    # if args.benchmark:
+        # run_benchmark(args, scratch_dir)
+        # return
+        
+    if args.benchmark:
+        run_benchmark(args, scratch_dir)
+        return
+    
+    if args.post_process:
+        post_process_benchmark()
+        return
+        
+        
     with open(args.config, "r", encoding="utf-8") as f:
         user_yaml_dict = yaml.safe_load(f)
     is_unified = "common" in user_yaml_dict
