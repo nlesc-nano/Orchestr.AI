@@ -124,7 +124,9 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
 
     print(f"Energy MAE on {dataset_type} data: {energy_mae} {property_units['energy']}") 
     print(f"Energy MAE per Atom on {dataset_type} data: {energy_mae_per_atom} {property_units['energy']}") 
+    print(f"Energy RMSE on {dataset_type} data: {energy_rmse} {property_units['energy']}")
     print(f"Forces MAE on {dataset_type} data: {forces_mae} {property_units['forces']}") 
+    print(f"Forces RMSE on {dataset_type} data: {forces_rmse} {property_units['forces']}")
 
     # Save forces in a pickle file
     save_forces(all_actual_forces_flat,all_predicted_forces_flat, dataset_type)
