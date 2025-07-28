@@ -323,11 +323,24 @@ def smart_round(x, ndigits=4):
     return round(float(x), ndigits)
 
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
+    # Handle omitted/None as 0 for test
+    if test_size is None:
+        test_size = 0.0
     total = train_size + val_size + test_size
     if abs(total - 1.0) > 1e-6:
         raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
+    if val_size <= 0:
+        raise ValueError(f"{platform}: val_size must be >0 for early stopping.")
+    if train_size <= 0:
+        raise ValueError(f"{platform}: train_size must be >0.")
+    if train_size < 0 or val_size < 0 or test_size < 0:
+        raise ValueError(f"{platform}: Split sizes cannot be negative.")
+    
+    if test_size == 0:
+        logging.warning(f"{platform}: test_size=0—skipping test metrics/inference.")
+    
     return smart_round(train_size), smart_round(val_size), smart_round(test_size)
-
+    
 def path_exists_in_template(template: dict, keys: list) -> bool:
     """Check if a nested key path exists in the template dictionary."""
     cur = template
