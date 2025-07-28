@@ -11,6 +11,7 @@ import logging
 import math
 
 from schnetpack.data import ASEAtomsData
+import pytorch_lightning as pl 
 
 from mlff_qd.utils.logging_utils import timer, setup_logging
 from mlff_qd.utils.data_processing import ( preprocess_data, setup_logging_and_dataset,
@@ -75,7 +76,7 @@ def save_forces(all_actual_forces_flat,all_predicted_forces_flat, dataset_type):
     except Exception as e:
         print(f"Error saving force results: {e}")
         
-def run_inference(loader, dataset_type, best_model, device, property_units, new_dataset):
+def run_inference(loader, dataset_type, best_model, device, property_units, new_dataset, tensorboard_logger):
     all_actual_energy = []
     all_predicted_energy = []
     all_actual_forces = []
@@ -128,6 +129,13 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
     print(f"Forces MAE on {dataset_type} data: {forces_mae} {property_units['forces']}") 
     print(f"Forces RMSE on {dataset_type} data: {forces_rmse} {property_units['forces']}")
 
+    # Log metrics to TensorBoard
+    tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_mae', energy_mae, 0)
+    tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_mae_per_atom', energy_mae_per_atom, 0)
+    tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_rmse', energy_rmse, 0)  # Proxy for energy loss
+    tensorboard_logger.experiment.add_scalar(f'{dataset_type}/forces_mae', forces_mae, 0)
+    tensorboard_logger.experiment.add_scalar(f'{dataset_type}/forces_rmse', forces_rmse, 0)  # Proxy for forces loss
+    
     # Save forces in a pickle file
     save_forces(all_actual_forces_flat,all_predicted_forces_flat, dataset_type)
 
@@ -203,10 +211,24 @@ def run_schnet_inference(config_file=None):
     best_model.to(device)
     best_model.eval()
 
+    # Set up TensorBoard logger to append to the latest existing version
+    log_dir = os.path.join(config['logging']['folder'], 'lightning_logs')
+    if os.path.exists(log_dir):
+        # Find the highest version number (e.g., version_0 -> 0)
+        versions = [int(d.split('_')[1]) for d in os.listdir(log_dir) if d.startswith('version_')]
+        latest_version = max(versions) if versions else None
+    else:
+        latest_version = None  # Will create version_0 if none exist
+
+    tensorboard_logger = pl.loggers.TensorBoardLogger(
+        save_dir=config['logging']['folder'],
+        version=latest_version  # Append to training's version (or None to auto-create)
+    )
+    
     # Run inference on both datasets
-    run_inference(train_loader, "train", best_model, device, property_units, new_dataset)
-    run_inference(validation_loader, "validation", best_model, device, property_units, new_dataset)
-    run_inference(test_loader, "testing", best_model, device, property_units, new_dataset)
+    run_inference(train_loader, "train", best_model, device, property_units, new_dataset, tensorboard_logger)
+    run_inference(validation_loader, "validation", best_model, device, property_units, new_dataset, tensorboard_logger)
+    run_inference(test_loader, "testing", best_model, device, property_units, new_dataset, tensorboard_logger)
 
 if __name__ == '__main__':
     setup_logging()  # Initialize logging before main
