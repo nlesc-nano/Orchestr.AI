@@ -50,9 +50,11 @@ def move_prediction_files(source_dir, results_dir, dest_dir):
     n_found = 0
     for base in [source_dir, results_dir]:
         if base and os.path.exists(base):
-            for ext in ("**/*.csv", "**/*.pkl"):
-                for f in glob.glob(os.path.join(base, ext), recursive=True):
+            for ext in ("*.csv", "*.pkl"):  # Non-recursive
+                files = glob.glob(os.path.join(base, ext), recursive=False)
+                for f in files:
                     if os.path.isfile(f):
+                        print(f"Debug: Moving prediction file {f} to {prediction_dir}")  # Temporary debug
                         move_if_exists(f, prediction_dir)
                         n_found += 1
     if n_found == 0:

@@ -137,7 +137,7 @@ KEY_MAPPINGS = {
         "training.log_every_n_steps": ["eval_interval"],
         "training.device": ["device"],
         "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful 
-        "training.val_size": ["valid_file"],
+        "training.val_size": ["valid_fraction"],
         "training.early_stopping.patience": ["patience"],
         "data.input_xyz_file": ["train_file"],  # (overwrites train_file path with converted dataset)
         "output.output_dir": [],  # Not present as key, could be directory for output, add if needed
@@ -323,11 +323,24 @@ def smart_round(x, ndigits=4):
     return round(float(x), ndigits)
 
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
+    # Handle omitted/None as 0 for test
+    if test_size is None:
+        test_size = 0.0
     total = train_size + val_size + test_size
     if abs(total - 1.0) > 1e-6:
         raise ValueError(f"{platform}: train+val+test != 1.0 (got {total:.4f})! Please fix your splits.")
+    if val_size <= 0:
+        raise ValueError(f"{platform}: val_size must be >0 for early stopping.")
+    if train_size <= 0:
+        raise ValueError(f"{platform}: train_size must be >0.")
+    if train_size < 0 or val_size < 0 or test_size < 0:
+        raise ValueError(f"{platform}: Split sizes cannot be negative.")
+    
+    if test_size == 0:
+        logging.warning(f"{platform}: test_size=0—skipping test metrics/inference.")
+    
     return smart_round(train_size), smart_round(val_size), smart_round(test_size)
-
+    
 def path_exists_in_template(template: dict, keys: list) -> bool:
     """Check if a nested key path exists in the template dictionary."""
     cur = template
@@ -525,6 +538,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     elif platform in ["schnet", "painn", "fusion"]:
         set_nested(engine_cfg, ["training", "num_train"], smart_round(train_size))
         set_nested(engine_cfg, ["training", "num_val"], smart_round(val_size))
+        set_nested(engine_cfg, ["training", "num_test"], smart_round(test_size))
 
     # --- Special patches
     handle_pair_potential(user_cfg, engine_cfg, platform)
@@ -555,6 +569,14 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         
     # --- EarlyStopping logic
     apply_early_stopping(user_cfg, engine_cfg, platform, KEY_MAPPINGS[platform])
+
+    # Patch for test_size=0 (after splits adjusted)
+    if test_size == 0.0:
+        if platform in ['nequip', 'allegro']:
+            engine_cfg['run'] = ['train', 'val']  # Skip test
+        elif platform == 'mace':
+            engine_cfg['test_file'] = None  # Skip test
+        print(f"Debug: Patched run for {platform}: {engine_cfg.get('run')}")  # Debug
     
     return engine_cfg
 

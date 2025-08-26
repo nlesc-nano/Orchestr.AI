@@ -61,9 +61,23 @@ python -m mlff_qd.training --config "$CONFIG_FILE" "${@:2}" || echo "Training fa
 ###############################################
 
 mkdir -p "$CDIR/$SLURM_JOB_ID"
-if [ -d "$SCRATCH_DIR/standardized" ]; then
-    cp -r "$SCRATCH_DIR/standardized/"* "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || true
+
+if [ -d "$SCRATCH_DIR/benchmark_results" ]; then
+    # Benchmark mode: Selective copy
+    cp "$CONFIG_FILE" "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || echo "Warning: Config YAML not found"
+    if [ -f "$SCRATCH_DIR/benchmark_summary.csv" ]; then
+        cp "$SCRATCH_DIR/benchmark_summary.csv" "$CDIR/$SLURM_JOB_ID/"
+    else
+        echo "Warning: benchmark_summary.csv not found"
+    fi
+    cp -r "$SCRATCH_DIR/benchmark_results" "$CDIR/$SLURM_JOB_ID/"
 else
-    cp -r "$SCRATCH_DIR/"* "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || true
+    # Non-benchmark: Full copy (your original)
+    if [ -d "$SCRATCH_DIR/standardized" ]; then
+        cp -r "$SCRATCH_DIR/standardized/"* "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || true
+    else
+        cp -r "$SCRATCH_DIR/"* "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || true
+    fi
 fi
+
 rm -rf "$SCRATCH_DIR"

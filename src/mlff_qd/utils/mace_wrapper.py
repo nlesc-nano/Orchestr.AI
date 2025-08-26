@@ -21,8 +21,7 @@ def run_mace_training(config_path):
 
         sys.argv = [
             "mace_run_train",
-            "--config", temp_path,
-            "--device", "cuda"
+            "--config", temp_path
         ]
         
         mace_train_main()

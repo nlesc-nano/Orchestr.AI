@@ -63,17 +63,21 @@ num_scalar_features: 64
 
 training_module:
   _target_: nequip.train.EMALightningModule
+  
   loss:
     _target_: nequip.train.EnergyForceLoss
     per_atom_energy: true
     coeffs:
       total_energy: 0.05
       forces: 0.95
+      
   val_metrics:
     _target_: nequip.train.EnergyForceMetrics
     coeffs:
       per_atom_energy_mae: 0.05
       forces_mae: 0.95
+      
+  train_metrics: ${training_module.val_metrics}
   test_metrics: ${training_module.val_metrics}
   optimizer:
     _target_: torch.optim.Adam
