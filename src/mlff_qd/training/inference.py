@@ -122,17 +122,25 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
 
     total_atoms = new_dataset[0]['_n_atoms'].item()  # Get total atoms from the dataset
     energy_mae_per_atom = (energy_mae / total_atoms)
+    
+    energy_rmse_per_atom = (energy_rmse / total_atoms)
 
     print(f"Energy MAE on {dataset_type} data: {energy_mae} {property_units['energy']}") 
     print(f"Energy MAE per Atom on {dataset_type} data: {energy_mae_per_atom} {property_units['energy']}") 
+    
     print(f"Energy RMSE on {dataset_type} data: {energy_rmse} {property_units['energy']}")
+    print(f"Energy RMSE per Atom on {dataset_type} data: {energy_rmse_per_atom} {property_units['energy']}") 
+    
     print(f"Forces MAE on {dataset_type} data: {forces_mae} {property_units['forces']}") 
     print(f"Forces RMSE on {dataset_type} data: {forces_rmse} {property_units['forces']}")
 
     # Log metrics to TensorBoard
     tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_mae', energy_mae, 0)
     tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_mae_per_atom', energy_mae_per_atom, 0)
+    
     tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_rmse', energy_rmse, 0)  # Proxy for energy loss
+    tensorboard_logger.experiment.add_scalar(f'{dataset_type}/energy_rmse_per_atom', energy_rmse_per_atom, 0)
+    
     tensorboard_logger.experiment.add_scalar(f'{dataset_type}/forces_mae', forces_mae, 0)
     tensorboard_logger.experiment.add_scalar(f'{dataset_type}/forces_rmse', forces_rmse, 0)  # Proxy for forces loss
     
