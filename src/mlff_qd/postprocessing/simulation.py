@@ -283,7 +283,7 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
     #  calculator + starting velocities
     # -----------------------------------------------------------------
     atoms.calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
+    MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
 
     # -----------------------------------------------------------------
     #  choose integrator

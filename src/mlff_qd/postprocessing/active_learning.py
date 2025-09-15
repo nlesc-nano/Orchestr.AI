@@ -1010,8 +1010,8 @@ def filter_unrealistic_indices(
         frames,
         neighbor_list,
         thresholds,
-        pct_tol=0.5,
-        first_shell_cutoff=4.4,
+        pct_tol=0.35,
+        first_shell_cutoff=5.0,
         device=None,
         cache_path="bad_globals.npz"
     ):
@@ -1107,12 +1107,12 @@ def adaptive_learning_mig_pool_windowed(
         forces_train: np.ndarray,
         sigma_energy: np.ndarray,
         sigma_force:  np.ndarray,
+        mu_E_frame_train: np.ndarray, 
         mu_E_pool: np.ndarray,
         sigma_E_pool: np.ndarray,
         mu_F_pool: np.ndarray,
         sigma_F_pool: np.ndarray,
         bad_global: set,
-        thr_E_hi: float=0.02, 
         rho_eV: float = 0.0025,
         min_k: int = 5,
         window_size: int = 100,
@@ -1129,6 +1129,8 @@ def adaptive_learning_mig_pool_windowed(
     G_pool = solve_triangular(L, F_pool.T, lower=True).T
     reg = 1e-6                       # keep the same regulariser everywhere
     M_inv_global = np.linalg.inv(G_train.T @ G_train + reg * np.eye(G_train.shape[1]))
+    gamma_train = np.sqrt(np.einsum('id,dk,ik->i', G_train, M_inv_global, G_train))
+    gamma_thr = np.quantile(gamma_train, 0.90)   # 90-th %ile of *actual* training distances
 
     n_pool_frames = len(pool_frames) 
     n_atoms       = pool_frames[0].get_positions().shape[0]
@@ -1140,6 +1142,14 @@ def adaptive_learning_mig_pool_windowed(
     sigma_E_per_atom_train = sigma_energy / n_atoms
     sigma_E_per_atom_pool  = sigma_E_pool / n_atoms 
     thr_sigma_E_low = 0.002  # 2 meV/atom lower floor (as before)
+    thr_E_hi = (mu_E_frame_train / n_atoms).max() + 0.5 
+    margin_hi = 2.0 # only expected DFT energies below this will be considered 
+    E_train_min = mu_E_frame_train.min()
+    E_train_max = mu_E_frame_train.max()
+    CI_K     = 3.0 # only deviation of 3 sigma will be considered as interval
+    E_lo_pool = mu_E_pool - CI_K * sigma_E_pool
+    E_hi_pool = mu_E_pool + CI_K * sigma_E_pool
+    
 
     # ------------------------------------------------------------------
     # 2 · force–uncertainty thresholds (relative)
@@ -1154,7 +1164,7 @@ def adaptive_learning_mig_pool_windowed(
     sigma_F_train_max   = sigma_F_train.max(axis=(1, 2))
     sigma_F_train_mean  = np.linalg.norm(sigma_F_train, axis=2).mean(axis=1)
 
-    thr_sigma_F     = f_F     * sigma_F_train_max .max()
+    thr_sigma_F     = f_F     * sigma_F_train_max.max()
     thr_sigma_Fmean = f_Fmean * sigma_F_train_mean.max()
 
     # ------------------------------------------------------------------
@@ -1170,7 +1180,7 @@ def adaptive_learning_mig_pool_windowed(
     sigma_F_train_mean_max = sigma_F_train_mean.max()
     frame_max_force_train_max = frame_max_force_train.max()
 
-    thr_sigma_E_hi  = 0.05 # Hard cap. 3.0 * sigma_E_per_atom_train_max 
+    thr_sigma_E_hi  = 0.01 # Hard cap. 3.0 * sigma_E_per_atom_train_max 
     thr_sigma_F_hi  = 2.0 * sigma_F_train_max_max
     thr_sigma_Fmean_hi = 2.0 * sigma_F_train_mean_max
     thr_Fmag_hi     = 2.0 * frame_max_force_train_max
@@ -1276,8 +1286,16 @@ def adaptive_learning_mig_pool_windowed(
         win_E = [i for i in win_good if E_atom_pool[i] < thr_E_hi]
         print(f"[Pool-AL]   {len(win_E)} below E/atom cap ({thr_E_hi:.3f} eV)")
 
+        # 2.5 CI-overlap filter
+        win_CI = [
+            i for i in win_E
+            if (E_hi_pool[i] >= E_train_min) and
+               (E_lo_pool[i] <= E_train_max + margin_hi)
+        ]
+        print(f"[Pool-AL]   {len(win_CI)} frames pass CI overlap")
+
         # 3. Uncertainty/force/energy upper caps
-        win_sigmaE = [i for i in win_E if sigma_E_per_atom_pool[i] < thr_sigma_E_hi]
+        win_sigmaE = [i for i in win_CI if sigma_E_per_atom_pool[i] < thr_sigma_E_hi]
         print(f"[Pool-AL]   {len(win_sigmaE)} below sigma_E/atom cap ({thr_sigma_E_hi:.3f} eV)")
 
         win_sigmaF = [i for i in win_sigmaE if sigma_F_pool_max[i] < thr_sigma_F_hi]
@@ -1310,7 +1328,8 @@ def adaptive_learning_mig_pool_windowed(
         # raw Mahalanobis distances w.r.t. *current* training set
         quad0  = np.einsum("id,dk,ik->i", sub_G, M_inv_global, sub_G)
         gamma0 = np.sqrt(quad0)
-        gamma_thr = 1.0  
+
+#        gamma_thr = 1.0  
         print(f"[Pool-AL]   Mahalanobis γ₀: mean={gamma0.mean():.3f}, "
               f"std={gamma0.std():.3f}, min={gamma0.min():.3f}, max={gamma0.max():.3f}")
         keep = np.where(gamma0 > gamma_thr)[0]
@@ -1336,7 +1355,7 @@ def adaptive_learning_mig_pool_windowed(
             print(f"  [DEBUG][OOD]   Pick {n+1}: γ₀={gamma0[keep[idx]]:.3f}, Dgain={gains_full[n]:.3f}")
 
         # --- Hybrid gain threshold + min_k fallback ---
-        gain_floor = np.percentile(gains_full, 80)  # top 20% only
+        gain_floor = np.percentile(gains_full, 90)  # top 20% only
         idx_keep = np.where(gains_full > gain_floor)[0]
         print(f"[Pool-AL]   {len(idx_keep)} frames above gain_floor={gain_floor:.3f}")
         
@@ -1359,10 +1378,13 @@ def adaptive_learning_mig_pool_windowed(
         for idx_local, pick in enumerate(picks):
             gain_val  = gains_full[idx_local]
             gamma_val = gamma0[keep[idx_keep[idx_local]]]
+            E_lo, E_hi = E_lo_pool[pick], E_hi_pool[pick]
             records.append((
                 pick,
                 mu_E_pool[pick],
                 sigma_E_pool[pick],
+                E_lo,
+                E_hi,
                 gain_val,
                 gamma_val,
                 f"{w0}-{w1}"
@@ -1373,9 +1395,15 @@ def adaptive_learning_mig_pool_windowed(
     # ------------------------------------------------------------------
     idx_file = f"{base}_idxs.txt"
     with open(idx_file, "w") as fh:
-        fh.write("idx\tpred_E\tσ\tDgain\tgamma0\twindow\n")
-        for idx, pred_E, sigma, dgain, g0, window in records:
-            fh.write(f"{idx}\t{pred_E:.5f}\t{sigma:.5f}\t{dgain:.5f}\t{g0:.3f}\t{window}\n")
+        fh.write("idx\tpred_E\tσ\tE_lo\tE_hi\tDgain\tgamma0\twindow\n")
+        for idx, pred_E, sigma, E_lo, E_hi, dgain, g0, window in records:
+            fh.write(
+                f"{idx}\t"
+                f"{pred_E:.5f}\t{sigma:.5f}\t"
+                f"{E_lo:.5f}\t{E_hi:.5f}\t"
+                f"{dgain:.5f}\t{g0:.3f}\t"
+                f"{window}\n"
+            )
     print(f"[AL] wrote log with {len(records)} entries to {idx_file}")
     
     sel_frames = [pool_frames[i] for i in cand_global]
