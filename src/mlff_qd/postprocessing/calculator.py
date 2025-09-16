@@ -12,7 +12,6 @@ import time
 import os
 import contextlib
 import traceback  # Import traceback here as evaluate_model uses it
-from torch.cuda.amp import autocast
 
 from ase.calculators.calculator import Calculator, all_changes
 from schnetpack.interfaces import AtomsConverter
@@ -296,20 +295,33 @@ class MyTorchCalculator(Calculator):
         # Convert ASE atoms to SchNetPack input format
         inputs = self.atoms_converter(atoms)
 
-        # --- Convert inputs to correct device and dtype ---
-        inputs = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
-        index_keys = [Properties.idx_i, Properties.idx_j, Properties.idx_m,
-                      Properties.offsets, Properties.n_atoms, Properties.cell,
-                      Properties.Z, "_atomic_numbers", # Use Properties.Z
-                      "_idx_i", "_idx_j", "_idx_m"]
-        for key in index_keys:
-            if key in inputs and torch.is_tensor(inputs[key]):
-                if inputs[key].dtype in [torch.int, torch.int8, torch.int16, torch.int32, torch.int64]:
-                     inputs[key] = inputs[key].to(dtype=torch.long)
+        # === DTYPE / DEVICE NORMALIZATION (Key Fix) ===
+        # Use the model's first parameter to infer device & dtype
+        param = next(self.model.parameters())
+        model_device = param.device
+        param_dtype  = param.dtype
+
+        # 1) move all tensors to the model's device
+        for k, v in list(inputs.items()):
+            if torch.is_tensor(v):
+                inputs[k] = v.to(device=model_device)
+
+        # 2) ensure index-like tensors are long
+        index_like = {
+            Properties.idx_i, Properties.idx_j, Properties.idx_m,
+            Properties.offsets, Properties.n_atoms, Properties.Z,
+            "_atomic_numbers", "_idx_i", "_idx_j", "_idx_m"
+        }
+        for k in index_like:
+            if k in inputs and torch.is_tensor(inputs[k]) and not inputs[k].is_floating_point():
+                inputs[k] = inputs[k].to(dtype=torch.long)
+
+        # 3) ensure floating tensors match the model parameter dtype
         for k, v in inputs.items():
-            if torch.is_tensor(v) and k not in index_keys and v.is_floating_point():
-                 inputs[k] = v.to(dtype=torch.float32)
-        # --- End input conversion ---
+            if torch.is_tensor(v) and v.is_floating_point():
+                inputs[k] = v.to(dtype=param_dtype)
+        # === End normalization ===
+
 
         # --- Locate position key and ALWAYS set requires_grad=True ---
         position_key_found = None
@@ -335,7 +347,7 @@ class MyTorchCalculator(Calculator):
 
         # --- Model Inference (Always calculates forces) ---
         ml_eval_start_time = time.time()
-        amp_enabled = self.device.type == 'cuda'
+        amp_enabled = bool(self.config.get("md", {}).get("use_amp", False)) and (param.device.type == "cuda")
         E_ml = 0.0
         F_ml = np.zeros((len(atoms), 3))
         sigma_energy = 0.0
@@ -352,7 +364,7 @@ class MyTorchCalculator(Calculator):
             inference_context = torch.set_grad_enabled(True) # Gradients always needed
             for mc_pass in range(self.n_mc):
                  self.latent = None
-                 with inference_context, autocast(enabled=amp_enabled):
+                 with inference_context, torch.amp.autocast("cuda", enabled=amp_enabled):
                      results_mc = self.model(inputs) # Model calculates E and F
 
                  # Store results, check if forces key exists
@@ -393,7 +405,7 @@ class MyTorchCalculator(Calculator):
             # Always enable gradients for the model call
             inference_context = torch.set_grad_enabled(True)
 
-            with inference_context, autocast(enabled=amp_enabled):
+            with inference_context, torch.amp.autocast("cuda", enabled=amp_enabled):
                 results = self.model(inputs) # Model calculates E and F
 
             # Process results
@@ -590,4 +602,3 @@ def evaluate_model(frames, true_energies, true_forces, model_obj, device, batch_
     # Return all collected data
     sigma_energy_array = np.array(all_sigma_energy) if uq_method_flag == "dropout" else None
     return all_energy_pred, all_forces_pred, all_latent_pred, all_per_atom_latent_pred, sigma_energy_array
-
