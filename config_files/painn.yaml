@@ -1,7 +1,7 @@
 # General settings
 general:
     seed: 42  # Random seed for reproducibility
-    database_name: 'CdSe.db'  # Name of the database file
+    database_name: 'Database.db'  # Name of the database file
 
 # Data handling settings
 data:
