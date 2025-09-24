@@ -94,6 +94,29 @@ def setup_evaluation(config):
     return (device, initial_true_energies, initial_true_forces, initial_eval_positions, initial_frames,
             batch_size, uncertainty_methods, n_mc, training_data_path,
             eval_log_file, unique_mc_log_file, eval_output_file_base)
+            
+# --- Safe model loader to avoid map_location bug and standardize dtype/device ---
+def _safe_load_model(model_path: str, device: torch.device, force_dtype: torch.dtype | None = torch.float32):
+    """
+    Load a torch model without using map_location (avoids PyTorch 2.4.x thread-local bug),
+    then move it to the desired device and dtype.
+    """
+    try:
+        mdl = torch.load(model_path, weights_only=False)  # don't pass map_location
+    except AttributeError as e:
+        # Rare fallback if the bug triggers in another codepath
+        print(f"[safe_load] AttributeError on first load attempt: {e}. Retrying simplest path…")
+        mdl = torch.load(model_path)
+
+    # Move to device (and dtype if requested)
+    if force_dtype is None:
+        mdl = mdl.to(device=device)
+    else:
+        mdl = mdl.to(device=device, dtype=force_dtype)
+
+    mdl.eval()
+    return mdl
+
 
 def generate_ensemble_sizes(max_size, min_size=2, step=1):
     """
@@ -310,9 +333,12 @@ def evaluate_and_cache_ensemble(frames,
 
     for idx, mfile in enumerate(model_files, 1):
         try:
-            mdl = torch.load(mfile, map_location=device).to(torch.float32)
-            mdl.eval()
-            loaded_models.append(mdl)
+            # mdl = torch.load(mfile, map_location=device).to(torch.float32)
+            # mdl.eval()
+            # loaded_models.append(mdl)
+            
+            mdl = _safe_load_model(mfile, device=device, force_dtype=torch.float32)
+            loaded_models.append(mdl)   
 
             # evaluate_model now returns latent_per_atom
             pred_E, pred_F_per_frame, latent_per_frame, latent_per_atom, _ = evaluate_model(
@@ -479,8 +505,11 @@ def run_eval(config):
             error_estimate = False
             uq_methods     = [m for m in uq_methods if m not in ("none","GMM")]
         else:
-            base_model = torch.load(base_path, map_location=device).to(torch.float32)
-            base_model.eval()
+            # base_model = torch.load(base_path, map_location=device).to(torch.float32)
+            # base_model.eval()
+            # print(f"Loaded base model from {base_path}")
+            
+            base_model = _safe_load_model(base_path, device=device, force_dtype=torch.float32)
             print(f"Loaded base model from {base_path}")
 
     # 4) Base evaluation and feature computation
