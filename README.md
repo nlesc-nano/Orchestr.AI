@@ -134,6 +134,71 @@ To specify a different config file, one should run the following command:
 python -m mlff_qd.training --config nequip.yaml
 ```
 
+---
+
+This loads the unified.yaml config and optionally overrides the engine at runtime.
+You can run any engine by changing `--engine` to one of:
+```bash
+schnet, painn, nequip, allegro, mace, fusion
+```
+We are showing examples with nequip, you can choose anyone. **The training process will automatically convert the data format according to the platform (engine) selected.**
+
+#### 🟩 Commands Using Unified YAML (`unifiedYaml.yaml`)
+
+> `unifiedYaml.yaml` should contain `platform: nequip` and optionally `input_xyz_file`.
+
+| Use Case | Command | Notes |
+|----------|---------|-------|
+| Engine and input both defined in YAML | `sbatch run_idv.sh unifiedYaml.yaml` | `unifiedYaml.yaml` contains `platform: nequip` and `input_xyz_file` |
+| Engine overridden via CLI, input from YAML | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip` | Use if YAML has `input_xyz_file` but platform may vary |
+| Engine and input both overridden via CLI | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip --input ./basic.xyz` | Most flexible: ignores YAML settings |
+| Engine overridden, input missing | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip` | ❌ Will fail if `input_xyz_file` is missing from YAML |
+| Input passed via `--input`, YAML has no dataset | `sbatch run_idv.sh unifiedYaml.yaml --engine nequip --input ./basic.xyz` | ✅ Safe way to inject input without editing YAML |
+
+---
+
+#### 🟦 Commands Using Engine-Specific YAML (e.g., `nequip.yaml`)
+
+> These YAMLs should include both `platform: nequip` and `input_xyz_file`.
+
+| Use Case | Command | Notes |
+|----------|---------|-------|
+| Use engine-specific YAML with `--engine` | `sbatch run_idv.sh nequip.yaml --engine nequip` | YAML must contain `input_xyz_file` |
+| Override input in engine-specific YAML | `sbatch run_idv.sh nequip.yaml --engine nequip --input ./basic.xyz` | Use to test with alternate datasets |
+
+## Additional Flags: `--only-generate` and `--train-after-generate`
+
+Control **data/config generation** and **training** phases using these flags:
+- `--only-generate`:  
+  Only generate the engine-specific YAML and/or convert data, **without starting training**.
+- `--train-after-generate`:  
+  Generate data/config, then **immediately start training** using the generated engine YAML.
+
+### Priority Rules:
+If you provide **both** flags, `--only-generate` takes precedence and training will **not** start.
+
+```bash
+# Only generate engine YAML and converted data (no training)
+sbatch run_idv.sh unifiedYaml.yaml --engine nequip --only-generate
+
+# Generate and then train (run both steps)
+sbatch run_idv.sh unifiedYaml.yaml --engine nequip --train-after-generate
+```
+
+---
+
+## 📝 Note on Engine YAMLs
+
+If you are **already using an engine-specific YAML** (e.g., `nequip.yaml`, `schnet.yaml`):
+
+- You **do not need** to use `--only-generate` or `--train-after-generate`.
+- Just run:
+```bash
+sbatch run_idv.sh nequip.yaml --engine nequip
+```
+
+---
+
 ### Inference code
 After the training has finished, an user can run the inference code that generates the MLFF:
 ```bash
