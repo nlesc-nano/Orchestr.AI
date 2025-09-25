@@ -8,7 +8,7 @@ from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 KEY_MAPPINGS = {
     "schnet": {
         "model.cutoff": ["model.cutoff"],
-        "model.mp_layers": ["model.num_interactions"],
+        "model.mp_layers": ["model.n_interactions"],
         "model.features": ["model.n_atom_basis"],
         "model.n_rbf": ["model.n_rbf"],
         "training.seed": ["general.seed"],
