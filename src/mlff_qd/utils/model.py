@@ -39,14 +39,14 @@ class CustomAtomwise(spk.atomistic.Atomwise):
         return inputs
 
 def setup_model(config):
-    model_type = config.get('settings', {}).get('model', {}).get('model_type') or 'schnet'
-    cutoff = config['settings']['model']['cutoff']
-    n_rbf = config['settings']['model']['n_rbf']
-    n_atom_basis = config['settings']['model']['n_atom_basis']
-    n_interactions = config['settings']['model']['n_interactions']
-    dropout_rate = config['settings']['model'].get('dropout_rate', 0.1)
-    n_layers = config['settings']['model'].get('n_layers', 1)
-    n_neurons = config['settings']['model'].get('n_neurons', None)
+    model_type = config.get('model', {}).get('model_type') or 'schnet'
+    cutoff = config['model']['cutoff']
+    n_rbf = config['model']['n_rbf']
+    n_atom_basis = config['model']['n_atom_basis']
+    n_interactions = config['model'].get('n_interactions', 3)
+    dropout_rate = config['model'].get('dropout_rate', 0.1)
+    n_layers = config['model'].get('n_layers', 1)
+    n_neurons = config['model'].get('n_neurons', None)
 
     pairwise_distance = spk.atomistic.PairwiseDistances()
     radial_basis = spk.nn.GaussianRBF(n_rbf=n_rbf, cutoff=cutoff)
@@ -96,14 +96,14 @@ def setup_model(config):
     output_energy = spk.task.ModelOutput(
         name='energy',
         loss_fn=torch.nn.MSELoss(),
-        loss_weight=config['settings']['outputs']['energy']['loss_weight'],
+        loss_weight=config['outputs']['energy']['loss_weight'],
         metrics={"MAE": torchmetrics.MeanAbsoluteError()}
     )
 
     output_forces = spk.task.ModelOutput(
         name='forces',
         loss_fn=torch.nn.MSELoss(),
-        loss_weight=config['settings']['outputs']['forces']['loss_weight'],
+        loss_weight=config['outputs']['forces']['loss_weight'],
         metrics={"MAE": torchmetrics.MeanAbsoluteError()}
     )
 
