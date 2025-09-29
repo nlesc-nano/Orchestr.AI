@@ -13,38 +13,43 @@
 source /mnt/netapp1/Store_RES/home/res/bcma1/resh000407/miniconda3/etc/profile.d/conda.sh
 conda activate D_MLFF_latest5
 
-CDIR=`pwd`
+export PYTHONUNBUFFERED=1
 
-# Generate temporary calculations folder
-export SCRATCH_DIR=/$LUSTRE/wrktmp/$SLURM_JOBID
+CDIR="$(pwd)"
+
+###############################################
+# 0. Safe scratch setup (DB-safe)
+###############################################
+
+SCRATCH_BASE="/leonardo_scratch/large/userexternal/$USER"
+SCRATCH_DIR="$SCRATCH_BASE/job_${SLURM_JOB_ID:-$$}"
 mkdir -p "$SCRATCH_DIR"
+
+# Redirect all temp/DB/HDF5 activity into scratch
+export SCRATCH_DIR
 export TMPDIR="$SCRATCH_DIR"
+export SQLITE_TMPDIR="$SCRATCH_DIR"
+export HDF5_USE_FILE_LOCKING=FALSE
+export MPLCONFIGDIR="$SCRATCH_DIR/.mpl"
+
 
 ###############################################
 # 1. Argument Parsing
 ###############################################
 
-CONFIG_FILE="$1"
+CONFIG_FILE="${1:-input_new.yaml}"
 
-# If config file is not provided, set the default one
-if [ -z "$CONFIG_FILE" ]; then
-    CONFIG_FILE="input_new.yaml"
-fi
-
-# Check if the config file exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: Configuration file '$CONFIG_FILE' does not exist."
     exit 1
 fi
-
 echo "Using configuration file: $CONFIG_FILE"
 
 ###############################################
 # 2. Prepare Files
 ###############################################
 
-# Copy to scratch with error suppression
-cp "$CONFIG_FILE" "$SCRATCH_DIR"
+cp "$CONFIG_FILE" "$SCRATCH_DIR/"
 cp *.npz "$SCRATCH_DIR" 2>/dev/null || true
 cp *.xyz "$SCRATCH_DIR" 2>/dev/null || true
 
@@ -54,30 +59,36 @@ cd "$SCRATCH_DIR"
 # 3. Run Training
 ###############################################
 
-python -m mlff_qd.training --config "$CONFIG_FILE" "${@:2}" || echo "Training failed, proceeding with copy"
+python -m mlff_qd.training --config "$(basename "$CONFIG_FILE")" "${@:2}" || echo " Training failed, proceeding with copy"
 
 ###############################################
 # 4. Copy Back to Original Dir
 ###############################################
 
-mkdir -p "$CDIR/$SLURM_JOB_ID"
+JOB_OUT="$CDIR/$SLURM_JOB_ID"
+mkdir -p "$JOB_OUT"
 
 if [ -d "$SCRATCH_DIR/benchmark_results" ]; then
-    # Benchmark mode: Selective copy
-    cp "$CONFIG_FILE" "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || echo "Warning: Config YAML not found"
-    if [ -f "$SCRATCH_DIR/benchmark_summary.csv" ]; then
-        cp "$SCRATCH_DIR/benchmark_summary.csv" "$CDIR/$SLURM_JOB_ID/"
-    else
-        echo "Warning: benchmark_summary.csv not found"
-    fi
-    cp -r "$SCRATCH_DIR/benchmark_results" "$CDIR/$SLURM_JOB_ID/"
+    cp "$CONFIG_FILE" "$JOB_OUT/" 2>/dev/null || echo "Warning: Config YAML not found"
+    [ -f "$SCRATCH_DIR/benchmark_summary.csv" ] && cp "$SCRATCH_DIR/benchmark_summary.csv" "$JOB_OUT/"
+    cp -r "$SCRATCH_DIR/benchmark_results" "$JOB_OUT/"
 else
-    # Non-benchmark: Full copy (your original)
     if [ -d "$SCRATCH_DIR/standardized" ]; then
-        cp -r "$SCRATCH_DIR/standardized/"* "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || true
+        cp -r "$SCRATCH_DIR/standardized" "$JOB_OUT/"
+        cp -f "$SCRATCH_DIR/$(basename "$CONFIG_FILE")" "$JOB_OUT/" 2>/dev/null || true
     else
-        cp -r "$SCRATCH_DIR/"* "$CDIR/$SLURM_JOB_ID/" 2>/dev/null || true
+        cp -r "$SCRATCH_DIR/"* "$JOB_OUT/" 2>/dev/null || true
     fi
 fi
 
-rm -rf "$SCRATCH_DIR"
+echo "✓ Done. Results at: $JOB_OUT"
+
+# Safety cleanup
+cleanup() {
+  if [[ -n "${SCRATCH_DIR:-}" && -d "$SCRATCH_DIR" && "$SCRATCH_DIR" != "/" && "$SCRATCH_DIR" != "/tmp" ]]; then
+    rm -rf "$SCRATCH_DIR"
+  else
+    echo " Skip cleanup; unsafe SCRATCH_DIR='$SCRATCH_DIR'"
+  fi
+}
+trap cleanup EXIT
