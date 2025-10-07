@@ -257,31 +257,32 @@ def analyze_reference_forces(forces, atom_types):
     """
     Return dict of per-atom, per-frame, overall force stats.
     """
-    fm = np.linalg.norm(forces,axis=2)
-    per_atom_mean = fm.mean(axis=0)
-    per_atom_std  = fm.std(axis=0)
-    per_atom_rng  = fm.ptp(axis=0)
-    per_frame_mean= fm.mean(axis=1)
-    per_frame_std = fm.std(axis=1)
-    per_frame_rng = fm.ptp(axis=1)
+    fm = np.linalg.norm(forces, axis=2)
+
+    per_atom_mean  = fm.mean(axis=0)
+    per_atom_std   = fm.std(axis=0)
+    per_atom_rng   = np.ptp(fm, axis=0)
+    per_frame_mean = fm.mean(axis=1)
+    per_frame_std  = fm.std(axis=1)
+    per_frame_rng  = np.ptp(fm, axis=1)
     summary = {
-        'per_atom_means': per_atom_mean,
-        'per_atom_stds': per_atom_std,
+        'per_atom_means':  per_atom_mean,
+        'per_atom_stds':   per_atom_std,
         'per_atom_ranges': per_atom_rng,
         'per_frame_means': per_frame_mean,
-        'per_frame_stds': per_frame_std,
+        'per_frame_stds':  per_frame_std,
         'per_frame_ranges': per_frame_rng,
-        'overall_mean': fm.mean(),
-        'overall_std': fm.std(),
-        'overall_range': fm.ptp()
+        'overall_mean':   fm.mean(),
+        'overall_std':    fm.std(),
+        'overall_range':  np.ptp(fm)      
     }
     # per-type
     for t in set(atom_types):
-        idxs = [i for i,a in enumerate(atom_types) if a==t]
-        arr  = fm[:,idxs]
-        summary.setdefault('atom_type_means',{})[t]=arr.mean()
-        summary.setdefault('atom_type_stds', {})[t]=arr.std()
-        summary.setdefault('atom_type_ranges',{})[t]=arr.ptp()
+        idxs = [i for i, a in enumerate(atom_types) if a == t]
+        arr  = fm[:, idxs]
+        summary.setdefault('atom_type_means', {})[t]   = arr.mean()
+        summary.setdefault('atom_type_stds',  {})[t]   = arr.std()
+        summary.setdefault('atom_type_ranges', {})[t]  = np.ptp(arr)  # ← changed
     return summary
 
 def suggest_thresholds(force_stats, std_fraction=0.1, range_fraction=0.1):

@@ -12,91 +12,8 @@ conda env create -f environment.yaml
 conda activate mlff
 pip install mace-torch==0.3.13
 ```
-------
 
-## Installation for the preprocessing tools
-Some packages are requiered for running the preprocessing. Below we explain what is requiered and how to install it:
-
-### Install PLAMS
-The simplest way to install PLAMS is through pip which will automatically get the source code from PyPI:
-
-```bash
-pip install PLAMS
-```
-
-One can find more information [here](https://www.scm.com/doc/plams/started.html#installing-plams).
-
-### Install DScribe
-One can install DScribe through pip which will automatically get the latest stable release:
-
-```bash
-pip install dscribe
-```
-
-They also provide a conda package through conda-forge:
-
-
-```bash
-conda install -c conda-forge dscribe
-```
-
-One can find more information [here](https://singroup.github.io/dscribe/latest/install.html).
-
-### Install Compound Attachment Tool (CAT), nano-CAT, auto-FOX, QMFlows and Nano-QMFlows
-To install these packages we recommend to download the latest versions from their original repositories in the links below:
-
-* [CAT](https://github.com/nlesc-nano/CAT);
-
-* [nano-CAT](https://github.com/nlesc-nano/nano-CAT);
-
-* [auto-FOX](https://github.com/nlesc-nano/auto-FOX);
-
-* [QMFlows](https://github.com/SCM-NV/qmflows);
-
-* [Nano-QMFlows](https://github.com/SCM-NV/nano-qmflows).
-
-Then, to install them one can do the following in each folder:
-```bash
-pip install .
-```
-
-### Other packages
-Apart from usual python packages such as numpy, scipy, sklearn or yaml, one needs to install also periodictable:
-
-```bash
-pip install periodictable
-```
-
-## Installation for the postprocessing tools
-The following packages are required to be installed for using the postprocessing tools: plotly, kneed, hdbscan.
-
-## Installation for the training
-Some packages are requiered for running the training. Below we explain what is requiered and how to install it.
-
-### Install pandas
-pandas is requiered for performing the training. It is easy to install it using pip:
-
-```bash
-pip install pandas
-```
-
-### Install SchNetPack with pip
-The simplest way to install SchNetPack is through pip which will automatically get the source code from PyPI:
-
-```bash
-pip install schnetpack
-```
-
-### Install SchNetPack from source
-One can also install the most recent code from their repository:
-
-```bash
-git clone https://github.com/atomistic-machine-learning/schnetpack.git
-cd schnetpack
-pip install .
-```
-
-## Installation of the mlff_qd package
+### Installation of the mlff_qd package
 One can install the platform using pip in the following way:
 ```bash
 git clone https://github.com/nlesc-nano/MLFF_QD.git
@@ -104,6 +21,7 @@ cd MLFF_QD
 pip install -e .
 ```
 
+------
 ## Getting started
 The current version of the platform is developped for being run in a cluster. Thus, in this repository one can find the necessary code, a bash script example for submitting jobs in a slurm queue system and an input file example.
 
