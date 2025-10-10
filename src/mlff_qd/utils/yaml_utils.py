@@ -22,7 +22,7 @@ KEY_MAPPINGS = {
         "training.num_workers": ["training.num_workers"],
         "training.pin_memory": ["training.pin_memory"],
         "training.log_every_n_steps": ["training.log_every_n_steps"],
-        "training.device": ["training.accelerator"],
+        "training.accelerator": ["training.accelerator"],
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
         "training.test_size": ["training.num_test"],
@@ -65,7 +65,7 @@ KEY_MAPPINGS = {
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
-        "training.device": ["device", "trainer.accelerator"],  # template uses 'device'
+        "training.accelerator": ["device", "trainer.accelerator"],  # template uses 'device'
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -106,7 +106,7 @@ KEY_MAPPINGS = {
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
-        "training.device": ["device", "trainer.accelerator"],
+        "training.accelerator": ["device", "trainer.accelerator"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -135,7 +135,7 @@ KEY_MAPPINGS = {
         "training.num_workers": ["num_workers"],
         "training.pin_memory": ["pin_memory"],
         "training.log_every_n_steps": ["eval_interval"],
-        "training.device": ["device"],
+        "training.accelerator": ["device"],
         "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful 
         "training.val_size": ["valid_fraction"],
         "training.early_stopping.patience": ["patience"],

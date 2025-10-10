@@ -38,7 +38,7 @@ common:
     epochs: 3
     learning_rate: 0.001
     num_workers: 24
-    device: cuda
+    accelerator: cuda
     log_every_n_steps: 5
     optimizer: AdamW
     scheduler:
