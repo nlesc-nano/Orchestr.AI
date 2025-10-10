@@ -32,6 +32,7 @@ data:
 
 trainer:
   _target_: lightning.Trainer
+  accelerator: auto
   devices: 2    # NO of GPUs
   strategy: ddp # for multiple GPUs
   num_nodes: 1 # we need to add when we are using multiple GPUs
