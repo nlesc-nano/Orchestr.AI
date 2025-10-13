@@ -165,6 +165,56 @@ def validate_input_file(path: str, platform: str) -> str:
         raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected '{need}'.")
     return path
 
+def _resolve_path(base_dir, p):
+    if not p:
+        return None
+    return p if os.path.isabs(p) else os.path.abspath(os.path.join(base_dir, p))
+
+def get_dataset_paths_from_yaml(platform, config_yaml_path):
+    """
+    Return a list of dataset files referenced by the engine YAML, resolved relative to the YAML file.
+    Only returns existing files. Deduplicated.
+    """
+    if not config_yaml_path or not os.path.exists(config_yaml_path):
+        return []
+
+    with open(config_yaml_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    yaml_dir = os.path.dirname(os.path.abspath(config_yaml_path))
+    platform = (platform or "").lower()
+    paths = []
+
+    if platform in {"schnet", "painn", "fusion"}:
+        dp = cfg.get("data", {}).get("dataset_path")
+        if dp: paths.append(_resolve_path(yaml_dir, dp))
+        # optional extras if you use them:
+        for k in ("val_dataset_path", "test_dataset_path"):
+            p = cfg.get("data", {}).get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+    elif platform in {"nequip", "allegro"}:
+        sp = cfg.get("data", {}).get("split_dataset", {}).get("file_path")
+        if sp: paths.append(_resolve_path(yaml_dir, sp))
+        for k in ("test_file", "infer_file"):
+            p = cfg.get("data", {}).get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+    elif platform == "mace":
+        tf = cfg.get("train_file")
+        if tf: paths.append(_resolve_path(yaml_dir, tf))
+        for k in ("valid_file", "val_file", "test_file"):
+            p = cfg.get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+    # Dedup + existing only
+    final, seen = [], set()
+    for p in paths:
+        if p and os.path.exists(p) and p not in seen:
+            seen.add(p)
+            final.append(p)
+    return final
+
 # Patch painn/fusion mapping to schnet (they use the same template)
 for plat in ["painn", "fusion"]:
     KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])

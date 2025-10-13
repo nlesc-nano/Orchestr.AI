@@ -102,8 +102,28 @@ def move_prepared_data(platform, source_dir, results_dir, dest_dir):
         logging.info(f"[Data] No {patterns} files found for platform {platform}.")
     else:
         logging.info(f"[Data] Moved {moved} file(s) ({patterns}) into {data_dir}.")
+
+def move_specific_prepared_data(file_paths, dest_dir):
+    """
+    Move only the explicit dataset files passed in.
+    """
+    data_dir = os.path.join(dest_dir, "Data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    moved = 0
+    for f in file_paths:
+        try:
+            move_if_exists(f, data_dir)
+            moved += 1
+        except Exception as e:
+            logging.warning(f"[Data] Could not move {f}: {e}")
+
+    if moved == 0:
+        logging.info("[Data] No explicit dataset files were moved (none found / none existed).")
+    else:
+        logging.info(f"[Data] Moved {moved} dataset file(s) into {data_dir}.")
         
-def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None, best_model_dir=None):
+def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None, best_model_dir=None, explicit_data_paths=None):
     """Standardize the output folder structure for a given platform."""
     logging.basicConfig(level=logging.INFO)
     os.makedirs(dest_dir, exist_ok=True)
@@ -127,8 +147,11 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     else:
         logging.warning(f"No config YAML found at {config_yaml_path}; skipping YAML copy.")
 
-    # Always move data if it exists
-    move_prepared_data(platform, source_dir, results_dir, dest_dir)
+    # Prefer explicit dataset files referenced in the YAML; fallback to engine-based scan
+    if explicit_data_paths:
+        move_specific_prepared_data(explicit_data_paths, dest_dir)
+    else:
+        move_prepared_data(platform, source_dir, results_dir, dest_dir)
 
     if not results_dir:
         results_dir = os.path.join(source_dir, "results")

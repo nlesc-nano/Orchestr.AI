@@ -14,6 +14,7 @@ from mlff_qd.utils.mace_wrapper import run_mace_training
 from mlff_qd.training.training import run_schnet_training
 from mlff_qd.training.inference import run_schnet_inference
 from mlff_qd.utils.standardize_output import standardize_output
+from mlff_qd.utils.yaml_utils import get_dataset_paths_from_yaml
 
 from mlff_qd.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
 
@@ -59,12 +60,14 @@ def run_benchmark(args, scratch_dir):
         # Standardize
         results_dir = get_output_dir(engine_cfg, engine)
         standardized_src = os.path.join(scratch_dir, 'standardized')
+        explicit_paths = get_dataset_paths_from_yaml(engine, engine_yaml_path)
         standardize_output(
             engine,
             scratch_dir,
             standardized_src,
             results_dir=results_dir,
-            config_yaml_path=engine_yaml_path
+            config_yaml_path=engine_yaml_path,
+            explicit_data_paths=explicit_paths
         )
         
         # Move to persistent dir
@@ -242,6 +245,7 @@ def main():
         results_dir = get_output_dir(engine_cfg, platform)
         best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
         standardized_dir = os.path.join(scratch_dir, "standardized")
+        explicit_paths = get_dataset_paths_from_yaml(platform, engine_yaml)
         standardize_output(
             platform,
             scratch_dir,
@@ -249,6 +253,7 @@ def main():
             results_dir=results_dir,
             config_yaml_path=engine_yaml,
             best_model_dir=best_model_dir,
+            explicit_data_paths=explicit_paths
         )
         logging.info(f"Output standardized to {standardized_dir}")
 
