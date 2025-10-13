@@ -2,7 +2,6 @@ import yaml
 import os
 import logging
 from copy import deepcopy
-from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
 # ======== KEY MAPPINGS =========
 KEY_MAPPINGS = {
@@ -151,6 +150,20 @@ OPTIMIZER_TARGETS = {
     "Adam": "torch.optim.Adam",
     "SGD": "torch.optim.SGD",
 }
+
+NPZ_ENGINES = {"schnet", "painn", "fusion"}
+XYZ_ENGINES = {"nequip", "allegro", "mace"}
+
+def expected_extension(platform: str) -> str:
+    return ".npz" if platform in NPZ_ENGINES else ".xyz"
+
+def validate_input_file(path: str, platform: str) -> str:
+    if not path or not os.path.exists(path):
+        raise ValueError(f"Input data file not found: {path}")
+    need = expected_extension(platform)
+    if not str(path).lower().endswith(need):
+        raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected '{need}'.")
+    return path
 
 # Patch painn/fusion mapping to schnet (they use the same template)
 for plat in ["painn", "fusion"]:
@@ -514,11 +527,8 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     if not input_xyz_file or not os.path.exists(input_xyz_file):
         raise ValueError(f"Input XYZ file not found: {input_xyz_file}")
 
-    # -- Data conversion --
-    converted_file = preprocess_data_for_platform(
-        input_xyz_file, platform, output_dir=os.path.join(os.path.dirname(input_xyz_file), "converted_data")
-    )
-    logging.info(f"Converted data file for {platform}: {converted_file}")
+    # --- NEW: extension validation only, no conversion ---
+    input_xyz_file = validate_input_file(input_xyz_file, platform)
 
     # -- Prepare template and mapping as before --
     engine_base = load_template(platform)
@@ -528,7 +538,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
 
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
-        set_nested(engine_cfg, p.split("."), converted_file)
+        set_nested(engine_cfg, p.split("."), input_xyz_file)
 
     # --- Patch split sizes
     if platform in ["nequip", "allegro"]:
