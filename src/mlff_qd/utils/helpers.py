@@ -3,6 +3,7 @@ import os
 import yaml
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_sched
+import numpy as np
 
 def load_config_preproc(config_file=None):
     # If no config file is specified, use a default path relative to this script.
@@ -71,3 +72,67 @@ def get_scheduler_class(name):
         raise ValueError(f"Unsupported scheduler '{name}'. Available: {list(schedulers_map.keys())}")
     return schedulers_map[name]
 
+def analyze_fluctuations(energies, forces):
+    """
+    Analyze fluctuation to suggest loss weights.
+    """
+    energy_fluct = np.std(energies)
+    force_fluct  = np.std(forces)
+    wE_raw = force_fluct / energy_fluct
+    wF_raw = 1.0
+    S = wE_raw + wF_raw
+    wE_norm = wE_raw/S
+    wF_norm = wF_raw/S
+
+    print(f"[Stats] σ(E)={energy_fluct:.4f}, σ(F)={force_fluct:.4f}")
+    print(f"[Weights] raw: E={wE_raw:.4f}, F={wF_raw:.1f}; norm: E={wE_norm:.4f}, F={wF_norm:.4f}")
+    return {'raw':{'energy':wE_raw,'forces':wF_raw},
+            'normalized':{'energy':wE_norm,'forces':wF_norm}}
+            
+
+def analyze_reference_forces(forces, atom_types):
+    """
+    Return dict of per-atom, per-frame, overall force stats.
+    """
+    fm = np.linalg.norm(forces, axis=2)
+
+    per_atom_mean  = fm.mean(axis=0)
+    per_atom_std   = fm.std(axis=0)
+    per_atom_rng   = np.ptp(fm, axis=0)
+    per_frame_mean = fm.mean(axis=1)
+    per_frame_std  = fm.std(axis=1)
+    per_frame_rng  = np.ptp(fm, axis=1)
+    summary = {
+        'per_atom_means':  per_atom_mean,
+        'per_atom_stds':   per_atom_std,
+        'per_atom_ranges': per_atom_rng,
+        'per_frame_means': per_frame_mean,
+        'per_frame_stds':  per_frame_std,
+        'per_frame_ranges': per_frame_rng,
+        'overall_mean':   fm.mean(),
+        'overall_std':    fm.std(),
+        'overall_range':  np.ptp(fm)      
+    }
+    # per-type
+    for t in set(atom_types):
+        idxs = [i for i, a in enumerate(atom_types) if a == t]
+        arr  = fm[:, idxs]
+        summary.setdefault('atom_type_means', {})[t]   = arr.mean()
+        summary.setdefault('atom_type_stds',  {})[t]   = arr.std()
+        summary.setdefault('atom_type_ranges', {})[t]  = np.ptp(arr)  # ← changed
+    return summary
+
+def suggest_thresholds(force_stats, std_fraction=0.1, range_fraction=0.1):
+    overall_std   = force_stats['overall_std']
+    overall_rng   = force_stats['overall_range']
+    thr_std   = std_fraction  * overall_std
+    thr_range = range_fraction* overall_rng
+    print(f"[THR] Std thr={thr_std:.4f}, Range thr={thr_range:.4f}")
+    per_type={}
+    for t in force_stats['atom_type_stds']:
+        ts = force_stats['atom_type_stds'][t]*std_fraction
+        tr = force_stats['atom_type_ranges'][t]*range_fraction
+        per_type[t]={'std_thr':ts,'range_thr':tr}
+        print(f" {t}: std_thr={ts:.4f}, range_thr={tr:.4f}")
+    return {'overall':{'std_thr':thr_std,'range_thr':thr_range},
+            'per_type':per_type}
