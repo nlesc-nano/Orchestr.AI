@@ -1,6 +1,5 @@
 from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
-from mlff_qd.utils.plots import plot_outliers
 
 import logging
 logger = logging.getLogger(__name__)
@@ -18,5 +17,12 @@ def detect_outliers(features, contamination: float, labels, title: str, filename
     """
     clf = IsolationForest(contamination=contamination, random_state=random_state)
     y_pred = clf.fit_predict(features)          # -1 outlier, +1 inlier
-    plot_outliers(features, labels, y_pred, title, filename)
+    
+    # Local import avoids circular dependency at module import time
+    try:
+        from mlff_qd.utils.plots import plot_outliers  # noqa: WPS433 (local import by design)
+        plot_outliers(features, labels, y_pred, title, filename)
+    except Exception as e:
+        logger.warning(f"plot_outliers unavailable during detect_outliers plotting: {e}")
+        
     return (y_pred == 1)
