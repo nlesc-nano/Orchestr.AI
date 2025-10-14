@@ -1,79 +1,46 @@
 #!/usr/bin/env python
 
-import os
+
 import yaml
-import time
-import traceback
 import numpy as np
-from typing import Sequence, Dict
-from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest
-from sklearn.decomposition import PCA
+from typing import Dict
+
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-from ase import Atoms
+from ase.data import atomic_numbers as _ase_atomic_numbers
 from dscribe.descriptors import SOAP
+
+from mlff_qd.utils.io import (
+    parse_stacked_xyz,
+    save_stacked_xyz,
+    save_to_npz,
+)
+
+from mlff_qd.utils.plots import (
+    plot_energy_and_forces,
+    plot_pca,
+    plot_outliers,
+    plot_final_selection,
+)
+
+from mlff_qd.utils.helpers import (
+    analyze_fluctuations,
+    analyze_reference_forces,
+    suggest_thresholds,
+)
+
+from mlff_qd.utils.pca import detect_outliers
+from mlff_qd.utils.cluster import (
+    select_kmeans_medoids,
+    generate_random_subsets,
+    generate_md_random_subsets,
+)
+from mlff_qd.utils.descriptors import compute_local_descriptors
 
 
 def load_config(config_file: str) -> Dict:
     """Load input parameters from a YAML configuration file."""
     with open(config_file, "r") as f:
         return yaml.safe_load(f)
-
-import os
-import numpy as np
-
-from mlff_qd.utils.io import save_to_npz
-
-from mlff_qd.utils.plots import plot_energy_and_forces
-
-from mlff_qd.utils.helpers import analyze_fluctuations
-
-
-
-
-from mlff_qd.utils.io import parse_stacked_xyz
-
-
-def create_labels_from_counts(counts):
-    """Turn [n1,n2,…] into [0×n1,1×n2,…]."""
-    total = sum(counts)
-    labels = np.empty(total,dtype=int)
-    s=0
-    for i,c in enumerate(counts):
-        labels[s:s+c]=i
-        s+=c
-    return labels
-
-
-from mlff_qd.utils.plots import plot_pca, plot_outliers, plot_final_selection
-
-from mlff_qd.utils.io import save_stacked_xyz
-
-from mlff_qd.utils.descriptors import compute_local_descriptors
-
-from mlff_qd.utils.helpers import analyze_reference_forces, suggest_thresholds
-
-from mlff_qd.utils.cluster import (
-    generate_random_subsets,
-    generate_md_random_subsets,
-)
-
-# ───────────────────────────────────────────────────────────────
-# UPDATED: CONSOLIDATION PIPELINE
-# ───────────────────────────────────────────────────────────────
-from typing import Dict, Sequence
-import numpy as np
-from sklearn.ensemble import IsolationForest
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from ase.data import atomic_numbers as _ase_atomic_numbers
-from dscribe.descriptors import SOAP
-
-
-from mlff_qd.utils.pca import detect_outliers
-
-from mlff_qd.utils.cluster import select_kmeans_medoids
 
 
 def consolidate_dataset(cfg: Dict):
