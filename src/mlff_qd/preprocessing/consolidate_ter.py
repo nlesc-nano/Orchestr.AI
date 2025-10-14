@@ -409,6 +409,9 @@ def generate_md_random_subsets(input_file: str,
                                 sampling=sampling, n_sets=n_sets,
                                 bootstrap_factor=bootstrap_factor)
 
+
+
+
 # ───────────────────────────────────────────────────────────────
 # UPDATED: CONSOLIDATION PIPELINE
 # ───────────────────────────────────────────────────────────────
@@ -419,6 +422,34 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
 from dscribe.descriptors import SOAP
+
+
+def detect_outliers(features, contamination: float, labels, title: str, filename: str, random_state: int = 0):
+    """
+    IsolationForest-based outlier detection. Returns a boolean mask of inliers.
+    Also renders the outlier plot using existing plot_outliers(...).
+    """
+    clf = IsolationForest(contamination=contamination, random_state=random_state)
+    y_pred = clf.fit_predict(features)          # -1 outlier, +1 inlier
+    plot_outliers(features, labels, y_pred, title, filename)
+    return (y_pred == 1)
+
+def select_kmeans_medoids(features, n_clusters: int, random_state: int = 0):
+    """
+    KMeans clustering + medoid selection: pick, for each cluster, the member closest to its centroid.
+    Returns an array of selected indices (length = n_clusters).
+    """
+    kmed = KMeans(n_clusters=n_clusters, random_state=random_state).fit(features)
+    centers = kmed.cluster_centers_
+    cluster_lbls = kmed.labels_
+
+    sel_idxs = []
+    for lbl in range(n_clusters):
+        members = np.where(cluster_lbls == lbl)[0]
+        dists   = np.linalg.norm(features[members] - centers[lbl], axis=1)
+        sel_idxs.append(members[np.argmin(dists)])
+    return np.asarray(sel_idxs, dtype=int)
+
 
 def consolidate_dataset(cfg: Dict):
     """
@@ -465,15 +496,13 @@ def consolidate_dataset(cfg: Dict):
     feats     = StandardScaler().fit_transform(raw_feats)
 
     # 8) IsolationForest filtering
-    outlier_clf = IsolationForest(contamination=cont, random_state=0)
-    outliers_pred = outlier_clf.fit_predict(feats)   # length N=2533
-    inliers_mask = (outliers_pred == 1)
-    plot_outliers(
+    inliers_mask = detect_outliers(
         feats,
-        labels_full,    # this is the right length
-        outliers_pred,
+        contamination=cont,
+        labels=labels_full,
         title=f"Outlier Detection (cont={cont})",
-        filename=f"{prefix}_outliers_if.png"
+        filename=f"{prefix}_outliers_if.png",
+        random_state=0,
     )
 
     # 9) Keep only inliers
@@ -502,16 +531,7 @@ def consolidate_dataset(cfg: Dict):
     # 11) K-means medoid selection for each target size
     for tgt in sizes:
         nsel = min(len(feats), tgt)
-        kmed = KMeans(n_clusters=nsel, random_state=0).fit(feats)
-        centers      = kmed.cluster_centers_
-        cluster_lbls = kmed.labels_
-
-        sel_idxs = []
-        for lbl in range(nsel):
-            members = np.where(cluster_lbls == lbl)[0]
-            dists   = np.linalg.norm(feats[members] - centers[lbl], axis=1)
-            sel_idxs.append(members[np.argmin(dists)])
-        sel_idxs = np.array(sel_idxs)
+        sel_idxs = select_kmeans_medoids(feats, nsel, random_state=0)
 
         print(f"[KMeans] selected {len(sel_idxs)} representatives for size {tgt}")
 
@@ -521,7 +541,7 @@ def consolidate_dataset(cfg: Dict):
         plot_energy_and_forces(E[sel_idxs], F[sel_idxs],
                                filename=f"{prefix}_EF_sel_{tgt}.png")
 
-        # Save NPZ with all four arrays: z, R, E, F
+        # Save NPZ with all four arrays: z, R, E, Fs
         npz_fn = f"{prefix}_{tgt}.npz"
         save_to_npz(
             filename=      npz_fn,
