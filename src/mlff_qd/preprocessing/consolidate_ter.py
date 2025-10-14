@@ -153,20 +153,3 @@ def consolidate_dataset(cfg: Dict):
         bootstrap_factor=bf
     )
 
-
-# ───────────────────────────────────────────────────────────────
-if __name__=="__main__":
-    cfg = load_config("input.yaml")
-    # MD-only quick first
-    ds = cfg["dataset"]
-    generate_md_random_subsets(
-        ds["input_file"],
-        ds["subset_counts"].get("MD",0),
-        "md_random_dataset",
-        ds["sizes"],
-        sampling=ds.get("sampling","subsample"),
-        n_sets=ds.get("n_sets",1),
-        bootstrap_factor=ds.get("bootstrap_factor",1)
-    )
-    consolidate_dataset(cfg)
-
