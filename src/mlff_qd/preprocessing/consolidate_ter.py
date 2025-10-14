@@ -143,13 +143,3 @@ def consolidate_dataset(cfg: Dict):
             forces=        F[sel_idxs]
         )
 
-    # 12) Finally, optional random subsets on the inliers pool
-    generate_random_subsets(
-        "inliers_full_dataset.xyz",
-        prefix,
-        sizes,
-        sampling=sampling,
-        n_sets=n_sets,
-        bootstrap_factor=bf
-    )
-
