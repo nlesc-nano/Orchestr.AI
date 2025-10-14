@@ -197,7 +197,7 @@ def create_labels_from_counts(counts):
 # ───────────────────────────────────────────────────────────────
 # PCA / OUTLIER / SOAP / SAVE XYZ
 # ───────────────────────────────────────────────────────────────
-from mlff_qd.utils.pca import plot_pca, plot_outliers, plot_final_selection
+from mlff_qd.utils.plots import plot_pca, plot_outliers, plot_final_selection
 
 def save_stacked_xyz(filename, energies, positions, forces, atom_types):
     num_frames, num_atoms, _ = positions.shape
