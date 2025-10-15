@@ -40,12 +40,6 @@ from mlff_qd.utils.centering import process_xyz
 import logging
 logger = logging.getLogger(__name__)
 
-def load_config(config_file: str) -> Dict:
-    """Load input parameters from a YAML configuration file."""
-    with open(config_file, "r") as f:
-        return yaml.safe_load(f)
-
-
 def consolidate_dataset(cfg: Dict):
     """
     Main pipeline: parse, outlier‐filter, SOAP, features, clustering,
