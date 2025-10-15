@@ -2,9 +2,10 @@
 
 import argparse
 import logging
-from mlff_qd.preprocessing.consolidate_dataset import load_config, consolidate_dataset
+from mlff_qd.preprocessing.consolidate_dataset import consolidate_dataset
 from mlff_qd.utils.compact import create_stacked_xyz
 from mlff_qd.utils.logging_utils import setup_logging
+from mlff_qd.utils.helpers import load_config_preproc
 
 setup_logging("data_preprocessing.log")
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    cfg = load_config(args.config)
+    cfg = load_config_preproc(args.config)
     logger.info(f"Loaded config: {args.config}")
 
     # --- Resolve dataset input: use input_file if present; otherwise build it from pos/frc via compact step ---
