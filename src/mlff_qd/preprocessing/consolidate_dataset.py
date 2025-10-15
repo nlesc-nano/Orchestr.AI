@@ -6,7 +6,6 @@ from typing import Dict
 
 from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
-from dscribe.descriptors import SOAP
 
 from mlff_qd.utils.io import (
     parse_stacked_xyz,
@@ -76,8 +75,7 @@ def consolidate_dataset(cfg: Dict):
     suggest_thresholds(force_stats)
 
     # 6) Local SOAP descriptors
-    soap = SOAP(**cfg["SOAP"])
-    local_feats = compute_local_descriptors(P, atoms, soap)
+    local_feats = compute_local_descriptors(P, atoms, cfg["SOAP"])
 
     # 7) Combine + scale features
     raw_feats = np.hstack((global_feats, local_feats))

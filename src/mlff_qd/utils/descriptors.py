@@ -6,7 +6,15 @@ from dscribe.descriptors import SOAP
 import logging
 logger = logging.getLogger(__name__)
 
-def compute_local_descriptors(positions, atom_types, soap):
+def compute_local_descriptors(positions, atom_types, soap_params):
+    """
+    positions: (N, A, 3)
+    atom_types: sequence of length A (symbols)
+    soap_params: dict passed to dscribe.descriptors.SOAP(**soap_params)
+    """
+    logger.info("[SOAP] Initializing descriptor")
+    soap = SOAP(**soap_params)
+    
     logger.info("[SOAP] Computing descriptors...")
     desc=[]
     for i in range(positions.shape[0]):
