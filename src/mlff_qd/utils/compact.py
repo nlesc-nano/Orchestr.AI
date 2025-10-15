@@ -1,57 +1,14 @@
 import numpy as np
 
+from mlff_qd.utils.io import (
+    get_num_atoms,
+    parse_positions_xyz,
+    parse_forces_xyz,
+)
+
 HARTREE_TO_EV = 27.2114
 HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
 
-def parse_positions_xyz(filename, num_atoms):
-    print(f"Parsing positions XYZ file: {filename}")
-    positions = []
-    atom_types = []
-    total_energies = []
-
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2
-
-        for i in range(0, len(lines), num_lines_per_frame):
-            atom_lines = lines[i + 2:i + 2 + num_atoms]
-            comment_line = lines[i + 1]
-
-            try:
-                total_energy = float(comment_line.split("=")[-1].strip())
-                total_energies.append(total_energy)
-            except ValueError:
-                total_energies.append(None)
-
-            frame_positions = []
-            for line in atom_lines:
-                parts = line.split()
-                atom_types.append(parts[0])
-                frame_positions.append([float(x) for x in parts[1:4]])
-
-            positions.append(frame_positions)
-
-    return np.array(positions), atom_types[:num_atoms], total_energies
-
-def parse_forces_xyz(filename, num_atoms):
-    print(f"Parsing forces XYZ file: {filename}")
-    forces = []
-    with open(filename, "r") as f:
-        lines = f.readlines()
-        num_lines_per_frame = num_atoms + 2
-        for i in range(0, len(lines), num_lines_per_frame):
-            frame_forces = []
-            for j in range(2, 2 + num_atoms):
-                parts = lines[i + j].split()
-                frame_forces.append(list(map(float, parts[1:4])))
-            forces.append(frame_forces)
-    return np.array(forces)
-
-def get_num_atoms(filename):
-    with open(filename, "r") as f:
-        num_atoms = int(f.readline().strip())
-    print(f"Number of atoms: {num_atoms}")
-    return num_atoms
 
 def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
     num_atoms = get_num_atoms(pos_file)
@@ -81,4 +38,3 @@ def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
             for atom, (x, y, z), (fx, fy, fz) in zip(atom_types, positions[frame_idx], forces_ev[frame_idx]):
                 f.write(f"{atom:<2} {x:>12.6f} {y:>12.6f} {z:>12.6f} {fx:>12.6f} {fy:>12.6f} {fz:>12.6f}\n")
     print(f"Stacked XYZ file saved in eV to {output_file_ev}")
-
