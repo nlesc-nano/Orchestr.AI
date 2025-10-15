@@ -2,17 +2,13 @@
 
 import argparse
 import logging
-
 from mlff_qd.preprocessing.consolidate_dataset import load_config, consolidate_dataset
 from mlff_qd.utils.compact import create_stacked_xyz
+from mlff_qd.utils.logging_utils import setup_logging
 
-	# --- Set up logging ---
-import logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s [%(levelname)s] %(message)s',
-                    handlers=[logging.StreamHandler(),
-                              logging.FileHandler("mlff_dataset.log")])
+setup_logging("data_preprocessing.log")
 logger = logging.getLogger(__name__)
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Unified MLFF dataset generator (thin wrapper over consolidate_ter)."
