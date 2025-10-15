@@ -37,6 +37,9 @@ from mlff_qd.utils.cluster import (
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
 
+import logging
+logger = logging.getLogger(__name__)
+
 def load_config(config_file: str) -> Dict:
     """Load input parameters from a YAML configuration file."""
     with open(config_file, "r") as f:
@@ -58,14 +61,14 @@ def consolidate_dataset(cfg: Dict):
     bf       = ds.get("bootstrap_factor", 1)
     cont     = ds.get("contamination", 0.05)
 
-    print(f"[Consolidate] parsing {infile}…")
+    logger.info(f"[Consolidate] parsing {infile}…")
     # 2) Parse stacked XYZ
     E, P, F, atoms = parse_stacked_xyz(infile)
     labels_full = np.arange(len(E))  # Or your group/label logic here
 
     n_frames = len(E)
     n_atoms  = len(atoms)
-    print(f" frames={n_frames}, atoms/frame={n_atoms}")
+    logger.info(f" frames={n_frames}, atoms/frame={n_atoms}")
 
     # 3) Quick diagnostics on energy/forces
     plot_energy_and_forces(E, F, "initial_energy_forces.png")
@@ -103,7 +106,7 @@ def consolidate_dataset(cfg: Dict):
     E = E[inliers_mask]
     P = P[inliers_mask]
     F = F[inliers_mask]
-    print(f"[Filter] kept {len(E)} frames after outlier removal")
+    logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
@@ -125,7 +128,7 @@ def consolidate_dataset(cfg: Dict):
         nsel = min(len(feats), tgt)
         sel_idxs = select_kmeans_medoids(feats, nsel, random_state=0)
 
-        print(f"[KMeans] selected {len(sel_idxs)} representatives for size {tgt}")
+        logger.info(f"[KMeans] selected {len(sel_idxs)} representatives for size {tgt}")
 
         # Save XYZ and energy/force plots
         xyz_fn = f"{prefix}_{tgt}.xyz"

@@ -4,6 +4,7 @@ from scipy.spatial import distance_matrix
 from ase.io import read, write
 from mlff_qd.utils.data_conversion import convert_to_npz
 import logging
+logger = logging.getLogger(__name__)
         
 def estimate_padding(positions):
     """Estimate padding automatically based on nearest-neighbor distances."""

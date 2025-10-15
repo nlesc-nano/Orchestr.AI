@@ -42,7 +42,7 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
     num_atoms = len(atom_types)
     has_energies = (energies is not None) and (len(energies) == num_frames)
 
-    print(f"Saving XYZ data to: {output_path}")
+    logger.info(f"Saving XYZ data to: {output_path}")
     with open(output_path, "w") as f:
         for i, frame in enumerate(frames):
             f.write(f"{num_atoms}\n")
@@ -58,7 +58,7 @@ def save_xyz(filename, positions, atom_types, energies=None, comment="Frame"):
             for atom, (x, y, z) in zip(atom_types, frame):
                 f.write(f"{atom} {x:.6f} {y:.6f} {z:.6f}\n")
 
-    print(f"Done. Wrote {num_frames} frames to '{output_path}'.")
+    logger.info(f"Done. Wrote {num_frames} frames to '{output_path}'.")
 
 def reorder_xyz_trajectory(input_file, output_file, num_atoms):
     """Reorder atoms in the XYZ trajectory."""
@@ -66,7 +66,7 @@ def reorder_xyz_trajectory(input_file, output_file, num_atoms):
     processed_dir.mkdir(parents=True, exist_ok=True)
     output_path = processed_dir / output_file
 
-    print(f"Reordering atoms in trajectory file: {input_file}")
+    logger.info(f"Reordering atoms in trajectory file: {input_file}")
 
     with open(input_file, "r") as infile, open(output_path, "w") as outfile:
         lines = infile.readlines()
@@ -78,7 +78,7 @@ def reorder_xyz_trajectory(input_file, output_file, num_atoms):
             outfile.writelines(header)
             outfile.writelines(sorted_atoms)
     
-    print(f"Reordered trajectory saved to: {output_path}")
+    logger.info(f"Reordered trajectory saved to: {output_path}")
 
 def parse_positions_xyz(filename, num_atoms):
     """
@@ -208,8 +208,8 @@ def save_to_npz(
 
     np.savez_compressed(filename, **base)
 
-    print(f"[I/O] Saved {filename}")
-    print(f"      R {R.shape}, z {z.shape}, E {E.shape}, F {F.shape}")
+    logger.info(f"[I/O] Saved {filename}")
+    logger.info(f"      R {R.shape}, z {z.shape}, E {E.shape}, F {F.shape}")
 
 
 def parse_stacked_xyz(filename):

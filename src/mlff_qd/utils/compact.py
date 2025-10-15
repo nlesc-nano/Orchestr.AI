@@ -5,6 +5,8 @@ from mlff_qd.utils.io import (
     parse_positions_xyz,
     parse_forces_xyz,
 )
+import logging
+logger = logging.getLogger(__name__)
 
 HARTREE_TO_EV = 27.2114
 HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
@@ -19,7 +21,7 @@ def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
     total_energies_ev = [e * HARTREE_TO_EV if e is not None else None for e in total_energies]
     forces_ev = forces * HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM
 
-    print(f"Creating stacked XYZ file in Hartree: {output_file_hartree}")
+    logger.info(f"Creating stacked XYZ file in Hartree: {output_file_hartree}")
     with open(output_file_hartree, "w") as f:
         for frame_idx in range(positions.shape[0]):
             energy = total_energies[frame_idx] if total_energies[frame_idx] is not None else 0.0
@@ -27,9 +29,9 @@ def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
             f.write(f" {energy:.10f} \n")
             for atom, (x, y, z), (fx, fy, fz) in zip(atom_types, positions[frame_idx], forces[frame_idx]):
                 f.write(f"{atom:<2} {x:>12.6f} {y:>12.6f} {z:>12.6f} {fx:>12.6f} {fy:>12.6f} {fz:>12.6f}\n")
-    print(f"Stacked XYZ file saved in Hartree to {output_file_hartree}")
+    logger.info(f"Stacked XYZ file saved in Hartree to {output_file_hartree}")
 
-    print(f"Creating stacked XYZ file in eV: {output_file_ev}")
+    logger.info(f"Creating stacked XYZ file in eV: {output_file_ev}")
     with open(output_file_ev, "w") as f:
         for frame_idx in range(positions.shape[0]):
             energy = total_energies_ev[frame_idx] if total_energies_ev[frame_idx] is not None else 0.0
@@ -37,4 +39,4 @@ def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
             f.write(f" {energy:.10f} \n")
             for atom, (x, y, z), (fx, fy, fz) in zip(atom_types, positions[frame_idx], forces_ev[frame_idx]):
                 f.write(f"{atom:<2} {x:>12.6f} {y:>12.6f} {z:>12.6f} {fx:>12.6f} {fy:>12.6f} {fz:>12.6f}\n")
-    print(f"Stacked XYZ file saved in eV to {output_file_ev}")
+    logger.info(f"Stacked XYZ file saved in eV to {output_file_ev}")

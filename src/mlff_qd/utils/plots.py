@@ -2,7 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from mlff_qd.utils.pca import project_pca2
-    
+import logging
+logger = logging.getLogger(__name__)
+
 def plot_pca(features, labels, title="PCA", filename="pca.png"):
     red, _  = project_pca2(features)
     plt.figure(figsize=(8,6))
@@ -85,4 +87,4 @@ def plot_energy_and_forces(energies, forces, filename='analysis.png'):
     plt.tight_layout()
     plt.savefig(filename, dpi=300)
     plt.close(fig)
-    print(f"[Plot] Energy/force plots saved to {filename}")
+    logger.info(f"[Plot] Energy/force plots saved to {filename}")

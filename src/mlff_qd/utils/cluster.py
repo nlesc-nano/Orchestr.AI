@@ -2,12 +2,13 @@ import numpy as np
 from typing import Sequence, Dict
 from sklearn.cluster import KMeans
 from ase.data import atomic_numbers as _ase_atomic_numbers
+from mlff_qd.utils.plots import plot_energy_and_forces
+
 from mlff_qd.utils.io import (
     parse_stacked_xyz,
     save_stacked_xyz,
     save_to_npz,
 )
-from mlff_qd.utils.plots import plot_energy_and_forces
 
 import logging
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ def generate_random_subsets(input_file: str,
             mode_info = (f"{sampling.upper()}, bootstrap_factor={bootstrap_factor}"
                          if sampling=="bootstrap"
                          else "SUBSAMPLE")
-            print(f"[INFO] Set {i+1}/{n_sets} for size={n}: mode={mode_info} → "
+            logger.info(f"[INFO] Set {i+1}/{n_sets} for size={n}: mode={mode_info} → "
                   f"total picks={total_picks}, unique={unique_picks}, duplicates={dup_picks}")
 
             # Filenames
@@ -107,7 +108,7 @@ def generate_random_subsets(input_file: str,
             # plot
             plot_energy_and_forces(energies[idx], forces[idx],
                                    f"plot_EF_{tag}.png")
-            print(f"[OK]  Saved subset → {xyz_fn}\n")
+            logger.info(f"[OK]  Saved subset → {xyz_fn}\n")
 
 
 

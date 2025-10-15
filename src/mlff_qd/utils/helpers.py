@@ -4,6 +4,8 @@ import yaml
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_sched
 import numpy as np
+import logging
+logger = logging.getLogger(__name__)
 
 def load_config_preproc(config_file=None):
     # If no config file is specified, use a default path relative to this script.
@@ -19,7 +21,7 @@ def load_config_preproc(config_file=None):
             if user_config is None:
                 user_config = {}
     except FileNotFoundError:
-        print(f"Configuration file '{config_file}' not found. Using only default settings.")
+        logger.warning(f"Configuration file '{config_file}' not found. Using only default settings.")
         user_config = {}
 
     return user_config
@@ -35,16 +37,16 @@ def load_config(config_file="config.yaml"):
         dict or None: Configuration dictionary if loaded successfully, or None if there was an error.
     """
     if not os.path.exists(config_file):
-        print(f"Error: Configuration file '{config_file}' not found.")
+        logger.warning(f"Error: Configuration file '{config_file}' not found.")
         return None
 
     try:
         with open(config_file, "r") as f:
             config = yaml.safe_load(f)
-        print(f"Configuration loaded successfully from {config_file}.")
+        logger.info(f"Configuration loaded successfully from {config_file}.")
         return config
     except Exception as e:
-        print(f"Error loading configuration from '{config_file}': {e}")
+        logger.warning(f"Error loading configuration from '{config_file}': {e}")
         return None
 
 def parse_args():
@@ -84,8 +86,8 @@ def analyze_fluctuations(energies, forces):
     wE_norm = wE_raw/S
     wF_norm = wF_raw/S
 
-    print(f"[Stats] σ(E)={energy_fluct:.4f}, σ(F)={force_fluct:.4f}")
-    print(f"[Weights] raw: E={wE_raw:.4f}, F={wF_raw:.1f}; norm: E={wE_norm:.4f}, F={wF_norm:.4f}")
+    logger.info(f"[Stats] σ(E)={energy_fluct:.4f}, σ(F)={force_fluct:.4f}")
+    logger.info(f"[Weights] raw: E={wE_raw:.4f}, F={wF_raw:.1f}; norm: E={wE_norm:.4f}, F={wF_norm:.4f}")
     return {'raw':{'energy':wE_raw,'forces':wF_raw},
             'normalized':{'energy':wE_norm,'forces':wF_norm}}
             
@@ -127,12 +129,12 @@ def suggest_thresholds(force_stats, std_fraction=0.1, range_fraction=0.1):
     overall_rng   = force_stats['overall_range']
     thr_std   = std_fraction  * overall_std
     thr_range = range_fraction* overall_rng
-    print(f"[THR] Std thr={thr_std:.4f}, Range thr={thr_range:.4f}")
+    logger.info(f"[THR] Std thr={thr_std:.4f}, Range thr={thr_range:.4f}")
     per_type={}
     for t in force_stats['atom_type_stds']:
         ts = force_stats['atom_type_stds'][t]*std_fraction
         tr = force_stats['atom_type_ranges'][t]*range_fraction
         per_type[t]={'std_thr':ts,'range_thr':tr}
-        print(f" {t}: std_thr={ts:.4f}, range_thr={tr:.4f}")
+        logger.info(f" {t}: std_thr={ts:.4f}, range_thr={tr:.4f}")
     return {'overall':{'std_thr':thr_std,'range_thr':thr_range},
             'per_type':per_type}
