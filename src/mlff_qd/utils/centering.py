@@ -1,7 +1,10 @@
 import numpy as np
+import os
 from scipy.spatial import distance_matrix
 from ase.io import read, write
-
+from mlff_qd.utils.data_conversion import convert_to_npz
+import logging
+        
 def estimate_padding(positions):
     """Estimate padding automatically based on nearest-neighbor distances."""
     if len(positions) < 2:
@@ -85,4 +88,12 @@ def process_xyz(input_file, output_file, png_file):
     # Save PNG from ASE (first frame only)
     atoms = read(output_file, index=0)
     write(png_file, atoms)
+    
+    # Also emit NPZ from centered XYZ
+    centered_npz = os.path.splitext(output_file)[0] + ".npz"
+    try:
+        convert_to_npz(output_file, centered_npz)
+        logging.info(f"[CENTERING] Converted centered XYZ → NPZ: {centered_npz}")
+    except Exception as e:
+        logging.warning(f"[CENTERING] NPZ conversion failed for {output_file}: {e}")
 
