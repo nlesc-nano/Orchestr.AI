@@ -1,5 +1,4 @@
 import numpy as np
-import argparse
 
 HARTREE_TO_EV = 27.2114
 HARTREE_PER_BOHR_TO_EV_PER_ANGSTROM = 51.4221
@@ -82,15 +81,4 @@ def create_stacked_xyz(pos_file, frc_file, output_file_hartree, output_file_ev):
             for atom, (x, y, z), (fx, fy, fz) in zip(atom_types, positions[frame_idx], forces_ev[frame_idx]):
                 f.write(f"{atom:<2} {x:>12.6f} {y:>12.6f} {z:>12.6f} {fx:>12.6f} {fy:>12.6f} {fz:>12.6f}\n")
     print(f"Stacked XYZ file saved in eV to {output_file_ev}")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process and stack XYZ files.")
-    parser.add_argument("--pos", type=str, required=True, help="Path to the positions XYZ file.")
-    parser.add_argument("--frc", type=str, required=True, help="Path to the forces XYZ file.")
-    args = parser.parse_args()
-
-    output_file_hartree = "dataset_pos_frc_hartree.xyz"
-    output_file_ev = "dataset_pos_frc_ev.xyz"
-
-    create_stacked_xyz(args.pos, args.frc, output_file_hartree, output_file_ev)
 
