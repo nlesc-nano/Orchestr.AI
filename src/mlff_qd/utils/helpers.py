@@ -49,11 +49,11 @@ def load_config(config_file="config.yaml"):
         logger.warning(f"Error loading configuration from '{config_file}': {e}")
         return None
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run Machine Learning Force Field Training with SchNetPack")
-    parser.add_argument("--config", type=str, default="input.yaml", help="Path to the configuration YAML file")
-    args = parser.parse_args()
-    return args
+def parse_args(default: str = "input.yaml", description: str = "MLFF-QD runner"):
+    """Generic CLI parser for MLFF-QD scripts (backward compatible)."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--config", type=str, default=default, help="Path to the configuration YAML file")
+    return parser.parse_args()
 
 def get_optimizer_class(name):
     optimizers_map = {

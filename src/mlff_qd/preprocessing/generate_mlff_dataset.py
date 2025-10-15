@@ -5,25 +5,14 @@ import logging
 from mlff_qd.preprocessing.consolidate_dataset import consolidate_dataset
 from mlff_qd.utils.compact import create_stacked_xyz
 from mlff_qd.utils.logging_utils import setup_logging
-from mlff_qd.utils.helpers import load_config_preproc
+from mlff_qd.utils.helpers import load_config_preproc, parse_args
+
 
 setup_logging("data_preprocessing.log")
 logger = logging.getLogger(__name__)
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Unified MLFF dataset generator (thin wrapper over consolidate_ter)."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="preprocess_config.yaml",
-        help="Path to YAML config (default: preprocess_config.yaml)",
-    )
-    return parser.parse_args()
-
 def main():
-    args = parse_args()
+    args = parse_args(default="preprocess_config.yaml", description="Unified MLFF dataset generator")
     cfg = load_config_preproc(args.config)
     logger.info(f"Loaded config: {args.config}")
 
