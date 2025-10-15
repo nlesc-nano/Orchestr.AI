@@ -3,7 +3,7 @@
 import argparse
 import logging
 
-from mlff_qd.preprocessing.consolidate_ter import load_config, consolidate_dataset
+from mlff_qd.preprocessing.consolidate_dataset import load_config, consolidate_dataset
 from mlff_qd.utils.compact import create_stacked_xyz
 
 	# --- Set up logging ---
