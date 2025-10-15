@@ -1,13 +1,19 @@
 dataset:
-   input_file: "dataset_pos_frc_ev.xyz"
+  # option A: provide a pre-stacked file directly (preferred if you already have it)
+   input_file:  #"dataset_pos_frc_ev.xyz"
+
+  # option B: omit input_file and provide component files; we’ll run the compact step first
+   pos_file: "HgTe-pos-1.xyz"
+   frc_file: "HgTe-frc-1.xyz"
+  
    output_prefix: "consolidated_dataset" 
-   sizes: [200,500,1000]
+   sizes: [200,500]
   # Subset counts (number of structures from each method)
    subset_counts:
      MD: 4036  # Structures obtained from Molecular Dynamics (MD) simulation 
    contamination: 0.05 # Fraction of outliers removed by Isolation Forest 
 SOAP: 
-   species: ["In", "P", "Cl"] 
+   species: ["Hg", "Cl", "Te"] 
    r_cut: 12.0 
    n_max: 7 
    l_max: 3 
