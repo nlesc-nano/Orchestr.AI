@@ -35,7 +35,7 @@ from mlff_qd.utils.cluster import (
     generate_md_random_subsets,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
-
+from mlff_qd.utils.centering import process_xyz
 
 def load_config(config_file: str) -> Dict:
     """Load input parameters from a YAML configuration file."""
@@ -132,7 +132,12 @@ def consolidate_dataset(cfg: Dict):
         save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
         plot_energy_and_forces(E[sel_idxs], F[sel_idxs],
                                filename=f"{prefix}_EF_sel_{tgt}.png")
-
+        
+        # Center lattice & write centered file + preview PNG
+        centered_xyz = f"{prefix}_{tgt}_centered.xyz"
+        centered_png = f"{prefix}_{tgt}_centered.png"
+        process_xyz(xyz_fn, centered_xyz, centered_png)
+        
         # Save NPZ with all four arrays: z, R, E, Fs
         npz_fn = f"{prefix}_{tgt}.npz"
         save_to_npz(
@@ -142,4 +147,3 @@ def consolidate_dataset(cfg: Dict):
             energies=      E[sel_idxs],
             forces=        F[sel_idxs]
         )
-
