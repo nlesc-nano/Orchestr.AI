@@ -32,6 +32,7 @@ data:
 
 trainer:
   _target_: lightning.Trainer
+  accelerator: auto
   max_epochs: 3
   check_val_every_n_epoch: 1
   log_every_n_steps: 5
