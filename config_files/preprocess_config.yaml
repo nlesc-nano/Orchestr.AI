@@ -12,6 +12,12 @@ dataset:
    subset_counts:
      MD: 4036  # Structures obtained from Molecular Dynamics (MD) simulation 
    contamination: 0.05 # Fraction of outliers removed by Isolation Forest 
+   
+# ───────────────────────────────────────────────
+# Optional SOAP descriptor settings
+# (You can safely remove this section to let MLFF-QD
+#  auto-detect species and use default SOAP parameters)
+# ───────────────────────────────────────────────
 SOAP: 
    species: ["Hg", "Cl", "Te"] 
    r_cut: 12.0 
