@@ -65,6 +65,7 @@ KEY_MAPPINGS = {
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
         "training.accelerator": ["device", "trainer.accelerator"],  # template uses 'device'
+        "training.devices": ["trainer.devices"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -106,6 +107,7 @@ KEY_MAPPINGS = {
         "training.pin_memory": [],  # not in template
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
         "training.accelerator": ["device", "trainer.accelerator"],
+        "training.devices": ["trainer.devices"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -554,6 +556,41 @@ def extract_common_config(master_yaml_path):
         raise ValueError("New YAML must have a `common:` section at top level.")
     return config["common"], config
 
+def _int_or_len_devices(x):
+    """Normalize Lightning 'devices' into an int count.
+    Accepts int, list/tuple (e.g., [0,1]), or numeric string. Returns None for 'auto'/unknown.
+    """
+    if isinstance(x, int):
+        return x
+    if isinstance(x, (list, tuple)):
+        return len(x)
+    try:
+        return int(x)
+    except Exception:
+        return None  # e.g., 'auto'
+        
+
+def apply_autoddp(engine_cfg: dict):
+    """Ensure DDP keys match effective device count.
+    - devices <= 1 → remove trainer.strategy/num_nodes
+    - devices >= 2 → set trainer.strategy='ddp' and default trainer.num_nodes=1
+    """
+    trainer = engine_cfg.setdefault("trainer", {})
+    devs_raw = trainer.get("devices", 1)
+    devs = _int_or_len_devices(devs_raw)
+    if devs is None:
+        # Unknown or 'auto' → let Lightning decide; don't force DDP keys
+        return
+
+    trainer["devices"] = devs  # reflect normalized value
+
+    if devs <= 1:
+        trainer.pop("strategy", None)
+        trainer.pop("num_nodes", None)
+    else:
+        trainer.setdefault("strategy", "ddp")
+        trainer.setdefault("num_nodes", 1)
+
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # ---- Load configs
     user_cfg, config = extract_common_config(master_yaml_path)
@@ -637,6 +674,8 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         elif platform == 'mace':
             engine_cfg['test_file'] = None  # Skip test
         print(f"Debug: Patched run for {platform}: {engine_cfg.get('run')}")  # Debug
+    
+    apply_autoddp(engine_cfg)
     
     return engine_cfg
 

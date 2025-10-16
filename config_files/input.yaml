@@ -39,6 +39,7 @@ common:
     learning_rate: 0.001
     num_workers: 24
     accelerator: cuda
+    devices: 2
     log_every_n_steps: 5
     optimizer: AdamW
     scheduler:

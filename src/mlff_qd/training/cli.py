@@ -8,7 +8,7 @@ import shutil
 import pandas as pd
 
 from mlff_qd.utils.helpers import load_config
-from mlff_qd.utils.yaml_utils import extract_engine_yaml, validate_input_file
+from mlff_qd.utils.yaml_utils import extract_engine_yaml, validate_input_file, apply_autoddp
 from mlff_qd.utils.nequip_wrapper import run_nequip_training
 from mlff_qd.utils.mace_wrapper import run_mace_training
 from mlff_qd.training.training import run_schnet_training
@@ -151,7 +151,9 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     elif platform == "mace":
         config["train_file"] = data_path
     
-
+     # Normalize DDP keys before writing the YAML
+    apply_autoddp(config)
+    
     if write_temp:
         if not scratch_dir:
             scratch_dir = tempfile.gettempdir()
