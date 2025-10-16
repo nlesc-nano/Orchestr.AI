@@ -75,7 +75,8 @@ def consolidate_dataset(cfg: Dict):
     suggest_thresholds(force_stats)
 
     # 6) Local SOAP descriptors
-    local_feats = compute_local_descriptors(P, atoms, cfg["SOAP"])
+    soap_params = cfg.get("SOAP")
+    local_feats = compute_local_descriptors(P, atoms, soap_params)
 
     # 7) Combine + scale features
     raw_feats = np.hstack((global_feats, local_feats))
