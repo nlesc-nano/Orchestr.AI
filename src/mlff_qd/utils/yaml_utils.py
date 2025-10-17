@@ -22,6 +22,7 @@ KEY_MAPPINGS = {
         "training.pin_memory": ["training.pin_memory"],
         "training.log_every_n_steps": ["training.log_every_n_steps"],
         "training.accelerator": ["training.accelerator"],
+        "training.devices": ["training.devices"],
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
         "training.test_size": ["training.num_test"],
