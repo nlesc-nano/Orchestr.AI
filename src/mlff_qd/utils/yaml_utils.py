@@ -592,6 +592,43 @@ def apply_autoddp(engine_cfg: dict):
         trainer.setdefault("strategy", "ddp")
         trainer.setdefault("num_nodes", 1)
 
+def apply_mace_distributed_from_devices(user_cfg: dict, engine_cfg: dict):
+    """
+    Boolean-only policy for MACE:
+    If unified YAML provides training.devices, derive engine_cfg['distributed']:
+      - devices <= 1  -> False
+      - devices >= 2  -> True
+    If training.devices is absent, do nothing (engine-specific YAML stays as-is).
+    """
+    devv = (user_cfg or {}).get("training", {}).get("devices", None)
+    if devv is None:
+        return  # unified didn't specify devices; leave engine_cfg['distributed'] untouched
+    try:
+        # reuse your existing helper
+        n = _int_or_len_devices(devv)
+    except NameError:
+        try:
+            n = int(devv)
+        except Exception:
+            n = None
+    if n is None:
+        # devices like "auto" not supported for this policy; default to False
+        engine_cfg["distributed"] = False
+        return
+    engine_cfg["distributed"] = bool(n >= 2)
+    
+def _env_world_size():
+    import os
+    for k in ("WORLD_SIZE", "SLURM_NTASKS", "SLURM_NPROCS"):
+        v = os.environ.get(k)
+        if v and str(v).isdigit():
+            return max(1, int(v))
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd:
+        return max(1, len([x for x in cvd.split(",") if x.strip()]))
+    return 1
+
+
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # ---- Load configs
     user_cfg, config = extract_common_config(master_yaml_path)
@@ -675,8 +712,12 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         elif platform == 'mace':
             engine_cfg['test_file'] = None  # Skip test
         print(f"Debug: Patched run for {platform}: {engine_cfg.get('run')}")  # Debug
-    
-    apply_autoddp(engine_cfg)
+
+    # Engine-specific post-processing
+    if platform in ['nequip', 'allegro']:
+        apply_autoddp(engine_cfg)
+    elif platform == 'mace':
+        apply_mace_distributed_from_devices(user_cfg, engine_cfg)
     
     return engine_cfg
 
