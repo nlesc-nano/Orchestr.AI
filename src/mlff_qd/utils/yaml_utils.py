@@ -2,7 +2,6 @@ import yaml
 import os
 import logging
 from copy import deepcopy
-from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
 # ======== KEY MAPPINGS =========
 KEY_MAPPINGS = {
@@ -22,7 +21,8 @@ KEY_MAPPINGS = {
         "training.num_workers": ["training.num_workers"],
         "training.pin_memory": ["training.pin_memory"],
         "training.log_every_n_steps": ["training.log_every_n_steps"],
-        "training.device": ["training.accelerator"],
+        "training.accelerator": ["training.accelerator"],
+        "training.devices": ["training.devices"],
         "training.train_size": ["training.num_train"],
         "training.val_size": ["training.num_val"],
         "training.test_size": ["training.num_test"],
@@ -65,7 +65,8 @@ KEY_MAPPINGS = {
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template, add if needed
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
-        "training.device": ["device", "trainer.accelerator"],  # template uses 'device'
+        "training.accelerator": ["device", "trainer.accelerator"],  # template uses 'device'
+        "training.devices": ["trainer.devices"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -106,7 +107,8 @@ KEY_MAPPINGS = {
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
         "training.pin_memory": [],  # not in template
         "training.log_every_n_steps": ["trainer.log_every_n_steps"],
-        "training.device": ["device", "trainer.accelerator"],
+        "training.accelerator": ["device", "trainer.accelerator"],
+        "training.devices": ["trainer.devices"],
         "training.train_size": ["data.split_dataset.train"],
         "training.val_size": ["data.split_dataset.val"],
         "training.test_size": ["data.split_dataset.test"],
@@ -135,7 +137,7 @@ KEY_MAPPINGS = {
         "training.num_workers": ["num_workers"],
         "training.pin_memory": ["pin_memory"],
         "training.log_every_n_steps": ["eval_interval"],
-        "training.device": ["device"],
+        "training.accelerator": ["device"],
         "training.train_size": ["train_file"],  # This is actually a path to file, not a ratio/size; be careful 
         "training.val_size": ["valid_fraction"],
         "training.early_stopping.patience": ["patience"],
@@ -151,6 +153,70 @@ OPTIMIZER_TARGETS = {
     "Adam": "torch.optim.Adam",
     "SGD": "torch.optim.SGD",
 }
+
+NPZ_ENGINES = {"schnet", "painn", "fusion"}
+XYZ_ENGINES = {"nequip", "allegro", "mace"}
+
+def expected_extension(platform: str) -> str:
+    return ".npz" if platform in NPZ_ENGINES else ".xyz"
+
+def validate_input_file(path: str, platform: str) -> str:
+    if not path or not os.path.exists(path):
+        raise ValueError(f"Input data file not found: {path}")
+    need = expected_extension(platform)
+    if not str(path).lower().endswith(need):
+        raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected '{need}'.")
+    return path
+
+def _resolve_path(base_dir, p):
+    if not p:
+        return None
+    return p if os.path.isabs(p) else os.path.abspath(os.path.join(base_dir, p))
+
+def get_dataset_paths_from_yaml(platform, config_yaml_path):
+    """
+    Return a list of dataset files referenced by the engine YAML, resolved relative to the YAML file.
+    Only returns existing files. Deduplicated.
+    """
+    if not config_yaml_path or not os.path.exists(config_yaml_path):
+        return []
+
+    with open(config_yaml_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    yaml_dir = os.path.dirname(os.path.abspath(config_yaml_path))
+    platform = (platform or "").lower()
+    paths = []
+
+    if platform in {"schnet", "painn", "fusion"}:
+        dp = cfg.get("data", {}).get("dataset_path")
+        if dp: paths.append(_resolve_path(yaml_dir, dp))
+        # optional extras if you use them:
+        for k in ("val_dataset_path", "test_dataset_path"):
+            p = cfg.get("data", {}).get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+    elif platform in {"nequip", "allegro"}:
+        sp = cfg.get("data", {}).get("split_dataset", {}).get("file_path")
+        if sp: paths.append(_resolve_path(yaml_dir, sp))
+        for k in ("test_file", "infer_file"):
+            p = cfg.get("data", {}).get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+    elif platform == "mace":
+        tf = cfg.get("train_file")
+        if tf: paths.append(_resolve_path(yaml_dir, tf))
+        for k in ("valid_file", "val_file", "test_file"):
+            p = cfg.get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+    # Dedup + existing only
+    final, seen = [], set()
+    for p in paths:
+        if p and os.path.exists(p) and p not in seen:
+            seen.add(p)
+            final.append(p)
+    return final
 
 # Patch painn/fusion mapping to schnet (they use the same template)
 for plat in ["painn", "fusion"]:
@@ -491,6 +557,78 @@ def extract_common_config(master_yaml_path):
         raise ValueError("New YAML must have a `common:` section at top level.")
     return config["common"], config
 
+def _int_or_len_devices(x):
+    """Normalize Lightning 'devices' into an int count.
+    Accepts int, list/tuple (e.g., [0,1]), or numeric string. Returns None for 'auto'/unknown.
+    """
+    if isinstance(x, int):
+        return x
+    if isinstance(x, (list, tuple)):
+        return len(x)
+    try:
+        return int(x)
+    except Exception:
+        return None  # e.g., 'auto'
+        
+
+def apply_autoddp(engine_cfg: dict):
+    """Ensure DDP keys match effective device count.
+    - devices <= 1 → remove trainer.strategy/num_nodes
+    - devices >= 2 → set trainer.strategy='ddp' and default trainer.num_nodes=1
+    """
+    trainer = engine_cfg.setdefault("trainer", {})
+    devs_raw = trainer.get("devices", 1)
+    devs = _int_or_len_devices(devs_raw)
+    if devs is None:
+        # Unknown or 'auto' → let Lightning decide; don't force DDP keys
+        return
+
+    trainer["devices"] = devs  # reflect normalized value
+
+    if devs <= 1:
+        trainer.pop("strategy", None)
+        trainer.pop("num_nodes", None)
+    else:
+        trainer.setdefault("strategy", "ddp")
+        trainer.setdefault("num_nodes", 1)
+
+def apply_mace_distributed_from_devices(user_cfg: dict, engine_cfg: dict):
+    """
+    Boolean-only policy for MACE:
+    If unified YAML provides training.devices, derive engine_cfg['distributed']:
+      - devices <= 1  -> False
+      - devices >= 2  -> True
+    If training.devices is absent, do nothing (engine-specific YAML stays as-is).
+    """
+    devv = (user_cfg or {}).get("training", {}).get("devices", None)
+    if devv is None:
+        return  # unified didn't specify devices; leave engine_cfg['distributed'] untouched
+    try:
+        # reuse your existing helper
+        n = _int_or_len_devices(devv)
+    except NameError:
+        try:
+            n = int(devv)
+        except Exception:
+            n = None
+    if n is None:
+        # devices like "auto" not supported for this policy; default to False
+        engine_cfg["distributed"] = False
+        return
+    engine_cfg["distributed"] = bool(n >= 2)
+    
+def _env_world_size():
+    import os
+    for k in ("WORLD_SIZE", "SLURM_NTASKS", "SLURM_NPROCS"):
+        v = os.environ.get(k)
+        if v and str(v).isdigit():
+            return max(1, int(v))
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd:
+        return max(1, len([x for x in cvd.split(",") if x.strip()]))
+    return 1
+
+
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # ---- Load configs
     user_cfg, config = extract_common_config(master_yaml_path)
@@ -514,11 +652,8 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     if not input_xyz_file or not os.path.exists(input_xyz_file):
         raise ValueError(f"Input XYZ file not found: {input_xyz_file}")
 
-    # -- Data conversion --
-    converted_file = preprocess_data_for_platform(
-        input_xyz_file, platform, output_dir=os.path.join(os.path.dirname(input_xyz_file), "converted_data")
-    )
-    logging.info(f"Converted data file for {platform}: {converted_file}")
+    # --- NEW: extension validation only, no conversion ---
+    input_xyz_file = validate_input_file(input_xyz_file, platform)
 
     # -- Prepare template and mapping as before --
     engine_base = load_template(platform)
@@ -528,7 +663,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
 
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
-        set_nested(engine_cfg, p.split("."), converted_file)
+        set_nested(engine_cfg, p.split("."), input_xyz_file)
 
     # --- Patch split sizes
     if platform in ["nequip", "allegro"]:
@@ -577,6 +712,12 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         elif platform == 'mace':
             engine_cfg['test_file'] = None  # Skip test
         print(f"Debug: Patched run for {platform}: {engine_cfg.get('run')}")  # Debug
+
+    # Engine-specific post-processing
+    if platform in ['nequip', 'allegro']:
+        apply_autoddp(engine_cfg)
+    elif platform == 'mace':
+        apply_mace_distributed_from_devices(user_cfg, engine_cfg)
     
     return engine_cfg
 

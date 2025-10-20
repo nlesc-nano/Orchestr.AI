@@ -1,155 +1,47 @@
 #!/usr/bin/env python3
 
-import pprint
-import numpy as np
 import argparse
-from pathlib import Path
-
-from dscribe.descriptors import SOAP
-
-from mlff_qd.utils.cluster import cluster_trajectory, compute_soap_descriptors
-from mlff_qd.utils.constants import hartree_bohr_to_eV_angstrom, hartree_to_eV
-from mlff_qd.utils.helpers import load_config_preproc
-from mlff_qd.utils.io import ( save_xyz, reorder_xyz_trajectory, parse_positions_xyz,
-        parse_forces_xyz, get_num_atoms )
-from mlff_qd.utils.pca import ( generate_surface_core_pca_samples, generate_structures_from_pca,
-        plot_generated_samples )
-from mlff_qd.utils.preprocessing import ( create_mass_dict, center_positions,
-        iterative_alignment_fixed, rotate_forces, find_medoid_structure,
-        generate_randomized_samples )
-
-# --- Set up logging ---
 import logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s [%(levelname)s] %(message)s',
-                    handlers=[logging.StreamHandler(),
-                              logging.FileHandler("mlff_dataset.log")])
+from mlff_qd.preprocessing.consolidate_dataset import consolidate_dataset
+from mlff_qd.utils.compact import create_stacked_xyz
+from mlff_qd.utils.logging_utils import setup_logging
+from mlff_qd.utils.helpers import load_config_preproc, parse_args
+
+
+setup_logging("data_preprocessing.log")
 logger = logging.getLogger(__name__)
 
-# --- Main Execution ---
+def main():
+    args = parse_args(default="preprocess_config.yaml", description="Unified MLFF dataset generator")
+    cfg = load_config_preproc(args.config)
+    logger.info(f"Loaded config: {args.config}")
+
+    # --- Resolve dataset input: use input_file if present; otherwise build it from pos/frc via compact step ---
+    ds = cfg.get("dataset", {})
+    input_file = ds.get("input_file")
+    pos_file   = ds.get("pos_file")
+    frc_file   = ds.get("frc_file")
+    prefix     = ds.get("output_prefix", "dataset")
+
+    if not input_file or str(input_file).strip() == "":
+        if pos_file and frc_file:
+            out_hartree = "combined_pos_frc_hartree.xyz"
+            out_ev      = "combined_pos_frc_ev.xyz"
+            logger.info(f"No dataset.input_file given; building stacked XYZ via compact step using pos={pos_file}, frc={frc_file}")
+            create_stacked_xyz(pos_file, frc_file, out_hartree, out_ev)
+            
+            # write back into cfg so consolidate_ter uses it transparently
+            cfg.setdefault("dataset", {})["input_file"] = out_ev
+            logger.info(f"Set dataset.input_file to: {out_ev}")
+        else:
+            raise ValueError(
+                "Config must provide either dataset.input_file, or both dataset.pos_file and dataset.frc_file."
+            )
+    else:
+        logger.info(f"Using existing dataset.input_file: {input_file}")
+
+    consolidate_dataset(cfg)
+    logger.info("Dataset consolidation complete.")
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MLFF Data Generation")
-    parser.add_argument("--config", type=str, default=None,
-                        help="Path to the YAML config file.")
-    args = parser.parse_args()
-    
-    # Load yaml config
-    config = load_config_preproc(config_file=args.config)
-
-    # Extract config values
-    pos_file_path = Path(config["pos_file"]).resolve()
-    frc_file_path = Path(config["frc_file"]).resolve()
-
-    # Define output directory
-    processed_dir = Path.cwd() / "processed_data"
-    processed_dir.mkdir(exist_ok=True)
-
-    logger.info(f"Processing data from {pos_file_path.parent} and saving to {processed_dir}")
-
-    max_random_displacement = config.get("max_random_displacement", 0.25)
-    scaling_factor = config.get("scaling_factor", 0.40)
-    scaling_surf = config.get("scaling_surf", 0.60)
-    scaling_core = config.get("scaling_core", 0.40) 
-    surface_atom_types = config.get("surface_atom_types", ["Cs", "Br"])
-    clustering_method = config.get("clustering_method", "KMeans")
-    num_clusters = config.get("num_clusters", 100)
-    num_samples_pca = config.get("num_samples_pca", 600)
-    num_samples_pca_surface = config.get("num_samples_pca_surface", 300)
-    num_samples_randomization = config.get("num_samples_randomization", 100)
-    soap_params = config["SOAP"]
-    logger.info("Configuration:")
-    pprint.pprint(config, indent=4, width=80)
-
-    num_atoms = get_num_atoms(pos_file_path)
-    positions, atom_types, energies_hartree = parse_positions_xyz(pos_file_path, num_atoms)
-    mass_dict = create_mass_dict(atom_types)
-    masses = np.array([mass_dict[atom] for atom in atom_types])
-    
-    reordered_positions_path = processed_dir / "reordered_positions.xyz"
-    reordered_forces_path    = processed_dir / "reordered_forces.xyz"
-    reorder_xyz_trajectory(pos_file_path, reordered_positions_path, num_atoms)
-    reorder_xyz_trajectory(frc_file_path, reordered_forces_path, num_atoms)
-
-    positions, atom_types, energies_hartree = parse_positions_xyz(reordered_positions_path, num_atoms)
-    forces = parse_forces_xyz(reordered_forces_path, num_atoms)
-
-    # Preprocessing
-    centered_positions = center_positions(positions, masses)
-    aligned_positions, rotations, _ = iterative_alignment_fixed(centered_positions)
-    aligned_forces = rotate_forces(forces, rotations)
-    medoid_structure, rep_idx = find_medoid_structure(aligned_positions)
-    
-    save_xyz("medoid_structure.xyz", medoid_structure[np.newaxis,:,:], atom_types)
-    save_xyz("aligned_positions.xyz", aligned_positions, atom_types, energies_hartree, comment="Aligned positions")
-    save_xyz("aligned_forces.xyz", aligned_forces, atom_types, comment="Aligned forces")
-
-    energies_ev = [e * hartree_to_eV if e is not None else None for e in energies_hartree]
-    aligned_forces_ev = aligned_forces * hartree_bohr_to_eV_angstrom
-    
-    save_xyz("aligned_positions_ev.xyz", aligned_positions, atom_types, energies_ev, comment="Aligned positions")
-    save_xyz("aligned_forces_eV.xyz", aligned_forces_ev, atom_types, comment="Aligned forces")
-
-    aligned_positions_path = processed_dir / "aligned_positions.xyz"
-    aligned_forces_path = processed_dir / "aligned_forces.xyz"
-    md_positions, atom_types, _ = parse_positions_xyz(aligned_positions_path, num_atoms)
-    md_forces = parse_forces_xyz(aligned_forces_path, num_atoms)
-    
-    species = sorted(list(set(atom_types)))
-    
-    soap = SOAP(
-        species=species,
-        r_cut=soap_params["r_cut"],
-        n_max=soap_params["n_max"],
-        l_max=soap_params["l_max"],
-        sigma=soap_params["sigma"],
-        periodic=soap_params["periodic"],
-        sparse=soap_params["sparse"]
-    )
-    logger.info("Computing SOAP descriptors for MD frames...")
-    precomputed_soap = compute_soap_descriptors(md_positions, atom_types, soap)
-    logger.info("Performing clustering based on SOAP descriptors...")
-    representative_md = cluster_trajectory(precomputed_soap, clustering_method, num_clusters, md_positions, atom_types)
-    pca_samples = generate_structures_from_pca(md_positions, md_forces, representative_md, atom_types, 
-                                               num_samples_pca, scaling_factor, pca_variance_threshold=0.90)
-    
-    medoid_structure_path = processed_dir / "medoid_structure.xyz"
-    surface_replaced_path = processed_dir / "surface_replaced.xyz"
-    pca_surface_samples = generate_surface_core_pca_samples(md_positions, md_forces, atom_types, surface_atom_types,
-            representative_md, num_samples_pca_surface, scaling_surf, scaling_core,
-            medoid_structure_path, surface_replaced_path) 
-    
-    randomized_samples = generate_randomized_samples(representative_md, atom_types, num_samples_randomization,
-                                                     max_random_displacement)
-
-    combined_samples = {
-        "MD": md_positions,
-        "PCA": pca_samples,
-        "PCA_Surface": pca_surface_samples,
-        "Randomized": randomized_samples,
-    }
-    for name, samples in combined_samples.items():
-        logger.info(f"{name}: {np.array(samples).shape}")
-
-    plot_generated_samples(combined_samples, atom_types, soap)
-
-    # Combine non-MD samples for training dataset.
-    combined_list = []
-    frame_titles = []
-    for name, samples in combined_samples.items():
-        if name != "MD":
-            samples_arr = np.array(samples)
-            combined_list.append(samples_arr)
-            for i in range(len(samples)):
-                frame_titles.append(f"Frame {i+1} from {name}")
-    
-    training_dataset = np.vstack(combined_list).reshape(-1, num_atoms, 3)
-    
-    training_dataset_path = processed_dir / "training_dataset.xyz"
-    with open(training_dataset_path, "w") as f:
-        for i, (struct, title) in enumerate(zip(training_dataset, frame_titles)):
-            f.write(f"{len(struct)}\n{title}\n")
-            for atom, coords in zip(atom_types, struct):
-                f.write(f"{atom} {coords[0]:.6f} {coords[1]:.6f} {coords[2]:.6f}\n")
-    
-    logger.info(f"Saved training dataset with {training_dataset.shape[0]} structures to 'training_dataset.xyz'")
-
+    main()

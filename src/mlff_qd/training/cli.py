@@ -8,13 +8,13 @@ import shutil
 import pandas as pd
 
 from mlff_qd.utils.helpers import load_config
-from mlff_qd.utils.yaml_utils import extract_engine_yaml
+from mlff_qd.utils.yaml_utils import extract_engine_yaml, validate_input_file, apply_autoddp, _env_world_size
 from mlff_qd.utils.nequip_wrapper import run_nequip_training
 from mlff_qd.utils.mace_wrapper import run_mace_training
 from mlff_qd.training.training import run_schnet_training
 from mlff_qd.training.inference import run_schnet_inference
 from mlff_qd.utils.standardize_output import standardize_output
-from mlff_qd.utils.data_conversion import preprocess_data_for_platform
+from mlff_qd.utils.yaml_utils import get_dataset_paths_from_yaml
 
 from mlff_qd.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
 
@@ -60,12 +60,14 @@ def run_benchmark(args, scratch_dir):
         # Standardize
         results_dir = get_output_dir(engine_cfg, engine)
         standardized_src = os.path.join(scratch_dir, 'standardized')
+        explicit_paths = get_dataset_paths_from_yaml(engine, engine_yaml_path)
         standardize_output(
             engine,
             scratch_dir,
             standardized_src,
             results_dir=results_dir,
-            config_yaml_path=engine_yaml_path
+            config_yaml_path=engine_yaml_path,
+            explicit_data_paths=explicit_paths
         )
         
         # Move to persistent dir
@@ -120,7 +122,7 @@ def get_output_dir(engine_cfg, platform):
             continue
     return "./results"
 
-def patch_and_convert_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None, write_temp=True):
+def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None, write_temp=True):
     with open(yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     data_path = xyz_path
@@ -131,21 +133,42 @@ def patch_and_convert_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None,
             data_path = config.get("data", {}).get("split_dataset", {}).get("file_path", None)
         elif platform == "mace":
             data_path = config.get("train_file", None)
+            
     if not data_path or not os.path.exists(data_path):
         raise ValueError(
             f"YAML file {yaml_path} is missing a valid data path for platform '{platform}'.\n"
             "Either add the correct dataset path to your YAML or provide --input."
         )
-    converted_file = preprocess_data_for_platform(
-        data_path, platform, output_dir=os.path.join(os.path.dirname(data_path), "converted_data")
-    )
+           
+     # --- NEW: extension validation only, no conversion ---
+    data_path = validate_input_file(data_path, platform)
+    
+    # Patch original path back into config (no conversion)
     if platform in ["schnet", "painn", "fusion"]:
-        config.setdefault("data", {})["dataset_path"] = converted_file
+        config.setdefault("data", {})["dataset_path"] = data_path
     elif platform in ["nequip", "allegro"]:
-        config.setdefault("data", {}).setdefault("split_dataset", {})["file_path"] = converted_file
+        config.setdefault("data", {}).setdefault("split_dataset", {})["file_path"] = data_path
     elif platform == "mace":
-        config["train_file"] = converted_file
-
+        config["train_file"] = data_path
+    
+     # Normalize DDP keys before writing the YAML
+    # apply_autoddp(config)
+    # Normalize engine-specific flags before writing the YAML
+    if platform in ["nequip", "allegro"]:
+        apply_autoddp(config)
+    elif platform == "mace":
+        # boolean-only policy: do NOT auto-change engine-specific YAML
+        # optional: warn if mismatch with environment
+        try:
+            ws = _env_world_size()
+            dist = bool(config.get("distributed", False))
+            if dist and ws == 1:
+                logging.warning("[MACE] distributed=true but environment world_size=1; job may hang or underutilize resources.")
+            if (not dist) and ws > 1:
+                logging.warning("[MACE] distributed=false but environment world_size=%d; multi-GPU launch detected.", ws)
+        except Exception:
+            pass
+    
     if write_temp:
         if not scratch_dir:
             scratch_dir = tempfile.gettempdir()
@@ -196,7 +219,7 @@ def main():
         else:
             # For legacy, patch/convert but don't run training if only_generate
             engine_cfg = None  # Will be loaded in next step
-            engine_yaml = patch_and_convert_yaml(args.config, platform, xyz_path=args.input, scratch_dir=scratch_dir, write_temp=True)
+            engine_yaml = patch_and_validate_yaml(args.config, platform, xyz_path=args.input, scratch_dir=scratch_dir, write_temp=True)
         if is_unified:
             with open(engine_yaml, "w", encoding="utf-8") as f:
                 yaml.dump(engine_cfg, f)
@@ -216,7 +239,7 @@ def main():
             engine_cfg = yaml.safe_load(f)
     else:
         # Legacy mode, always patch/convert and run
-        engine_yaml = patch_and_convert_yaml(args.config, platform, xyz_path=args.input, scratch_dir=scratch_dir, write_temp=True)
+        engine_yaml = patch_and_validate_yaml(args.config, platform, xyz_path=args.input, scratch_dir=scratch_dir, write_temp=True)
         with open(engine_yaml, "r", encoding="utf-8") as f:
             engine_cfg = yaml.safe_load(f)
 
@@ -239,6 +262,7 @@ def main():
         results_dir = get_output_dir(engine_cfg, platform)
         best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
         standardized_dir = os.path.join(scratch_dir, "standardized")
+        explicit_paths = get_dataset_paths_from_yaml(platform, engine_yaml)
         standardize_output(
             platform,
             scratch_dir,
@@ -246,6 +270,7 @@ def main():
             results_dir=results_dir,
             config_yaml_path=engine_yaml,
             best_model_dir=best_model_dir,
+            explicit_data_paths=explicit_paths
         )
         logging.info(f"Output standardized to {standardized_dir}")
 

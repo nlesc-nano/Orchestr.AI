@@ -44,9 +44,7 @@ data:
 trainer:
   _target_: lightning.Trainer
   accelerator: auto
-  devices: 2    # NO of GPUs
-  strategy: ddp # for multiple GPUs
-  num_nodes: 1 # we need to add when we are using multiple GPUs
+  devices: 1    # NO of GPUs
   enable_checkpointing: true
   max_epochs: 3
   max_time: 03:00:00:00
