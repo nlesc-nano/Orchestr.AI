@@ -156,18 +156,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     # Normalize engine-specific flags before writing the YAML
     if platform in ["nequip", "allegro"]:
         apply_autoddp(config)
-    elif platform == "mace":
-        # boolean-only policy: do NOT auto-change engine-specific YAML
-        # optional: warn if mismatch with environment
-        try:
-            ws = _env_world_size()
-            dist = bool(config.get("distributed", False))
-            if dist and ws == 1:
-                logging.warning("[MACE] distributed=true but environment world_size=1; job may hang or underutilize resources.")
-            if (not dist) and ws > 1:
-                logging.warning("[MACE] distributed=false but environment world_size=%d; multi-GPU launch detected.", ws)
-        except Exception:
-            pass
+
     
     if write_temp:
         if not scratch_dir:

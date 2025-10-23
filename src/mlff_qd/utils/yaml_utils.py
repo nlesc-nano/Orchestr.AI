@@ -628,6 +628,35 @@ def _env_world_size():
         return max(1, len([x for x in cvd.split(",") if x.strip()]))
     return 1
 
+def validate_mace_launch_policy(cfg: dict):
+    """Fail fast if MACE 'distributed' disagrees with the launch environment."""
+    import logging
+    ws = _env_world_size()
+    dist = bool(cfg.get("distributed", False))
+
+    if dist and ws == 1:
+        logging.error("[MACE] distributed=true but environment world_size=1. "
+                      "Either set distributed:false or launch multi-task (e.g., --ntasks-per-node>=2 or torchrun).")
+        raise SystemExit(2)
+
+    if (not dist) and ws > 1:
+        logging.error("[MACE] distributed=false but environment world_size=%d. "
+                      "Either set distributed:true or run a single task (--ntasks=1).", ws)
+        raise SystemExit(2)
+
+    if (not dist) and ws == 1:
+        try:
+            import torch
+            visible = torch.cuda.device_count()
+        except Exception:
+            visible = 1
+        if visible >= 2:
+            logging.error("[MACE] Multiple GPUs (%d) visible with distributed=false and a single task. "
+                          "Either enable distributed:true or limit to devices: 1.", visible)
+            raise SystemExit(2)
+
+    logging.info("[MACE] Launch context OK: distributed=%s, world_size=%d", dist, ws)
+
 
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # ---- Load configs
