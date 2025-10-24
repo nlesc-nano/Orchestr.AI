@@ -14,8 +14,8 @@ common:
     input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz   # Path to your XYZ file
 
   model:
-    mp_layers: 3
-    features: 32
+    mp_layers: 3       # Number of message-passing layers in the neural network.
+    features: 32       # Dimension of atomic feature vectors (per-atom embedding size).
     cutoff: 12.0
     n_rbf: 8           # For schnet, painn, fusion: number of RBF (radial basis functions)
                        # For nequip, allegro: this value will be mapped to number of bessel basis functions
@@ -34,23 +34,27 @@ common:
     train_size: 0.8
     val_size: 0.1
     test_size: 0.1
-    batch_size: 16
+    batch_size: 16      # Global batch size for training. 
+                        # If using multiple GPUs, this value is split evenly across devices 
+                        # (e.g., 16 total → 8 per GPU when devices=2). 
+                        # For a single GPU, the full batch size is used.
     epochs: 3
     learning_rate: 0.001
     num_workers: 24
-    device: cuda
-    log_every_n_steps: 5
+    accelerator: cuda
+    devices: 2              # Number of GPUs to use for distributed or data-parallel training. Set 1 for single-GPU.
+    log_every_n_steps: 5    # Frequency (in steps) for logging metrics and losses to the console or logger.
     optimizer: AdamW
     scheduler:
       type: ReduceLROnPlateau
       factor: 0.8
       patience: 5
-    pin_memory: true
+    pin_memory: true      # If true, preloads data into page-locked memory for faster GPU transfer.
     
     early_stopping:
-      enabled: true
-      patience: 30
-      min_delta: 0.003
+      enabled: true       # Enable or disable early stopping to avoid overfitting.
+      patience: 30        # Stop training if validation loss doesn’t improve for this many epochs.
+      min_delta: 0.003    # Minimum change in monitored metric to qualify as improvement.
       monitor: val_loss
       # monitor: val_loss         # for schnet
       # monitor: val0_epoch/weighted_sum   # for nequip

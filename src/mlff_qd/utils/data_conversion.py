@@ -1,8 +1,10 @@
 import os
 import numpy as np
-import logging
 import shutil
 import re
+import logging
+logger = logging.getLogger(__name__)
+
 
 MODEL_OUTPUTS = {
     'schnet': {'ext': '.npz', 'desc': 'schnetpack'},
@@ -47,9 +49,9 @@ def is_prepared_xyz(header_line):
 def copy_to_converted_data(src_file, out_file):
     if os.path.abspath(src_file) != os.path.abspath(out_file):
         shutil.copy(src_file, out_file)
-        logging.info(f"[INFO] Copied {src_file} → {out_file}")
+        logger.info(f"[INFO] Copied {src_file} → {out_file}")
     else:
-        logging.info(f"[INFO] Input already at destination: {src_file}")
+        logger.info(f"[INFO] Input already at destination: {src_file}")
     return out_file
 
 def format_stress_for_xyz(stress_val):
@@ -142,7 +144,7 @@ def convert_to_npz(xyz_file, out_file):
     if any(stress_list):
         base_vars['stress'] = np.array([s if s is not None else '' for s in stress_list])
     np.savez_compressed(out_file, **base_vars)
-    logging.info(f"[DONE] Dataset saved to: {out_file}")
+    logger.info(f"[DONE] Dataset saved to: {out_file}")
     return out_file
 
 def convert_npz_to_xyz(npz_file, out_file):
@@ -178,7 +180,7 @@ def convert_npz_to_xyz(npz_file, out_file):
                 p = R[i][j]
                 fr = F[i][j]
                 f.write(f"{s:2} {p[0]:12.6f} {p[1]:12.6f} {p[2]:12.6f} {fr[0]:12.6f} {fr[1]:12.6f} {fr[2]:12.6f}\n")
-    logging.info(f"[DONE] npz→xyz conversion complete: {out_file}")
+    logger.info(f"[DONE] npz→xyz conversion complete: {out_file}")
     return out_file
 
 def convert_to_mace_xyz(xyz_file, out_file):
@@ -205,7 +207,7 @@ def convert_to_mace_xyz(xyz_file, out_file):
                 p = positions[i][j]
                 fr = forces[i][j]
                 outfile.write(f"{s:2} {p[0]:12.6f} {p[1]:12.6f} {p[2]:12.6f} {fr[0]:12.6f} {fr[1]:12.6f} {fr[2]:12.6f}\n")
-    logging.info(f"[DONE] Special/prepared .xyz saved to: {out_file}")
+    logger.info(f"[DONE] Special/prepared .xyz saved to: {out_file}")
     return out_file
 
 def preprocess_data_for_platform(input_file, platform, output_dir="./converted_data"):

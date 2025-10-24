@@ -3,6 +3,8 @@ import shutil
 import logging
 import argparse
 import glob
+from mlff_qd.utils.yaml_utils import NPZ_ENGINES, XYZ_ENGINES
+
 def move_if_exists(src, dst_dir, rename=None):
     if os.path.exists(src):
         dst = os.path.join(dst_dir, rename if rename else os.path.basename(src))
@@ -43,7 +45,7 @@ def move_best_model(results_dir, dest_dir, pattern="*model*"):
  
 def move_prediction_files(source_dir, results_dir, dest_dir):
     """
-    Moves all .csv and .pkl files from source_dir and results_dir (recursively) to dest_dir/Prediction.
+    Moves all .csv and .pkl files from source_dir and results_dir to dest_dir/Prediction.
     """
     prediction_dir = os.path.join(dest_dir, "Prediction")
     os.makedirs(prediction_dir, exist_ok=True)
@@ -61,15 +63,74 @@ def move_prediction_files(source_dir, results_dir, dest_dir):
         logging.warning(f"[Prediction] No .csv or .pkl files found in {source_dir} or {results_dir}.")
     else:
         logging.info(f"[Prediction] {n_found} .csv/.pkl prediction files moved to {prediction_dir}.")
- 
-def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None, best_model_dir=None):
+
+def move_prepared_data(platform, source_dir, results_dir, dest_dir):
+    """
+    Move the pre-prepared dataset files (*.npz or *.xyz) into dest_dir/Data depending on engine type.
+    Uses engine-to-extension mapping defined in yaml_utils.py.
+    """
+    data_dir = os.path.join(dest_dir, "Data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Determine expected extension based on platform
+    if platform in NPZ_ENGINES:
+        patterns = ("**/*.npz",)
+    elif platform in XYZ_ENGINES:
+        patterns = ("**/*.xyz",)
+    else:
+        logging.warning(f"[Data] Unknown platform '{platform}', scanning both .npz and .xyz.")
+        patterns = ("**/*.npz", "**/*.xyz")
+
+    seen = set()
+    moved = 0
+
+    for base in [source_dir, results_dir]:
+        if not base or not os.path.exists(base):
+            continue
+        for pat in patterns:
+            for f in glob.glob(os.path.join(base, pat), recursive=True):
+                if not os.path.isfile(f) or f in seen:
+                    continue
+                seen.add(f)
+                try:
+                    move_if_exists(f, data_dir)
+                    moved += 1
+                except Exception as e:
+                    logging.warning(f"[Data] Could not move {f}: {e}")
+
+    if moved == 0:
+        logging.info(f"[Data] No {patterns} files found for platform {platform}.")
+    else:
+        logging.info(f"[Data] Moved {moved} file(s) ({patterns}) into {data_dir}.")
+
+def move_specific_prepared_data(file_paths, dest_dir):
+    """
+    Move only the explicit dataset files passed in.
+    """
+    data_dir = os.path.join(dest_dir, "Data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    moved = 0
+    for f in file_paths:
+        try:
+            move_if_exists(f, data_dir)
+            moved += 1
+        except Exception as e:
+            logging.warning(f"[Data] Could not move {f}: {e}")
+
+    if moved == 0:
+        logging.info("[Data] No explicit dataset files were moved (none found / none existed).")
+    else:
+        logging.info(f"[Data] Moved {moved} dataset file(s) into {data_dir}.")
+        
+def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_yaml_path=None, best_model_dir=None, explicit_data_paths=None):
     """Standardize the output folder structure for a given platform."""
     logging.basicConfig(level=logging.INFO)
     os.makedirs(dest_dir, exist_ok=True)
 
     standardized_dirs = {
         "engine_yaml": os.path.join(dest_dir, "engine_yaml"),
-        "converted_data": os.path.join(dest_dir, "converted_data"),
+        "Data": os.path.join(dest_dir, "Data"),
         "best_model": os.path.join(dest_dir, "best_model"),
         "checkpoints": os.path.join(dest_dir, "checkpoints"),
         "logs": os.path.join(dest_dir, "logs"),
@@ -86,8 +147,11 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     else:
         logging.warning(f"No config YAML found at {config_yaml_path}; skipping YAML copy.")
 
-    # Always move converted_data if it exists
-    move_if_exists(os.path.join(source_dir, "converted_data"), standardized_dirs["converted_data"])
+    # Prefer explicit dataset files referenced in the YAML; fallback to engine-based scan
+    if explicit_data_paths:
+        move_specific_prepared_data(explicit_data_paths, dest_dir)
+    else:
+        move_prepared_data(platform, source_dir, results_dir, dest_dir)
 
     if not results_dir:
         results_dir = os.path.join(source_dir, "results")

@@ -44,6 +44,7 @@ data:
 trainer:
   _target_: lightning.Trainer
   accelerator: auto
+  devices: 1    # NO of GPUs
   enable_checkpointing: true
   max_epochs: 3
   max_time: 03:00:00:00
