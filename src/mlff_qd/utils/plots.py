@@ -28,17 +28,6 @@ def plot_outliers(features,labels,outliers,title,filename):
     plt.title(title); plt.legend()
     plt.savefig(filename, dpi=300); plt.close()
     
-def plot_final_selection(features,labels,sel,title,filename):
-    red, _  = project_pca2(features)
-    plt.figure(figsize=(8,6))
-    cmap = ["blue","green","red","orange"]
-    for lbl in np.unique(labels):
-        m = labels==lbl
-        plt.scatter(red[m,0],red[m,1],c=cmap[lbl % len(cmap)],alpha=0.5,label=f"{lbl}")
-    plt.scatter(red[sel,0],red[sel,1],facecolors='none',edgecolors='k',s=100,label='selected')
-    plt.title(title); plt.legend()
-    plt.savefig(filename, dpi=300); plt.close()
-
 def plot_energy_and_forces(energies, forces, filename='analysis.png'):
     """Plot energy-per-frame, energy-per-atom, max/avg force with thresholds."""
     num_frames = len(energies)

@@ -74,24 +74,6 @@ def get_scheduler_class(name):
         raise ValueError(f"Unsupported scheduler '{name}'. Available: {list(schedulers_map.keys())}")
     return schedulers_map[name]
 
-def analyze_fluctuations(energies, forces):
-    """
-    Analyze fluctuation to suggest loss weights.
-    """
-    energy_fluct = np.std(energies)
-    force_fluct  = np.std(forces)
-    wE_raw = force_fluct / energy_fluct
-    wF_raw = 1.0
-    S = wE_raw + wF_raw
-    wE_norm = wE_raw/S
-    wF_norm = wF_raw/S
-
-    logger.info(f"[Stats] σ(E)={energy_fluct:.4f}, σ(F)={force_fluct:.4f}")
-    logger.info(f"[Weights] raw: E={wE_raw:.4f}, F={wF_raw:.1f}; norm: E={wE_norm:.4f}, F={wF_norm:.4f}")
-    return {'raw':{'energy':wE_raw,'forces':wF_raw},
-            'normalized':{'energy':wE_norm,'forces':wF_norm}}
-            
-
 def analyze_reference_forces(forces, atom_types):
     """
     Return dict of per-atom, per-frame, overall force stats.
