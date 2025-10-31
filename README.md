@@ -2,25 +2,30 @@
 Machine Learning Force Fields for Quantum Dots platform. 🚀
 
 ## Installation
-For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conda environment using Python 3.12. Details will be provided in the following sections.
+For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
+Details will be provided in the following sections.
 
-### Setting up the Conda Environment 🛠️
-To set up the conda environment, we recommend to use the provided `environment.yaml` file. Once the package is activated, we also recommend to install the `mace-torch` package. One can run the following commands:
+### Installation of the mlff_qd package ⚙️
+To install the `mlff_qd` platform, clone the repository and set up the environment as follows:
+
+####  Clone the repository
+```bash
+git clone https://github.com/nlesc-nano/MLFF_QD.git
+cd MLFF_QD
+```
+#### Set up the Conda environment 🛠️
+To set up the conda environment, use the provided `environment.yaml` file. Once activated, install the `mace-torch` package as recommended.
 
 ```bash
 conda env create -f environment.yaml
 conda activate mlff
 pip install mace-torch==0.3.13
 ```
-
-### Installation of the mlff_qd package
-One can install the platform using pip in the following way:
+####  Install the mlff_qd package
+Finally, install the package in editable mode:
 ```bash
-git clone https://github.com/nlesc-nano/MLFF_QD.git
-cd MLFF_QD  
 pip install -e .
 ```
-
 ------
 ## Getting started
 The current version of the platform is developped for being run in a cluster. Thus, in this repository one can find the necessary code, a bash script example for submitting jobs in a slurm queue system and an input file example.
