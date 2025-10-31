@@ -1,12 +1,19 @@
+# ───────────────────────────────────────────────
+#                 Dataset Input
+#  Choose ONE of the two options below for your data.
+# ───────────────────────────────────────────────
 dataset:
-  # option A: provide a pre-stacked file directly (preferred if you already have it)
-   input_file:  #"dataset_pos_frc_ev.xyz"
+  # --- Option A: Use a single, pre-combined file (Recommended) ---
+  # Uncomment 'input_file' if you have one file with positions, forces, and energy.
+  # input_file: "dataset_pos_frc_ev.xyz"
 
-  # option B: omit input_file and provide component files; we’ll run the compact step first
+  # --- Option B: Auto combine separate position and force files ---
+  # Use these lines if your positions and forces are in two different files.
    pos_file: "HgTe-pos-1.xyz"
    frc_file: "HgTe-frc-1.xyz"
   
    output_prefix: "consolidated_dataset" 
+   
    sizes: [200,500]
   # Subset counts (number of structures from each method)
    subset_counts:

@@ -21,8 +21,6 @@ import contextlib
 import matplotlib.pyplot as plt
 import pandas as pd
 import scipy.linalg
-import plotly.tools as tls
-import plotly.io as pio
 
 from ase.io import read, write  # Needed for reading training/eval data
 
@@ -38,8 +36,16 @@ from mlff_qd.postprocessing.plotting import (
     generate_uq_plots, 
     generate_al_influence_plots, generate_al_traditional_plots
 )
-from mlff_qd.postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, filter_unrealistic_indices, compute_bond_thresholds, adaptive_learning_ensemble_calibrated 
+from mlff_qd.postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, adaptive_learning_ensemble_calibrated 
 
+from mlff_qd.postprocessing.active_learning import (
+    compute_rdf_thresholds_from_reference,
+    fast_filter_by_rdf_kdtree,
+    collect_pair_distances,
+    make_rdf_hist,
+    plot_rdf_comparison,
+    debug_plot_rdfs
+)
 
 def setup_evaluation(config):
     """
@@ -446,13 +452,21 @@ def run_eval(config):
         traceback.print_exc()
         return
 
-    eval_cfg        = config.get("eval", {})
-    error_estimate  = eval_cfg.get("error_estimate", False)
-    al_flag         = eval_cfg.get("active_learning", None)
-    ensemble_folder = eval_cfg.get("ensemble_folder", None)
-    pool_xyz_path   = eval_cfg.get("unlabeled_pool_path", None)
-    do_plot         = eval_cfg.get("plot", False)
-    neighbour_list  = setup_neighbor_list(config)
+    eval_cfg           = config.get("eval", {})
+    error_estimate     = eval_cfg.get("error_estimate", False)
+    al_flag            = eval_cfg.get("active_learning", None)
+    ensemble_folder    = eval_cfg.get("ensemble_folder", None)
+    pool_xyz_path      = eval_cfg.get("unlabeled_pool_path", None)
+    do_plot            = eval_cfg.get("plot", False)
+    budget_max         = eval_cfg.get("budget_max", 50)
+    percentile_gamma   = eval_cfg.get("percentile_gamma", 90.0) 
+    percentile_F_low   = eval_cfg.get("percentile_F_low", 95.0) 
+    percentile_F_hi    = eval_cfg.get("percentile_F_hi", 99.0) 
+    thr_sE_atom   = eval_cfg.get("thr_sE_atom", 0.002)  # eV/atom  (2 meV/atom)
+    thr_sF_mean   = eval_cfg.get("thr_sF_mean", 0.10)   # eV/Å
+    thr_sF_max    = eval_cfg.get("thr_sF_max", 0.20)    # eV/Å
+    thr_Fmax_mult = eval_cfg.get("thr_Fmax_mult", 1.5)  # × max |F| in TRAIN
+    neighbour_list     = setup_neighbor_list(config)
 
     # disable validation AL if pool is present
     al_val_flag = None if pool_xyz_path else al_flag
@@ -795,6 +809,7 @@ def run_eval(config):
                 mean_l_al             = mean_L_frame,
                 force_rmse_per_comp   = rmse_force_comp,
                 denom_all             = all_true_F, 
+                reference_frames      = reference_frames,   # <<< NEW
                 beta                  = 0,
                 drop_init             = 1.0,
                 min_k                 = 5,
@@ -828,62 +843,129 @@ def run_eval(config):
                 print(f"Saved {len(sel_idx)} validation frames to 'to_label_from_val.xyz'.")
             else:
                 print("No validation frames selected; nothing to save.")
-    
+
         if pool_xyz_path and os.path.exists(pool_xyz_path):
-            print(f"[Pool‑AL] parsing unlabeled pool from {pool_xyz_path}")
+            print(f"[Pool-AL] parsing unlabeled pool from {pool_xyz_path}")
             _pool_E, _pool_F, _pool_pos = parse_extxyz(pool_xyz_path, "unlabeled_pool")
             pool_frames = read(pool_xyz_path, index=":", format="extxyz")
-    
-            # ensemble eval on pool -----------------------------------------
+
+            # -------------------------------------------------
+            # 0. Ensemble eval on pool
+            # -------------------------------------------------
+            print("[Pool-AL] running ensemble inference on pool ...")
+            t_pool_eval_0 = time.perf_counter()
+
             ens_E_pool, ens_F_pool, ens_L_pool, _, _, _ = evaluate_and_cache_ensemble(
                 pool_frames, ensemble_folder, device, batch_size, eval_log,
                 config, neighbour_list, npz_path="ensemble_unlabel.npz")
 
-            ens_E_pool = np.stack(ens_E_pool, axis=0)
-            ens_L_pool = np.stack(ens_L_pool, axis=0)
+            t_pool_eval_1 = time.perf_counter()
+            print(f"[Pool-AL] ensemble eval finished in "
+                  f"{t_pool_eval_1 - t_pool_eval_0:.2f} s")
 
-            mu_E_pool    = np.mean(ens_E_pool, axis=0)
+            ens_E_pool = np.stack(ens_E_pool, axis=0)    # (n_models, n_pool)
+            ens_L_pool = np.stack(ens_L_pool, axis=0)    # (n_models, n_pool, d_lat)
+
+            mu_E_pool    = np.mean(ens_E_pool, axis=0)   # (n_pool,)
             sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
-            mu_F_pool    = np.mean(ens_F_pool, axis=0)
-            print(f"ens_F_pool shape: {ens_F_pool.shape}")
-
+            mu_F_pool    = np.mean(ens_F_pool, axis=0)   # (n_pool * n_atoms, 3) or similar
             sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
-            mu_L_pool    = np.mean(ens_L_pool, axis=0)
-            mean_L_pool = np.mean(ens_L_pool, axis=0)
+            mu_L_pool    = np.mean(ens_L_pool, axis=0)   # (n_pool, d_lat)
+            mean_L_pool  = np.mean(ens_L_pool, axis=0)   # alias, same as mu_L_pool really
 
-            # rolling average plot (unchanged) ------------------------------
+            print(f"[Pool-AL] ens_F_pool shape: {ens_F_pool.shape}")
+            print(f"[Pool-AL] n_pool_frames = {len(pool_frames)}")
+
+            # -------------------------------------------------
+            # 1. Rolling average plot prep
+            # -------------------------------------------------
             steps  = np.arange(len(mu_E_pool))
             window = 50
             df     = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
             sm     = df.rolling(window, center=True, min_periods=1).mean()
 
-    
-            # bond‑length thresholds ----------------------------------------
+            # -------------------------------------------------
+            # 2. Indexing: train/val splits
+            # -------------------------------------------------
             train_idx     = np.where(train_mask)[0]
+            val_idx       = np.where(val_mask)[0]
+
             train_frames  = [all_frames[i] for i in train_idx]
-            thresholds    = compute_bond_thresholds(train_frames, neighbour_list,
-                                                    first_shell_cutoff=5.0)
-            bad_global    = filter_unrealistic_indices(pool_frames, neighbour_list, thresholds)
-    
-            # thin for AL ----------------------------------------------------
+            val_frames_ref = [all_frames[i] for i in val_idx]  # THIS is our DFT-trusted reference set
+
+            # -------------------------------------------------
+            # 3. Thinning the pool before heavy stuff
+            # -------------------------------------------------
             pool_stride   = eval_cfg.get("pool_stride", 1)
             thin_idx      = np.arange(len(pool_frames))[::pool_stride]
-            pool_frames_thin   = [pool_frames[i] for i in thin_idx]
-            F_pool_thin        = mu_L_pool[thin_idx].astype(float)
-            mu_E_pool_thin     = mu_E_pool[thin_idx].astype(float)
-            sigma_E_pool_thin  = sigma_E_pool[thin_idx].astype(float)
-            F_train_thin       = mean_L_frame[train_idx].astype(float)   # needed by AL
-            
-            # ---------------------------------------------------------------------
-            # MAP bad_global TO THINNED COORDINATES
-            # ---------------------------------------------------------------------
-            bad_rel = set(np.nonzero(np.isin(thin_idx, list(bad_global)))[0])
-            
-            # highlight bond outliers on plot -------------------------------
-            bad_thin = bad_global.intersection(set(thin_idx))
-            bad_mask = np.isin(steps, list(bad_global))
 
-            # Save everything for later re-plotting:
+            pool_frames_thin   = [pool_frames[i] for i in thin_idx]          # (n_thin,)
+            F_pool_thin        = mu_L_pool[thin_idx].astype(float)           # (n_thin, d_lat)
+            mu_E_pool_thin     = mu_E_pool[thin_idx].astype(float)           # (n_thin,)
+            sigma_E_pool_thin  = sigma_E_pool[thin_idx].astype(float)        # (n_thin,)
+            F_train_thin       = mean_L_frame[train_idx].astype(float)       # (n_train, d_lat)
+
+            print(f"[Pool-AL] pool thinning stride={pool_stride} → {len(pool_frames_thin)} frames")
+
+            # -------------------------------------------------
+            # 4. RDF thresholds from VALIDATION frames
+            # -------------------------------------------------
+            rdf_cache_file = "rdf_thresholds_cache.npz"
+            rdf_stride     = eval_cfg.get("rdf_stride", 5)  # allow control from YAML
+
+            if os.path.exists(rdf_cache_file):
+                print(f"[Pool-AL] Loading cached RDF thresholds from {rdf_cache_file}")
+                data = np.load(rdf_cache_file, allow_pickle=True)
+                rdf_thresholds = data["rdf_thresholds"].item()  # dict was pickled into object array
+            else:
+                print("[Pool-AL] computing RDF thresholds from validation frames...")
+                t_rdf0 = time.perf_counter()
+                rdf_thresholds = compute_rdf_thresholds_from_reference(val_frames_ref, stride=rdf_stride)
+                print("[Pool-AL] RDF thresholds computed.")
+                t_rdf1 = time.perf_counter()
+                print(f"[Pool-AL] RDF threshold calc took {t_rdf1 - t_rdf0:.2f} s")
+                print(f"[Pool-AL] Caching RDF thresholds to {rdf_cache_file}")
+                np.savez_compressed(rdf_cache_file, rdf_thresholds=rdf_thresholds)
+
+            debug_plot_rdfs(val_frames_ref, rdf_thresholds,
+                r_max=6.0,
+                dr=0.02,
+                outprefix="rdf_DEBUG")
+
+            # -------------------------------------------------
+            # 5. Fast RDF filter ON THINNED POOL using KDTree
+            # -------------------------------------------------
+            print("[Pool-AL] applying fast RDF hard-cutoff filter to thinned pool...")
+            t_filt0 = time.perf_counter()
+            rdf_ok_mask_thin = fast_filter_by_rdf_kdtree(pool_frames_thin, rdf_thresholds)
+            t_filt1 = time.perf_counter()
+            print(f"[Pool-AL] RDF filter done in {t_filt1 - t_filt0:.2f} s. "
+                  f"{rdf_ok_mask_thin.sum()}/{len(rdf_ok_mask_thin)} kept.")
+
+            # mask for plotting: mark BAD frames at the *original* pool indices
+            bad_mask = np.zeros_like(steps, dtype=bool)
+            # thin_idx[k] is original index of pool_frames_thin[k]
+            # rdf_ok_mask_thin[k] == False → it's bad
+            for k, orig_i in enumerate(thin_idx):
+                if not rdf_ok_mask_thin[k]:
+                    bad_mask[orig_i] = True
+
+            # -------------------------------------------------
+            # (OPTIONAL) Diagnostics / plots of RDF distributions
+            # -------------------------------------------------
+            # If you still want to generate RDF comparison plots, do it on
+            # a *small* subset so you don't blow up runtime:
+            """
+            diag_subset = pool_frames_thin[:100]  # first 100 thinned frames
+            diag_subset_kept = [fr for fr, ok in zip(diag_subset, rdf_ok_mask_thin[:100]) if ok]
+
+            # You would then write tiny helpers like collect_pair_distances(...) etc.
+            # BUT DO NOT run that on all 5k frames; it's purely for QC.
+            """
+
+            # -------------------------------------------------
+            # 6. Save pool energy trace + bad_mask
+            # -------------------------------------------------
             np.savez_compressed(
                 "pool_energy_trace.npz",
                 steps = steps,
@@ -891,103 +973,113 @@ def run_eval(config):
                 sigma = sm["sigma"].values,
                 bad   = bad_mask
             )
-            print("Saved data to pool_energy_trace.npz")
+            print("[Pool-AL] Saved data to pool_energy_trace.npz")
 
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.plot(steps, sm["mu"], label=f"{window}-pt MA of μE")
-            ax.fill_between(steps, sm["mu"]-2*sm["sigma"], sm["mu"]+2*sm["sigma"],
-                             alpha=0.3, label="σ (smoothed)")
-            ax.scatter(steps[bad_mask], sm["mu"][bad_mask], marker='x', label='bond outlier')
+            ax.fill_between(steps,
+                            sm["mu"]-2*sm["sigma"],
+                            sm["mu"]+2*sm["sigma"],
+                            alpha=0.3,
+                            label="σ (smoothed)")
+            ax.scatter(steps[bad_mask],
+                       sm["mu"][bad_mask],
+                       marker='x',
+                       label='RDF hard-reject')
             ax.legend()
             ax.set_xlabel("Pool frame index")
             ax.set_ylabel("Predicted energy")
             ax.set_title("Pool energy ± uncertainty")
             fig.tight_layout()
-
             fig.savefig("pool_energy_uncertainty.png", dpi=200)
+            plt.close(fig)
+            print("[Pool-AL] Saved plot pool_energy_uncertainty.png")
 
-            # ----------------------------------------------------------------------
-            # ❶  Build training design matrix and targets
-            # ----------------------------------------------------------------------
-            train_idx    = np.where(train_mask)[0]
+            # -------------------------------------------------
+            # 7. Build design matrix and calibrate α², λ
+            # -------------------------------------------------
+            print("[Pool-AL] Calibrating α² and λ (GCV)...")
             F_train_full = mean_L_frame[train_idx].astype(float)
             y_train_full = stats_ens.delta_E_frame[train_idx].astype(float)
-            
+
             # guard: drop non-finite rows
             good_rows = np.isfinite(F_train_full).all(axis=1) & np.isfinite(y_train_full)
             F_train   = F_train_full[good_rows]
             y_train   = y_train_full[good_rows]
-            
-            # ----------------------------------------------------------------------
-            # ❷  Fit λ and α² with (generalised) cross-validation
-            # ----------------------------------------------------------------------
+
             alpha_sq, lambda_opt, _, _, L_chol = calibrate_alpha_reg_gcv(
                 F_eval=F_train,
                 y=y_train,
                 lambda_bounds=(1e-6, 1e4)
             )
-            
-            assert np.isfinite(L_chol).all(), "L_chol still has NaNs/Infs!"
+            assert np.isfinite(L_chol).all(), "L_chol has NaNs/Infs!"
+            print("[Pool-AL] Calibration done.")
 
-            # uncertainty for pool path -------------------------------------
-            if n_models >= 2:
-                calib_pool = VarianceScalingCalibrator().fit(
-                                stats_ens.delta_E_frame[train_mask],
-                                sigma_E_raw[train_mask])
-                sigma_E_pool_cal = calib_pool.transform(sigma_E_pool)
-            else:
-                sigma_E_pool_cal = None  # latent path will compute its own σ
-    
-            # windowed pool AL ----------------------------------------------
-            E_atom_max = (mu_E_frame[train_idx] / n_atoms).max()
-            thr_E_hi   = E_atom_max + 0.5              # eV per atom
-
+            # -------------------------------------------------
+            # 8. Run windowed AL on thinned pool
+            # -------------------------------------------------
+            print("[Pool-AL] Running windowed active learning on thinned pool ...")
             Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
                 pool_frames_thin,
                 F_pool_thin,
                 F_train_thin,
                 alpha_sq,
                 L_chol,
-                forces_train     = all_true_F, 
-                sigma_energy     = sigma_E_raw, 
-                sigma_force      = sigma_comp, 
-                mu_E_frame_train = mu_E_frame[train_idx], 
+                forces_train     = all_true_F,
+                sigma_energy     = sigma_E_raw,
+                sigma_force      = sigma_comp,
+                mu_E_frame_train = mu_E_frame[train_idx],
                 mu_E_pool        = mu_E_pool_thin,
                 sigma_E_pool     = sigma_E_pool_thin,
                 mu_F_pool        = mu_F_pool,
                 sigma_F_pool     = sigma_F_pool,
-                bad_global       = bad_rel,
+                rdf_thresholds   = rdf_thresholds,
                 rho_eV           = 0.002,
                 min_k            = 5,
                 window_size      = eval_cfg.get("pool_window", 100),
-                base             = "al_pool_v1")
-    
-            # pool window log -----------------------------------------------
+                base             = "al_pool_v1",
+                budget_max       = budget_max,
+                percentile_gamma = percentile_gamma,
+                percentile_F_low = percentile_F_low,
+                percentile_F_hi  = percentile_F_hi,
+                # --- NEW: map short YAML → long function args ---
+                hard_sigma_E_atom_min = thr_sE_atom,
+                hard_sigma_F_mean_min = thr_sF_mean,
+                hard_sigma_F_max_min  = thr_sF_max,
+                hard_Fmax_train_mult  = thr_Fmax_mult,
+            )
+
+            # -------------------------------------------------
+            # 9. Log window metadata
+            # -------------------------------------------------
             n_thin = len(thin_idx)
             w_size = eval_cfg.get("pool_window", 100)
             n_win  = (n_thin + w_size - 1) // w_size
             with open("pool_window_log.txt", "w") as fh:
-                fh.write(f"total_frames_original	{len(pool_frames)}")
-                fh.write(f"thin_stride	{pool_stride}")
-                fh.write(f"frames_after_thin	{n_thin}")
-                fh.write(f"window_size	{w_size}")
-                fh.write(f"num_windows	{n_win}")
-            print("[Pool‑AL] wrote pool_window_log.txt")
-    
-            # Map thin indices back to original pool indices ----------------
+                fh.write(f"total_frames_original\t{len(pool_frames)}\n")
+                fh.write(f"thin_stride\t{pool_stride}\n")
+                fh.write(f"frames_after_thin\t{n_thin}\n")
+                fh.write(f"window_size\t{w_size}\n")
+                fh.write(f"num_windows\t{n_win}\n")
+            print("[Pool-AL] wrote pool_window_log.txt")
+
+            # -------------------------------------------------
+            # 10. Map selected thin indices back to full pool indices
+            # -------------------------------------------------
             sel_global_idx = thin_idx[sel_rel_thin]
             sel_objs       = [pool_frames[i] for i in sel_global_idx]
-    
-            # Extend master data structures ---------------------------------
+
             if sel_objs:
                 with open("to_DFT_labelling_from_pool.xyz", "w") as fh:
                     for orig_idx, atoms in zip(sel_global_idx, sel_objs):
                         e_pred = mu_E_pool[orig_idx]
                         comment = f"frame={orig_idx},  pred_E={e_pred:.5f}"
                         write(fh, atoms, format="xyz", comment=comment)
-                print(f"Saved {len(sel_objs)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
+                print(f"[Pool-AL] Saved {len(sel_objs)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
             else:
-                print("No pool frames selected; nothing to save.")
+                print("[Pool-AL] No pool frames selected; nothing to save.")
+
+
 
     # 9) GMM UQ
     if "GMM" in uq_methods and stats_base is not None and all_latent is not None:
