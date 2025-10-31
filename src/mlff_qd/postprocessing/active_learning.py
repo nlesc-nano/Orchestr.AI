@@ -24,13 +24,16 @@ from scipy.special import erfinv
 from scipy.stats import spearmanr
 from scipy.spatial.distance import cdist
 from ase.data import chemical_symbols
+from ase import Atoms
+from ase.geometry.analysis import Analysis
+from scipy.ndimage import gaussian_filter1d
+from collections import defaultdict
 
 import scipy.linalg
 import scipy.linalg, scipy.spatial.distance
 from mlff_qd.postprocessing.plotting import plot_swapped_final_tight
 from typing import Tuple, List, Optional 
 from scipy.ndimage import gaussian_filter1d
-from kneed import KneeLocator
 
 # Check for hdbscan availability
 try:
@@ -459,6 +462,635 @@ def adaptive_learning_mig_calibrated(
 #  Ensemble‑based active learning  (n_models ≥ 2)
 # =============================================================================
 
+import time
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.spatial import cKDTree
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter1d
+from itertools import combinations
+
+def debug_plot_rdfs(reference_frames,
+                    rdf_thresholds,
+                    r_max=6.0,
+                    dr=0.02,
+                    outprefix="rdf_DEBUG"):
+    """
+    For each species pair in rdf_thresholds:
+    - build g_AB(r) from reference_frames
+    - plot it
+    - overlay vertical lines at r_soft and r_hard
+    Writes: {outprefix}_{A}-{B}.png
+    """
+    print("[RDF] Debug plotting RDFs for each pair...")
+
+    # 1. collect list of unique pairs from thresholds to control the loop order
+    all_pairs = list(rdf_thresholds.keys())
+
+    # precompute (positions, species) arrays for speed
+    ref_pos  = [atoms.get_positions() for atoms in reference_frames]
+    ref_syms = [atoms.get_chemical_symbols() for atoms in reference_frames]
+
+    bins = np.arange(0.0, r_max + dr, dr)
+    r_centers = 0.5 * (bins[:-1] + bins[1:])
+    shell_vol = 4.0/3.0 * np.pi * (bins[1:]**3 - bins[:-1]**3)
+    n_frames = len(reference_frames)
+
+    for pair in all_pairs:
+        A, B = pair
+        # histogram accumulator for this pair
+        hist = np.zeros(len(bins) - 1, dtype=np.float64)
+
+        # loop frames
+        for coords, syms in zip(ref_pos, ref_syms):
+            idx_A = [ii for ii,s in enumerate(syms) if s == A]
+            idx_B = [jj for jj,s in enumerate(syms) if s == B]
+            if not idx_A or not idx_B:
+                continue
+
+            coords_A = np.asarray(coords)[idx_A]
+            coords_B = np.asarray(coords)[idx_B]
+
+            # all pairwise distances A-B
+            dAB = np.linalg.norm(coords_A[:,None,:] - coords_B[None,:,:], axis=2)
+
+            if A == B:
+                # only upper triangle for same-species to avoid double count
+                iu = np.triu_indices_from(dAB, k=1)
+                d_flat = dAB[iu]
+            else:
+                d_flat = dAB.ravel()
+
+            # keep only < r_max
+            d_use = d_flat[d_flat < r_max]
+            if d_use.size == 0:
+                continue
+            hist += np.histogram(d_use, bins=bins)[0]
+
+        # normalize to something RDF-like
+        # we're not going for perfect normalization here, we just want peak shape
+        smooth = gaussian_filter1d(hist, sigma=2)
+
+        # fetch thresholds
+        r_soft, r_hard = rdf_thresholds[pair]
+
+        # plot
+        plt.figure(figsize=(5,4))
+        plt.plot(r_centers, smooth, label=f"g_{A}-{B}(r) (smoothed)")
+        plt.axvline(r_soft, color='red', linestyle='--', label=f"r_soft={r_soft:.2f} Å")
+        plt.axvline(r_hard, color='orange', linestyle=':', label=f"r_hard={r_hard:.2f} Å")
+        plt.xlabel("r (Å)")
+        plt.ylabel("arb. RDF units")
+        plt.title(f"{A}-{B} RDF (validation set)")
+        plt.xlim(0.0, r_max)
+        plt.ylim(bottom=0.0)
+        plt.legend()
+        plt.tight_layout()
+
+        outname = f"{outprefix}_{A}-{B}.png"
+        plt.savefig(outname, dpi=200)
+        plt.close()
+        print(f"[RDF] wrote {outname}")
+
+
+def _collect_species_lists(frames, stride: int):
+    """
+    Return (positions_list, types_list, unique_pairs) using only every `stride`-th frame.
+    stride=1 means use all frames.
+    """
+    positions_list = []
+    types_list     = []
+    species_sets   = set()
+
+    # subsample frames deterministically
+    for fr_i in range(0, len(frames), stride):
+        fr   = frames[fr_i]
+        pos  = fr.get_positions()
+        syms = fr.get_chemical_symbols()
+
+        positions_list.append(pos.copy())
+        types_list.append(np.array(syms, dtype=object))
+
+        uniq = np.unique(syms)
+        # build all unordered element pairs present in this frame
+        for a_i, a in enumerate(uniq):
+            for b in uniq[a_i:]:
+                pair = tuple(sorted((a, b)))
+                species_sets.add(pair)
+
+    unique_pairs = sorted(species_sets)
+    return positions_list, types_list, unique_pairs
+
+
+def _gather_pair_distances_vectorized(positions_list, types_list, A, B, cutoff):
+    """
+    Vectorized distance collection for one pair (A,B) across the *subsampled* frames.
+    """
+    pair_dists = []
+    for pos, types in zip(positions_list, types_list):
+        idx_A = np.where(types == A)[0]
+        idx_B = np.where(types == B)[0]
+        if idx_A.size == 0 or idx_B.size == 0:
+            continue
+
+        coords_A = pos[idx_A]  # (nA,3)
+        coords_B = pos[idx_B]  # (nB,3)
+
+        # all pairwise distances A-B
+        d_ij = coords_A[:, None, :] - coords_B[None, :, :]
+        d2   = np.einsum("ijk,ijk->ij", d_ij, d_ij)
+        d    = np.sqrt(d2)
+
+        if A == B:
+            iu = np.triu_indices_from(d, k=1)
+            d  = d[iu]
+
+        d = d[d <= cutoff]
+        if d.size > 0:
+            pair_dists.append(d)
+
+    if not pair_dists:
+        return np.array([], dtype=float)
+    return np.concatenate(pair_dists)
+
+def compute_rdf_thresholds_from_reference(
+    reference_frames,
+    cutoff: float = 6.0,
+    bins: int = 300,
+    stride: int = 1,
+    min_peak_height_frac: float = 0.05,
+    min_peak_prominence_frac: float = 0.10,
+    left_baseline_frac: float = 0.05,
+    beta: float = 0.5,
+    r_min_physical: float = 1.0,
+):
+    """
+    Build RDFs for each element pair using ONLY trusted reference frames
+    (validation set), then infer two cutoffs per pair:
+        r_soft = start of 1st-neighbour shell
+        r_hard = beta * r_soft   (beta ~ 0.5 per your request)
+
+    Fix vs previous version:
+    - we NO LONGER take global argmax.
+    - we detect ALL local peaks in the smoothed RDF and choose
+      the *leftmost physically meaningful* one (closest to 0 Å),
+      provided it's tall/prominent enough.
+    - this avoids picking the 2nd shell just because it's taller.
+
+    Returns
+    -------
+    thresholds : dict { (A,B): (r_soft, r_hard) }
+    Also caches per-pair r, smooth_rdf for debugging in
+    rdf_thresholds_cache.npz (same filename you already save).
+    """
+
+    import time
+    import numpy as np
+    from collections import defaultdict
+    from itertools import combinations
+    from scipy.ndimage import gaussian_filter1d
+
+    t0_all = time.time()
+
+    # -------- 0. subsample trusted frames for speed --------
+    ref_use = reference_frames[::stride]
+    print(f"[RDF] Using {len(ref_use)}/{len(reference_frames)} reference frames (stride={stride}).")
+
+    # -------- 1. collect all pair distances per species pair --------
+    pair_dists = defaultdict(list)
+    for fr in ref_use:
+        pos  = fr.get_positions()
+        syms = fr.get_chemical_symbols()
+        n    = len(syms)
+        for i, j in combinations(range(n), 2):
+            rij = np.linalg.norm(pos[i] - pos[j])
+            if rij <= cutoff:
+                pair = tuple(sorted((syms[i], syms[j])))
+                pair_dists[pair].append(rij)
+
+    print(f"[RDF] Found {len(pair_dists)} unique species pairs.")
+
+    thresholds = {}
+    debug_rdfs = {}
+
+    # precompute bin edges once
+    r_edges = np.linspace(0.0, cutoff, bins + 1)
+    r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
+
+    for pair, dlist in pair_dists.items():
+        t0 = time.time()
+        darray = np.asarray(dlist, dtype=np.float64)
+
+        if darray.size < 20:
+            print(f"[RDF][{pair}] WARNING: only {darray.size} samples, skipping cutoff inference.")
+            continue
+
+        # histogram of raw distances
+        hist, _ = np.histogram(darray, bins=r_edges, density=False)
+
+        # smooth RDF proxy
+        smooth = gaussian_filter1d(hist.astype(np.float64), sigma=2)
+
+        # Keep for debug/plot
+        debug_rdfs[pair] = {
+            "r": r_centers.copy(),
+            "g_smooth": smooth.copy(),
+        }
+
+        # -------- 2. peak detection (all local maxima) --------
+        # local max: smooth[k] > smooth[k-1] and smooth[k] >= smooth[k+1]
+        locmax_idx = []
+        for k in range(1, len(smooth) - 1):
+            if smooth[k] > smooth[k-1] and smooth[k] >= smooth[k+1]:
+                locmax_idx.append(k)
+        locmax_idx = np.array(locmax_idx, dtype=int)
+
+        if locmax_idx.size == 0:
+            print(f"[RDF][{pair}] WARNING: no local maxima, skipping.")
+            continue
+
+        peak_vals = smooth[locmax_idx]
+        global_max = peak_vals.max()
+
+        # require some minimal absolute height relative to tallest peak
+        height_mask = peak_vals >= (min_peak_height_frac * global_max)
+
+        # require some "prominence": peak must be higher than its local baseline
+        # crude prominence = peak_val - min(neighboring valley in small window)
+        prominence_mask = []
+        for idx, pidx in enumerate(locmax_idx):
+            left_win  = max(0, pidx - 5)
+            right_win = min(len(smooth), pidx + 6)
+            local_min = np.min(smooth[left_win:right_win])
+            prom = peak_vals[idx] - local_min
+            prominence_mask.append(prom >= (min_peak_prominence_frac * global_max))
+        prominence_mask = np.array(prominence_mask, dtype=bool)
+
+        good_mask = height_mask & prominence_mask
+
+        # also enforce physical lower bound r > r_min_physical
+        good_mask = good_mask & (r_centers[locmax_idx] > r_min_physical)
+
+        good_peaks = locmax_idx[good_mask]
+
+        if good_peaks.size == 0:
+            print(f"[RDF][{pair}] WARNING: no 'good' peak after filtering, "
+                  f"falling back to earliest local max above r_min_physical.")
+            # fallback: first peak to the right of r_min_physical
+            fallback_idx = np.argmin(
+                np.where(r_centers[locmax_idx] > r_min_physical,
+                         r_centers[locmax_idx],
+                         np.inf)
+            )
+            chosen_peak_idx = locmax_idx[fallback_idx]
+        else:
+            # choose the LEFTMOST "good" peak (smallest radius)
+            # -> THIS is the first coordination shell we care about
+            chosen_peak_idx = good_peaks[np.argmin(r_centers[good_peaks])]
+
+        peak_r   = r_centers[chosen_peak_idx]
+        peak_val = smooth[chosen_peak_idx]
+
+        # -------- 3. locate left edge of that chosen peak --------
+        # we walk left from chosen_peak_idx until smooth falls below
+        # left_baseline_frac * peak_val, then take that radius as r_soft.
+        thresh_val = left_baseline_frac * peak_val
+        left_region = np.where(
+            (r_centers[:chosen_peak_idx] > r_min_physical) &
+            (smooth[:chosen_peak_idx] < thresh_val)
+        )[0]
+
+        if left_region.size > 0:
+            left_edge_idx = left_region[-1]
+            r_soft = float(r_centers[left_edge_idx])
+        else:
+            # no clean baseline → just back off ~1 bin from the peak,
+            # but never below r_min_physical
+            approx_soft = max(r_min_physical,
+                              r_centers[max(chosen_peak_idx - 1, 0)])
+            # additional sanity: can't exceed peak_r
+            r_soft = float(min(approx_soft, peak_r))
+
+        # final hard cutoff
+        r_hard = beta * r_soft  # beta now 0.5 per your request
+
+        thresholds[pair] = (r_soft, r_hard)
+
+        dt = time.time() - t0
+        print(f"[RDF]   {pair}: "
+              f"N={darray.size} samples, "
+              f"peak@{peak_r:.3f} Å, "
+              f"r_soft={r_soft:.3f} Å, "
+              f"r_hard={r_hard:.3f} Å, "
+              f"time={dt:.2f}s")
+
+    total_dt = time.time() - t0_all
+    print(f"[RDF] Done building thresholds for {len(thresholds)} pairs in "
+          f"{total_dt:.2f}s total (stride={stride}).")
+
+    # cache for debugging / plotting
+    np.savez_compressed(
+        "rdf_thresholds_cache.npz",
+        thresholds=np.array(
+            [(str(p[0]), str(p[1]), rs, rh)
+             for p, (rs, rh) in thresholds.items()],
+            dtype=object,
+        ),
+        rdfs={str(p): debug_rdfs[p] for p in debug_rdfs},
+        meta=dict(
+            cutoff=cutoff,
+            bins=bins,
+            stride=stride,
+            beta=beta,
+            min_peak_height_frac=min_peak_height_frac,
+            min_peak_prominence_frac=min_peak_prominence_frac,
+            left_baseline_frac=left_baseline_frac,
+            r_min_physical=r_min_physical,
+        )
+    )
+
+    return thresholds
+
+def fast_filter_by_rdf_kdtree(
+    frames,
+    rdf_thresholds,
+    verbose=True,
+    debug_first_bad=5,
+):
+    """
+    Reject unphysical geometries using KDTree neighbor search.
+
+    We say a frame is "catastrophic" (reject) if it contains ANY atom pair
+    whose distance is below that pair's r_hard.
+
+    Parameters
+    ----------
+    frames : list[ase.Atoms]
+        Frames to check.
+    rdf_thresholds : dict
+        {('In','P'): (r_soft, r_hard), ...}
+        NOTE: we assume ('A','B') keys are sorted tuples, same convention
+        as compute_rdf_thresholds_from_reference.
+    verbose : bool
+        If True, prints progress every ~100 frames and summary at end.
+    debug_first_bad : int
+        For the first N rejected frames, print which pair / distance broke it.
+
+    Returns
+    -------
+    ok_mask : np.ndarray[bool]
+        True  -> frame passes (all interatomic distances above r_hard for
+                every known pair)
+        False -> at least one catastrophic contact < r_hard
+    """
+
+    import time
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    n_frames = len(frames)
+    ok_mask  = np.ones(n_frames, dtype=bool)
+
+    if not rdf_thresholds:
+        print("[RDF] WARNING: No rdf_thresholds provided. Keeping all frames.")
+        return ok_mask
+
+    # largest hard cutoff across all species pairs
+    r_hard_max = max(r_hard for (_, r_hard) in rdf_thresholds.values())
+    if verbose:
+        print(f"[RDF] Using r_hard_max = {r_hard_max:.3f} Å for KDTree neighbor search.")
+
+    # We'll accumulate some diagnostics:
+    # - shortest distance we ever saw per pair
+    # - how many frames we killed
+    global_min_dist_per_pair = {}
+    n_rejected = 0
+    printed_bad = 0
+
+    t0g = time.perf_counter()
+
+    for f_idx, atoms in enumerate(frames):
+        if verbose and (f_idx % 100 == 0):
+            dt = time.perf_counter() - t0g
+            print(f"[RDF]   Checking frame {f_idx}/{n_frames} (elapsed {dt:.1f} s)")
+
+        pos  = atoms.get_positions()
+        syms = atoms.get_chemical_symbols()
+        n_atoms = len(pos)
+        if n_atoms < 2:
+            continue  # trivially OK
+
+        # KDTree for neighbors within r_hard_max
+        tree = cKDTree(pos)
+        close_pairs = tree.query_pairs(r_hard_max, output_type='ndarray')
+        if close_pairs.size == 0:
+            continue  # nobody closer than r_hard_max ⇒ frame passes trivially
+
+        # Compute all those close distances
+        diff  = pos[close_pairs[:, 0]] - pos[close_pairs[:, 1]]
+        dists = np.linalg.norm(diff, axis=1)
+
+        # Check for catastrophic contacts
+        bad_frame = False
+        for (i_atom, j_atom), rij in zip(close_pairs, dists):
+            pair = tuple(sorted((syms[i_atom], syms[j_atom])))
+            # track global min distance we ever see for this pair
+            prev = global_min_dist_per_pair.get(pair, np.inf)
+            if rij < prev:
+                global_min_dist_per_pair[pair] = rij
+
+            th = rdf_thresholds.get(pair, None)
+            if th is None:
+                # This pair type didn't get a cutoff from reference,
+                # so we can't classify it as catastrophic. Ignore.
+                continue
+
+            _, r_hard = th
+            if rij < r_hard:
+                # Catastrophic overlap for this frame
+                ok_mask[f_idx] = False
+                bad_frame = True
+
+                # Verbose debug for first few rejected frames
+                if printed_bad < debug_first_bad:
+                    print(f"[RDF][REJECT] frame {f_idx}: "
+                          f"{pair} at {rij:.3f} Å < r_hard {r_hard:.3f} Å")
+                    printed_bad += 1
+                break  # no need to keep checking pairs in this frame
+
+        if bad_frame:
+            n_rejected += 1
+
+    dt_tot = time.perf_counter() - t0g
+    n_ok = int(np.sum(ok_mask))
+    if verbose:
+        print(f"[RDF] Finished in {dt_tot:.2f} s for {n_frames} frames "
+              f"({dt_tot / max(n_frames,1):.4f} s/frame).")
+        print(f"[RDF] Geometric sanity: {n_ok}/{n_frames} frames OK "
+              f"({100.0 * n_ok / max(n_frames,1):.1f}%).")
+        print(f"[RDF] Rejected {n_rejected} frames total.")
+
+        # print summary of closest approaches per pair
+        if global_min_dist_per_pair:
+            print("[RDF] Closest distances observed per pair (Å):")
+            for pair, dmin in sorted(global_min_dist_per_pair.items(),
+                                     key=lambda x: x[0]):
+                soft_hard = rdf_thresholds.get(pair, (None, None))
+                print(f"        {pair}: "
+                      f"min_seen={dmin:.3f} Å, "
+                      f"r_hard={soft_hard[1]:.3f} Å, "
+                      f"r_soft={soft_hard[0]:.3f} Å")
+
+    return ok_mask
+
+
+def collect_pair_distances(frames, cutoff: float = 6.0):
+    """
+    Build a dict of all pair distances per element pair across a list of frames.
+    
+    Returns
+    -------
+    pair_distances : dict
+        { (A,B): [r_1, r_2, ...] } with A,B sorted alphabetically.
+    """
+    from collections import defaultdict
+    from itertools import combinations
+    import numpy as np
+
+    pair_distances = defaultdict(list)
+
+    for atoms in frames:
+        pos = atoms.get_positions()
+        syms = atoms.get_chemical_symbols()
+        n = len(syms)
+        for i, j in combinations(range(n), 2):
+            rij = np.linalg.norm(pos[i] - pos[j])
+            if rij <= cutoff:
+                pair = tuple(sorted((syms[i], syms[j])))
+                pair_distances[pair].append(rij)
+
+    # convert lists to numpy arrays for convenience
+    for pair, vals in pair_distances.items():
+        pair_distances[pair] = np.asarray(vals, dtype=float)
+
+    return pair_distances
+
+
+def make_rdf_hist(pair_distance_dict,
+                  cutoff: float = 6.0,
+                  bins: int = 300,
+                  smooth_sigma: float = 2.0):
+    """
+    Turn the pair-distance dict from collect_pair_distances(...) into
+    smoothed histograms that look like RDFs (not normalized by shell volume,
+    just a density-like diagnostic).
+
+    Returns
+    -------
+    rdf_dict : dict
+        {
+          (A,B): {
+             "r": bin_centers,
+             "rdf": smoothed_hist
+          },
+          ...
+        }
+    """
+    import numpy as np
+    from scipy.ndimage import gaussian_filter1d
+
+    rdf_dict = {}
+
+    for pair, dists in pair_distance_dict.items():
+        if dists.size == 0:
+            continue
+
+        hist, edges = np.histogram(
+            dists,
+            bins=bins,
+            range=(0.0, cutoff),
+            density=True
+        )
+        r_centers = 0.5 * (edges[:-1] + edges[1:])
+        smooth = gaussian_filter1d(hist, sigma=smooth_sigma)
+
+        rdf_dict[pair] = {
+            "r": r_centers,
+            "rdf": smooth,
+        }
+
+    return rdf_dict
+
+
+def plot_rdf_comparison(
+        pair,
+        rdf_ref,
+        rdf_all,
+        rdf_kept,
+        rdf_thresholds,
+        r_max: float = 4.0,
+        outprefix: str = "rdf_poolcheck"
+    ):
+    """
+    For a given element pair (A,B), compare:
+      - reference RDF (trusted validation frames)
+      - all thinned pool frames
+      - only thinned pool frames that pass RDF hard cutoff
+
+    Also draw vertical lines for r_hard and r_soft from rdf_thresholds.
+
+    Saves to disk as f"{outprefix}_{A}{B}.png".
+    """
+    import matplotlib.pyplot as plt
+
+    # If we don't have this pair in ref, just skip
+    if pair not in rdf_ref:
+        print(f"[RDF-plot] pair {pair} not in rdf_ref, skipping.")
+        return
+
+    r_ref   = rdf_ref[pair]["r"]
+    g_ref   = rdf_ref[pair]["rdf"]
+
+    r_all   = rdf_all.get(pair, {}).get("r",   None)
+    g_all   = rdf_all.get(pair, {}).get("rdf", None)
+
+    r_kept  = rdf_kept.get(pair, {}).get("r",   None)
+    g_kept  = rdf_kept.get(pair, {}).get("rdf", None)
+
+    r_soft, r_hard = rdf_thresholds.get(pair, (None, None))
+
+    fig, ax = plt.subplots(figsize=(4,3), dpi=150)
+
+    ax.plot(r_ref, g_ref, label="ref (val_mask)", linewidth=1.5)
+
+    if r_all is not None and g_all is not None:
+        ax.plot(r_all, g_all, label="pool_thin (all)", linestyle="--", linewidth=1.0)
+
+    if r_kept is not None and g_kept is not None:
+        ax.plot(r_kept, g_kept, label="pool_thin (RDF ok)", linestyle=":", linewidth=1.0)
+
+    # draw verticals for hard/soft cutoffs
+    if r_soft is not None:
+        ax.axvline(r_soft, color="green", linestyle=":", linewidth=1.0, label="r_soft")
+    if r_hard is not None:
+        ax.axvline(r_hard, color="red", linestyle="--", linewidth=1.0, label="r_hard")
+
+    ax.set_xlim(0.0, r_max)
+    ax.set_xlabel("r (Å)")
+    ax.set_ylabel("g(r) ~ density")
+    ax.set_title(f"RDF {pair[0]}-{pair[1]}")
+    ax.legend(fontsize=7, loc="upper right")
+    fig.tight_layout()
+
+    outname = f"{outprefix}_{pair[0]}{pair[1]}.png"
+    fig.savefig(outname, dpi=200)
+    plt.close(fig)
+
+    print(f"[RDF-plot] Wrote {outname}")
+
+
 def adaptive_learning_ensemble_calibrated(
         all_frames: List,
         eval_mask: np.ndarray,
@@ -467,6 +1099,7 @@ def adaptive_learning_ensemble_calibrated(
         *,
         force_rmse_per_comp: Optional[np.ndarray] = None,
         denom_all: Optional[np.ndarray] = None,
+        reference_frames: Optional[List] = None,  
         beta: Optional[float] = 0.5,
         drop_init: float = 1.0,
         min_k: int = 5,
@@ -494,6 +1127,17 @@ def adaptive_learning_ensemble_calibrated(
     train_idx = np.where(~eval_mask)[0]
     eval_idx  = np.where(eval_mask)[0]
     print(f"[1] split: train={len(train_idx)}, eval={len(eval_idx)}")
+    # --- RDF-based physical sanity filter ---
+    # reference_frames should come from eval_input_xyz (DFT baseline),
+    # not from incrementally grown training set.
+    if reference_frames is not None and len(reference_frames) > 0:
+        rdf_thresholds = compute_rdf_thresholds_from_reference(reference_frames)
+        eval_frames_list = [all_frames[i] for i in eval_idx]
+        realistic_mask = filter_by_rdf(eval_frames_list, rdf_thresholds)
+        print(f"[RDF] realistic_mask: {realistic_mask.sum()}/{len(realistic_mask)} eval frames pass hard cutoff")
+    else:
+        print("[RDF] WARNING: reference_frames not provided; assuming all eval frames are physically valid.")
+        realistic_mask = np.ones(len(eval_idx), dtype=bool)
 
     # 2) latent whitening & raw distance
     alpha_sq, lam_opt, terms_lat, G_all, L_E = calibrate_alpha_reg_gcv(mean_l_al, delta_E_frame)
@@ -706,7 +1350,8 @@ def adaptive_learning_ensemble_calibrated(
     print(f"[9] hybrid_floor = {hybrid_floor:+.3f}")
     
     # ---------------- 6) gate then budget ----------------------------------
-    keep_mask = hybrid > hybrid_floor
+#    keep_mask = hybrid > hybrid_floor
+    keep_mask = (hybrid > hybrid_floor) & realistic_mask
     idx_keep  = np.where(keep_mask)[0]
     n_keep    = idx_keep.size
     k_budget  = 250 if lam_hybrid < 0.5 else 500
@@ -938,151 +1583,6 @@ def adaptive_learning_mig_pool(
 
     return sel_frames, sel_rel
 
-def compute_bond_thresholds(
-        frames,
-        neighbor_list,
-        first_shell_cutoff=3.0,
-        device=None,
-        cache_path="thresholds.npz"
-    ):
-    """
-    Compute (or load) bonded‐pair thresholds (min, max, mean).
-    Caches result in `cache_path`.
-    """
-    # 1) Try to load
-    if os.path.exists(cache_path):
-        with np.load(cache_path, allow_pickle=True) as data:
-            thresholds = data["thresholds"].item()
-        print(f"[compute_bond_thresholds] Loaded thresholds from {cache_path}")
-        return thresholds
-
-    # 2) Compute from scratch
-    cache_file = os.path.join(neighbor_list.cache_path, "cache_0.pt")
-    if not os.path.exists(cache_file):
-        raise FileNotFoundError(f"Cache file {cache_file} not found")
-    cache_data = torch.load(cache_file)
-    idx_i = cache_data["_idx_i"].numpy()
-    idx_j = cache_data["_idx_j"].numpy()
-    offsets = cache_data["_offsets"].numpy()
-
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu") \
-          if device is None else device
-
-    bond_lengths = {}
-    n_frames = len(frames)
-    for idx, frame in enumerate(frames):
-        if idx % 50 == 0:
-            print(f"compute_bond_thresholds: processing frame {idx+1}/{n_frames}")
-        pos = frame.get_positions()
-        Z   = frame.get_atomic_numbers()
-        cell = frame.get_cell()
-        for i, j, off in zip(idx_i, idx_j, offsets):
-            if j <= i:
-                continue
-            p_i = pos[i] + np.dot(off, cell)
-            p_j = pos[j]
-            d = np.linalg.norm(p_i - p_j)
-            if d > first_shell_cutoff:
-                continue
-            pair = tuple(sorted((Z[i], Z[j])))
-            bond_lengths.setdefault(pair, []).append(d)
-
-    thresholds = {
-        pair: {
-            "min": float(np.min(dists)),
-            "max": float(np.max(dists)),
-            "mean": float(np.mean(dists))
-        }
-        for pair, dists in bond_lengths.items()
-    }
-    print("Bond thresholds (pair: {min, max, mean}):")
-    for pair, stats in thresholds.items():
-        elems = tuple(chemical_symbols[z] for z in pair)
-        print(f"  {elems}: {{min: {stats['min']:.3f}, max: {stats['max']:.3f}, mean: {stats['mean']:.3f}}}")
-
-    # 3) Save cache
-    np.savez_compressed(cache_path, thresholds=thresholds)
-    print(f"[compute_bond_thresholds] Saved thresholds to {cache_path}")
-    return thresholds
-
-
-def filter_unrealistic_indices(
-        frames,
-        neighbor_list,
-        thresholds,
-        pct_tol=0.35,
-        first_shell_cutoff=5.0,
-        device=None,
-        cache_path="bad_globals.npz"
-    ):
-    """
-    Identify (or load) set of frame‐indices with impossible bonds.
-    Caches result in `cache_path`.
-    """
-    # 1) Try to load
-    if os.path.exists(cache_path):
-        data = np.load(cache_path)
-        bad = set(data["bad_global"].tolist())
-        print(f"[filter_unrealistic_indices] Loaded bad_global from {cache_path}")
-        return bad
-
-    # 2) Compute
-    cache_file = os.path.join(neighbor_list.cache_path, "cache_0.pt")
-    if not os.path.exists(cache_file):
-        raise FileNotFoundError(f"Cache file {cache_file} not found")
-    cache_data = torch.load(cache_file)
-    idx_i = cache_data["_idx_i"].numpy()
-    idx_j = cache_data["_idx_j"].numpy()
-    offsets = cache_data["_offsets"].numpy()
-
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu") \
-          if device is None else device
-
-    bad = []
-    n_frames = len(frames)
-    for idx, frame in enumerate(frames):
-        if idx % 50 == 0:
-            print(f"filter_unrealistic_indices: checking frame {idx+1}/{n_frames}")
-        pos = frame.get_positions()
-        Z   = frame.get_atomic_numbers()
-        cell = frame.get_cell()
-        flagged = False
-        for i, j, off in zip(idx_i, idx_j, offsets):
-            if j <= i:
-                continue
-            p_i = pos[i] + np.dot(off, cell)
-            p_j = pos[j]
-            d = np.linalg.norm(p_i - p_j)
-            if d > first_shell_cutoff:
-                continue
-            pair = tuple(sorted((Z[i], Z[j])))
-            if pair not in thresholds:
-                continue
-            d_min = thresholds[pair]["min"]
-            d_max = thresholds[pair]["max"]
-            d_mean = thresholds[pair]["mean"]
-            lo = min((1 - pct_tol) * d_mean, d_min)
-            hi = max((1 + pct_tol) * d_mean, d_max)
-            if d < lo or d > hi:
-                elems = tuple(chemical_symbols[z] for z in pair)
-                print(
-                    f"[Warning] Frame {idx+1}: bond {elems} distance {d:.3f} Å "
-                    f"outside [{lo:.3f}, {hi:.3f}] (ref mean={d_mean:.3f}, "
-                    f"min={d_min:.3f}, max={d_max:.3f} Å)"
-                )
-                bad.append(idx)
-                flagged = True
-                break
-        if flagged:
-            # stop checking further bonds in this frame
-            continue
-
-    bad_set = set(bad)
-
-    # 3) Save cache
-    np.savez_compressed(cache_path, bad_global=np.array(sorted(bad), dtype=int))
-    print(f"[filter_unrealistic_indices] Saved bad_global to {cache_path}")
-    return bad_set
 
 def _compute_relative_thresholds(
         sigma_energy_train: np.ndarray,
@@ -1107,307 +1607,743 @@ def adaptive_learning_mig_pool_windowed(
         forces_train: np.ndarray,
         sigma_energy: np.ndarray,
         sigma_force:  np.ndarray,
-        mu_E_frame_train: np.ndarray, 
+        mu_E_frame_train: np.ndarray,
         mu_E_pool: np.ndarray,
         sigma_E_pool: np.ndarray,
         mu_F_pool: np.ndarray,
         sigma_F_pool: np.ndarray,
-        bad_global: set,
+        rdf_thresholds: dict,
+        # ---- NEW: hard AL triggers (should come from config.yaml) ----
+        hard_sigma_E_atom_min: float = 0.002,   # eV/atom  (2 meV/atom)
+        hard_sigma_F_mean_min: float = 0.10,    # eV/Å
+        hard_sigma_F_max_min:  float = 0.20,    # eV/Å
+        hard_Fmax_train_mult:  float = 1.5,     # × max |F| in TRAIN
+        # --------------------------------------------------------------
         rho_eV: float = 0.0025,
         min_k: int = 5,
         window_size: int = 100,
-        base: str = "al_mig_pool_v6",
+        base: str = "al_mig_pool_v7",
+        budget_max: int = 50,
+        percentile_gamma: float = 90.0,
+        percentile_F_low: float = 95.0,
+        percentile_F_hi: float = 99.0,
     ) -> tuple[list, list]:
     """
-    Pool-based AL with windowed FPS and bond sanity filter via precomputed bad_global.
+    Pool-based Active Learning (AL) with:
+      - RDF geometric sanity filter
+      - percentile-based lower and upper bounds
+      - per-atom energy CI overlap sanity
+      - novelty screening via Mahalanobis distance γ0 > γ_thr
+      - D-opt diversity selection
+      - global score ranking + budget
+      - diagnostics + convergence report
+      - **NEW**: hard literature-style AL triggers on σ(E), σF_mean, σF_max
+      - **NEW**: training-dataset per-frame uncertainty dump at the bottom
     """
+
+    import numpy as np
+    from scipy.linalg import solve_triangular
+
+    # ---------------- helper ----------------
+    def clamp_threshold(name: str, lower: float, upper: float) -> float:
+        """Ensure upper cap is never below lower bound."""
+        if upper < lower:
+            print(f"[AL][WARN] {name}: upper cap {upper:.6f} < lower {lower:.6f} — corrected to lower.")
+            return lower
+        return upper
+
+    print(f"\n[AL] --- adaptive_learning_mig_pool_windowed (v7+hard) ---")
+    print(f"[AL] percentile_gamma  = {percentile_gamma:.1f}% (γ novelty)")
+    print(f"[AL] percentile_F_low  = {percentile_F_low:.1f}% (lower bounds)")
+    print(f"[AL] percentile_F_hi   = {percentile_F_hi:.1f}% (adaptive caps)")
+    print(f"[AL] budget_max        = {budget_max}")
+    print(f"[AL] hard_sigma_E_atom_min = {hard_sigma_E_atom_min:.6f} eV/atom")
+    print(f"[AL] hard_sigma_F_mean_min = {hard_sigma_F_mean_min:.6f} eV/Å")
+    print(f"[AL] hard_sigma_F_max_min  = {hard_sigma_F_max_min:.6f} eV/Å")
+    print(f"[AL] hard_Fmax_train_mult  = {hard_Fmax_train_mult:.3f} × train |F|_max")
+
+    # ------------------------------------------------------------------
+    # latent-space prep (whitening transform via L)
+    # ------------------------------------------------------------------
     F_pool  = np.asarray(F_pool,  dtype=np.float64)
     F_train = np.asarray(F_train, dtype=np.float64)
     L       = np.asarray(L,       dtype=np.float64)
 
     G_train = solve_triangular(L, F_train.T, lower=True).T
-    G_pool = solve_triangular(L, F_pool.T, lower=True).T
-    reg = 1e-6                       # keep the same regulariser everywhere
+    G_pool  = solve_triangular(L, F_pool.T,  lower=True).T
+
+    reg = 1e-6
     M_inv_global = np.linalg.inv(G_train.T @ G_train + reg * np.eye(G_train.shape[1]))
+
     gamma_train = np.sqrt(np.einsum('id,dk,ik->i', G_train, M_inv_global, G_train))
-    gamma_thr = np.quantile(gamma_train, 0.90)   # 90-th %ile of *actual* training distances
+    gamma_thr   = np.quantile(gamma_train, percentile_gamma / 100.0)
 
-    n_pool_frames = len(pool_frames) 
-    n_atoms       = pool_frames[0].get_positions().shape[0]
-
-    # ------------------------------------------------------------------
-    # 1 · fixed σ(E/atom) threshold  (5 meV atom⁻¹)
-    # ------------------------------------------------------------------
-
-    sigma_E_per_atom_train = sigma_energy / n_atoms
-    sigma_E_per_atom_pool  = sigma_E_pool / n_atoms 
-    thr_sigma_E_low = 0.002  # 2 meV/atom lower floor (as before)
-    thr_E_hi = (mu_E_frame_train / n_atoms).max() + 0.5 
-    margin_hi = 2.0 # only expected DFT energies below this will be considered 
-    E_train_min = mu_E_frame_train.min()
-    E_train_max = mu_E_frame_train.max()
-    CI_K     = 3.0 # only deviation of 3 sigma will be considered as interval
-    E_lo_pool = mu_E_pool - CI_K * sigma_E_pool
-    E_hi_pool = mu_E_pool + CI_K * sigma_E_pool
-    
+    print("\n[AL] --- γ (Mahalanobis novelty) ---")
+    print(f"[AL] γ_train mean={gamma_train.mean():.4f} min={gamma_train.min():.4f} max={gamma_train.max():.4f}")
+    print(f"[AL] γ_thr ({percentile_gamma:.1f}th pctl) = {gamma_thr:.6f}")
 
     # ------------------------------------------------------------------
-    # 2 · force–uncertainty thresholds (relative)
+    # Classical Mahalanobis distance (distributional / basin check)
     # ------------------------------------------------------------------
-    f_F      = 1.20    # 30% above max train uncertainty in force
-    f_Fmean  = 1.15   # 15 % above train max σF mean
-    f_Fmag   = 1.10    # 20% above max train force magnitude
+    mu_Gtrain = G_train.mean(axis=0)
+    Cov_Gtrain = np.cov(G_train, rowvar=False)
+    eps_cov = 1e-6
+    Cov_Gtrain_reg = Cov_Gtrain + eps_cov * np.eye(Cov_Gtrain.shape[0])
+    Cov_inv = np.linalg.inv(Cov_Gtrain_reg)
 
-    n_train_frames = sigma_force.shape[0] // (n_atoms * 3) 
+    diff_train = G_train - mu_Gtrain
+    dM2_train = np.einsum("id,dk,ik->i", diff_train, Cov_inv, diff_train)
+    dM_train  = np.sqrt(dM2_train)
 
-    sigma_F_train       = sigma_force.reshape(n_train_frames, n_atoms, 3)
+    basin_percentile = 99.0
+    dM_thr = np.quantile(dM_train, basin_percentile / 100.0)
+
+    print("\n[AL] --- dM (classical Mahalanobis-to-mean) ---")
+    print(f"[AL] dM_train mean={dM_train.mean():.4f} min={dM_train.min():.4f} max={dM_train.max():.4f}")
+    print(f"[AL] dM_thr ({basin_percentile:.1f}th pctl) = {dM_thr:.6f}")
+
+    # ------------------------------------------------------------------
+    # system sizes and reshaping
+    # ------------------------------------------------------------------
+    n_pool_frames = len(pool_frames)
+    n_atoms_pool  = pool_frames[0].get_positions().shape[0]
+
+    n_train_frames, n_atoms_train, _ = forces_train.shape
+    n_train_frames_check = sigma_force.shape[0] // (n_atoms_train * 3)
+    if n_train_frames_check != n_train_frames:
+        print("[WARN] n_train_frames inferred from sigma_force does not match forces_train.shape[0]. "
+              f"({n_train_frames_check} vs {n_train_frames}) Using forces_train.shape[0].")
+
+    print("\n[DEBUG] --- System sizes ---")
+    print(f"[DEBUG]   n_train_frames = {n_train_frames}")
+    print(f"[DEBUG]   n_pool_frames  = {n_pool_frames}")
+    print(f"[DEBUG]   n_atoms_train  = {n_atoms_train}")
+    print(f"[DEBUG]   n_atoms_pool   = {n_atoms_pool}")
+
+    # reshape sigma_F for training
+    sigma_F_train = sigma_force.reshape(n_train_frames, n_atoms_train, 3)
+
+    # ------------------------------------------------------------------
+    # ENERGY PER ATOM SETUP
+    # ------------------------------------------------------------------
+    mu_E_atom_train         = mu_E_frame_train / n_atoms_train
+    sigma_E_per_atom_train  = sigma_energy    / n_atoms_train
+
+    mu_E_atom_pool          = mu_E_pool       / n_atoms_pool
+    sigma_E_per_atom_pool   = sigma_E_pool    / n_atoms_pool
+
+    thr_sigma_E_low = np.percentile(sigma_E_per_atom_train, percentile_F_low)
+    thr_E_hi_atom   = mu_E_atom_train.max() + 0.5  # eV/atom
+
+    E_train_min_atom = mu_E_atom_train.min()
+    E_train_max_atom = mu_E_atom_train.max()
+
+    CI_K = 3.0
+    E_lo_pool_atom = (mu_E_pool - CI_K * sigma_E_pool) / n_atoms_pool
+    E_hi_pool_atom = (mu_E_pool + CI_K * sigma_E_pool) / n_atoms_pool
+
+    margin_hi_total    = 2.0  # eV total, legacy slack
+    margin_hi_per_atom_legacy = margin_hi_total / n_atoms_train
+
+    print("\n[DEBUG] --- Energy per atom stats (TRAIN) ---")
+    print(f"[DEBUG]   mu_E_atom_train mean={mu_E_atom_train.mean():.6f} min={mu_E_atom_train.min():.6f} max={mu_E_atom_train.max():.6f}")
+    print(f"[DEBUG]   sigma_E_atom_train mean={sigma_E_per_atom_train.mean():.6f} min={sigma_E_per_atom_train.min():.6f} max={sigma_E_per_atom_train.max():.6f}")
+    print(f"[DEBUG]   thr_sigma_E_low (pctl {percentile_F_low:.1f}%) = {thr_sigma_E_low:.6f} eV/atom")
+    print(f"[DEBUG]   thr_E_hi_atom = {thr_E_hi_atom:.6f} eV/atom")
+
+    # ------------------------------------------------------------------
+    # FORCE / UNCERTAINTY SETUP  (percentile-based)
+    # ------------------------------------------------------------------
     sigma_F_train_max   = sigma_F_train.max(axis=(1, 2))
     sigma_F_train_mean  = np.linalg.norm(sigma_F_train, axis=2).mean(axis=1)
-
-    thr_sigma_F     = f_F     * sigma_F_train_max.max()
-    thr_sigma_Fmean = f_Fmean * sigma_F_train_mean.max()
-
-    # ------------------------------------------------------------------
-    # 3 · max-|F| threshold
-    # ------------------------------------------------------------------
     force_magnitudes_train = np.linalg.norm(forces_train, axis=2)
-    frame_max_force_train = force_magnitudes_train.max(axis=1)
-    thr_Fmag = f_Fmag * frame_max_force_train.max()
+    frame_max_force_train  = force_magnitudes_train.max(axis=1)
 
-    # Upper bounds (more conservative, 2x typical)
-    sigma_E_per_atom_train_max = sigma_E_per_atom_train.max()
-    sigma_F_train_max_max = sigma_F_train_max.max()
-    sigma_F_train_mean_max = sigma_F_train_mean.max()
-    frame_max_force_train_max = frame_max_force_train.max()
+    thr_sigma_F      = np.percentile(sigma_F_train_max,  percentile_F_low)
+    thr_sigma_Fmean  = np.percentile(sigma_F_train_mean, percentile_F_low)
+    thr_Fmag         = np.percentile(frame_max_force_train, percentile_F_low)
 
-    thr_sigma_E_hi  = 0.01 # Hard cap. 3.0 * sigma_E_per_atom_train_max 
-    thr_sigma_F_hi  = 2.0 * sigma_F_train_max_max
-    thr_sigma_Fmean_hi = 2.0 * sigma_F_train_mean_max
-    thr_Fmag_hi     = 2.0 * frame_max_force_train_max
+    # legacy fallback "upper caps"
+    thr_sigma_E_hi_legacy     = 0.01  # eV/atom
+    thr_sigma_F_hi_legacy     = 2.0 * sigma_F_train_max.max()
+    thr_sigma_Fmean_hi_legacy = 2.0 * sigma_F_train_mean.max()
+    thr_Fmag_hi_legacy        = 2.0 * frame_max_force_train.max()
 
-    print(f"[Pool-AL] Lower/Upper bounds for metrics:")
-    print(f"  sigma_E/atom:  > {thr_sigma_E_low:.4f}  < {thr_sigma_E_hi:.4f} eV")
-    print(f"  sigma_F_max:   > {thr_sigma_F:.4f}  < {thr_sigma_F_hi:.4f} eV/Å")
-    print(f"  sigma_F_mean:  > {thr_sigma_Fmean:.4f}  < {thr_sigma_Fmean_hi:.4f} eV/Å")
-    print(f"  |F|_max:       > {thr_Fmag:.4f}  < {thr_Fmag_hi:.4f} eV/Å")
-    
-    # ------------------------------------------------------------------
-    # 4 · pool-side per-frame scalars
-    # ------------------------------------------------------------------
-    mu_F_pool = mu_F_pool.reshape(n_pool_frames, n_atoms, 3)
-    sigma_F_pool   = sigma_F_pool.reshape(n_pool_frames, n_atoms, 3)
+    # ---- NEW: train |F| cap for pool (physicality) ----
+    train_Fmax_hard_cap = float(frame_max_force_train.max()) * float(hard_Fmax_train_mult)
+    print(f"[AL] Train max |F| = {frame_max_force_train.max():.6f} eV/Å → hard pool cap = {train_Fmax_hard_cap:.6f} eV/Å")
+
+    # --- TRAIN MEDIANS for info (we no longer use RATIO_FLOOR for selection) ---
+    avg_sigmaF_train_max  = float(np.median(sigma_F_train_max))
+    avg_sigmaF_train_mean = float(np.median(sigma_F_train_mean))
+    avg_Fmag_train        = float(np.median(frame_max_force_train))
+
+    print("\n[TRAIN medians (informative)]")
+    print(f"[TRAIN] median σF_max  = {avg_sigmaF_train_max:.6f} eV/Å")
+    print(f"[TRAIN] median σF_mean = {avg_sigmaF_train_mean:.6f} eV/Å")
+    print(f"[TRAIN] median |F|_max = {avg_Fmag_train:.6f} eV/Å")
+
+    # reshape pool forces arrays
+    mu_F_pool    = mu_F_pool.reshape(n_pool_frames, n_atoms_pool, 3)
+    sigma_F_pool = sigma_F_pool.reshape(n_pool_frames, n_atoms_pool, 3)
 
     sigma_F_pool_max  = sigma_F_pool.max(axis=(1, 2))
     sigma_F_pool_mean = np.linalg.norm(sigma_F_pool, axis=2).mean(axis=1)
     frame_max_force_pool = np.linalg.norm(mu_F_pool, axis=2).max(axis=1)
-    E_atom_pool = mu_E_pool / n_atoms
+    E_atom_pool = mu_E_atom_pool  # alias
+
+    print("\n[DEBUG] --- Force stats (POOL) ---")
+    print(f"[DEBUG]   frame_max_force_pool mean={frame_max_force_pool.mean():.6f} min={frame_max_force_pool.min():.6f} max={frame_max_force_pool.max():.6f}")
+    print(f"[DEBUG]   sigma_F_pool_max mean={sigma_F_pool_max.mean():.6f} min={sigma_F_pool_max.min():.6f} max={sigma_F_pool_max.max():.6f}")
+    print(f"[DEBUG]   sigma_F_pool_mean mean={sigma_F_pool_mean.mean():.6f} min={sigma_F_pool_mean.min():.6f} max={sigma_F_pool_mean.max():.6f}")
 
     # ------------------------------------------------------------------
-    # 5 · counts
+    # 1. RDF hard cutoff – geometric sanity
     # ------------------------------------------------------------------
+    rdf_ok_mask = fast_filter_by_rdf_kdtree(pool_frames, rdf_thresholds)
+    ok_idx = np.where(rdf_ok_mask)[0]
+    n_ok = ok_idx.size
+    print(f"\n[Pool-AL] RDF filter: {n_ok}/{len(pool_frames)} frames pass hard-cutoff geometry.")
 
+    # ------------------------------------------------------------------
+    # 2. STATS ON RDF-OK FRAMES -> ADAPTIVE caps from percentile_F_hi
+    # ------------------------------------------------------------------
+    if n_ok > 0:
+        mu_E_ok_atom     = mu_E_atom_pool[ok_idx]
+        sigE_ok_atom     = sigma_E_per_atom_pool[ok_idx]
+        sigFmax_ok       = sigma_F_pool_max[ok_idx]
+        sigFmean_ok      = sigma_F_pool_mean[ok_idx]
+        Fmax_ok          = frame_max_force_pool[ok_idx]
+
+        print("\n[DEBUG] --- OK-FRAMES (RDF-filtered) STATS ---")
+        print(f"[DEBUG]   mu_E_atom_pool[OK]: mean={mu_E_ok_atom.mean():.6f} "
+              f"min={mu_E_ok_atom.min():.6f} median={np.median(mu_E_ok_atom):.6f} max={mu_E_ok_atom.max():.6f}")
+        print(f"[DEBUG]   sigma_F_pool_max[OK]: mean={sigFmax_ok.mean():.6f} "
+              f"min={sigFmax_ok.min():.6f} median={np.median(sigFmax_ok):.6f} max={sigFmax_ok.max():.6f}")
+
+        thr_sigma_E_hi_adapt_raw     = np.percentile(sigE_ok_atom,    percentile_F_hi)
+        thr_sigma_F_hi_adapt_raw     = np.percentile(sigFmax_ok,      percentile_F_hi)
+        thr_sigma_Fmean_hi_adapt_raw = np.percentile(sigFmean_ok,     percentile_F_hi)
+        thr_Fmag_hi_adapt_raw        = np.percentile(Fmax_ok,         percentile_F_hi)
+
+        pool_ok_lowest   = np.percentile(mu_E_ok_atom, 5)
+        train_highest    = np.percentile(mu_E_atom_train, 95)
+        energy_offset    = pool_ok_lowest - train_highest
+        slack            = 0.05
+        allowed_offset_adapt_raw = max(0.0, energy_offset) + slack
+
+        print("\n[ADAPT raw from OK frames]")
+        print(f"[ADAPT] thr_sigma_E_hi_adapt_raw     = {thr_sigma_E_hi_adapt_raw:.6f} eV/atom")
+        print(f"[ADAPT] thr_sigma_F_hi_adapt_raw     = {thr_sigma_F_hi_adapt_raw:.6f} eV/Å")
+        print(f"[ADAPT] thr_sigma_Fmean_hi_adapt_raw = {thr_sigma_Fmean_hi_adapt_raw:.6f} eV/Å")
+        print(f"[ADAPT] thr_Fmag_hi_adapt_raw        = {thr_Fmag_hi_adapt_raw:.6f} eV/Å")
+        print(f"[ADAPT] allowed_offset_adapt_raw     = {allowed_offset_adapt_raw:.6f} eV/atom")
+
+        thr_sigma_E_hi_eff     = thr_sigma_E_hi_adapt_raw
+        thr_sigma_F_hi_eff     = thr_sigma_F_hi_adapt_raw
+        thr_sigma_Fmean_hi_eff = thr_sigma_Fmean_hi_adapt_raw
+        thr_Fmag_hi_eff        = thr_Fmag_hi_adapt_raw
+        allowed_offset_eff     = allowed_offset_adapt_raw
+
+    else:
+        print("[DEBUG] No frames passed RDF sanity filter — using legacy fallback caps.")
+        thr_sigma_E_hi_eff     = thr_sigma_E_hi_legacy
+        thr_sigma_F_hi_eff     = thr_sigma_F_hi_legacy
+        thr_sigma_Fmean_hi_eff = thr_sigma_Fmean_hi_legacy
+        thr_Fmag_hi_eff        = thr_Fmag_hi_legacy
+        allowed_offset_eff     = margin_hi_per_atom_legacy
+
+    # clamp to avoid upper < lower
+    thr_sigma_E_hi_eff     = clamp_threshold("σ_E/atom",  thr_sigma_E_low,    thr_sigma_E_hi_eff)
+    thr_sigma_F_hi_eff     = clamp_threshold("σF_max",    thr_sigma_F,        thr_sigma_F_hi_eff)
+    thr_sigma_Fmean_hi_eff = clamp_threshold("σF_mean",   thr_sigma_Fmean,    thr_sigma_Fmean_hi_eff)
+    thr_Fmag_hi_eff        = clamp_threshold("|F|_max",   thr_Fmag,           thr_Fmag_hi_eff)
+
+    print("\n[CAPS] Effective caps in use (after clamp):")
+    print(f"[CAPS]   thr_sigma_E_low        = {thr_sigma_E_low:.6f} eV/atom (lower)")
+    print(f"[CAPS]   thr_sigma_E_hi_eff     = {thr_sigma_E_hi_eff:.6f} eV/atom (upper/adapt)")
+    print(f"[CAPS]   thr_sigma_F            = {thr_sigma_F:.6f} eV/Å (lower)")
+    print(f"[CAPS]   thr_sigma_F_hi_eff     = {thr_sigma_F_hi_eff:.6f} eV/Å (upper/adapt)")
+    print(f"[CAPS]   thr_sigma_Fmean        = {thr_sigma_Fmean:.6f} eV/Å (lower)")
+    print(f"[CAPS]   thr_sigma_Fmean_hi_eff = {thr_sigma_Fmean_hi_eff:.6f} eV/Å (upper/adapt)")
+    print(f"[CAPS]   thr_Fmag               = {thr_Fmag:.6f} eV/Å (lower)")
+    print(f"[CAPS]   thr_Fmag_hi_eff        = {thr_Fmag_hi_eff:.6f} eV/Å (upper/adapt)")
+    print(f"[CAPS]   allowed_offset_eff     = {allowed_offset_eff:.6f} eV/atom (CI slack)")
+    print(f"[CAPS]   gamma_thr              = {gamma_thr:.6f} (Mahalanobis novelty cutoff)")
+    print(f"[CAPS]   hard triggers          = σE≥{hard_sigma_E_atom_min:.4f} eV/atom OR "
+          f"σF_mean≥{hard_sigma_F_mean_min:.3f} eV/Å OR σF_max≥{hard_sigma_F_max_min:.3f} eV/Å; "
+          f"|F|_max≤{train_Fmax_hard_cap:.3f} eV/Å")
+    print(f"[CAPS]   percentiles (γ/F_low/F_hi) = {percentile_gamma:.1f}/{percentile_F_low:.1f}/{percentile_F_hi:.1f}")
+
+    # ------------------------------------------------------------------
+    # 3. Coverage / convergence heuristic
+    # ------------------------------------------------------------------
     n_hi_E      = int((sigma_E_per_atom_pool  > thr_sigma_E_low).sum())
     n_hi_Fmax   = int((sigma_F_pool_max       > thr_sigma_F).sum())
     n_hi_Fmean  = int((sigma_F_pool_mean      > thr_sigma_Fmean).sum())
     n_hi_Fmag   = int((frame_max_force_pool   > thr_Fmag).sum())
-    
-    n_lo_E      = int((sigma_E_per_atom_pool  < thr_sigma_E_hi).sum())
-    n_lo_Fmax   = int((sigma_F_pool_max       < thr_sigma_F_hi).sum())
-    n_lo_Fmean  = int((sigma_F_pool_mean      < thr_sigma_Fmean_hi).sum())
-    n_lo_Fmag   = int((frame_max_force_pool   < thr_Fmag_hi).sum())
-    
-    # Count frames in *both* bounds (eligible for selection, before OOD etc)
-    n_in_E      = int(((sigma_E_per_atom_pool > thr_sigma_E_low) & (sigma_E_per_atom_pool < thr_sigma_E_hi)).sum())
-    n_in_Fmax   = int(((sigma_F_pool_max > thr_sigma_F) & (sigma_F_pool_max < thr_sigma_F_hi)).sum())
-    n_in_Fmean  = int(((sigma_F_pool_mean > thr_sigma_Fmean) & (sigma_F_pool_mean < thr_sigma_Fmean_hi)).sum())
-    n_in_Fmag   = int(((frame_max_force_pool > thr_Fmag) & (frame_max_force_pool < thr_Fmag_hi)).sum())
-    
-    print(f"[AL] Frames above sigma_E/atom lower  : {n_hi_E}")
-    print(f"[AL] Frames above sigma_F_max lower   : {n_hi_Fmax}")
-    print(f"[AL] Frames above sigma_F_mean lower  : {n_hi_Fmean}")
-    print(f"[AL] Frames above |F|_max lower       : {n_hi_Fmag}")
-    print(f"[AL] Frames below sigma_E/atom upper  : {n_lo_E}")
-    print(f"[AL] Frames below sigma_F_max upper   : {n_lo_Fmax}")
-    print(f"[AL] Frames below sigma_F_mean upper  : {n_lo_Fmean}")
-    print(f"[AL] Frames below |F|_max upper       : {n_lo_Fmag}")
-    print(f"[AL] Frames in (lower, upper) for sigma_E/atom: {n_in_E}")
-    print(f"[AL] Frames in (lower, upper) for sigma_F_max : {n_in_Fmax}")
-    print(f"[AL] Frames in (lower, upper) for sigma_F_mean: {n_in_Fmean}")
-    print(f"[AL] Frames in (lower, upper) for |F|_max     : {n_in_Fmag}")
-    
-    good_frames = len(pool_frames) - len(bad_global)
-    print(f"[AL] analyzing {good_frames}/{len(pool_frames)} good frames (excluded {len(bad_global)} bad frames)")
-    
-    # ------------------------------------------------------------------
-    # 6 · per-frame diagnostics file
-    # ------------------------------------------------------------------
-    diag_file = f"{base}_per_frame_diagnostics.txt"
-    with open(diag_file, "w") as fh:
-        fh.write("# idx\tσE_per_atom\tσF_max\tσF_mean\t|F|_max\n")
-        for i in range(n_pool_frames):
-            fh.write(f"{i}\t"
-                     f"{sigma_E_per_atom_pool[i]:.6f}\t"
-                     f"{sigma_F_pool_max[i]:.6f}\t"
-                     f"{sigma_F_pool_mean[i]:.6f}\t"
-                     f"{frame_max_force_pool[i]:.6f}\n")
-    print(f"[AL] Wrote per-frame diagnostics to {diag_file}")
 
-    # Save diagnostics as npz for plotting
-    diag_npz = f"{base}_per_frame_diagnostics.npz"
-    np.savez(
-        diag_npz,
-        sigma_E_per_atom=sigma_E_per_atom_pool,
-        sigma_F_max=sigma_F_pool_max,
-        sigma_F_mean=sigma_F_pool_mean,
-        F_max=frame_max_force_pool,
-    )
-    print(f"[AL] Wrote per-frame diagnostics to {diag_npz}")
+    print("\n[AL] --- Coverage stats ---")
+    print(f"[AL] Total pool frames: {n_pool_frames}")
+    print(f"[AL] RDF-ok frames:     {n_ok}")
+    print(f"[AL] γ_thr (pctl {percentile_gamma:.1f}%): {gamma_thr:.4f}")
+    print(f"[AL] Frames above lower bounds:")
+    print(f"     σE/atom  > {thr_sigma_E_low:.4f} : {n_hi_E}")
+    print(f"     σF_max   > {thr_sigma_F:.4f} : {n_hi_Fmax}")
+    print(f"     σF_mean  > {thr_sigma_Fmean:.4f} : {n_hi_Fmean}")
+    print(f"     |F|_max  > {thr_Fmag:.4f} : {n_hi_Fmag}")
 
     if (n_hi_E + n_hi_Fmax + n_hi_Fmean + n_hi_Fmag) < 10:
-        print("[AL] Convergence reached — nothing significant left to label.")
-        return [], []
+        print("[AL] Convergence heuristic: fewer than 10 frames exceed any lower bound.")
+        print("[AL] Nothing significant left to label.")
+        # still write a minimal diagnostics later
+        final_pool_indices = []
+        sel_frames = []
+        # we'll still write the diagnostic file including TRAIN frames
+        # (see below, outside main loop)
+        # but we skip the big window loop
+        n_uncertain_total = 0
+        n_gamma_gate_total = 0
+    else:
+        n_uncertain_total   = 0
+        n_gamma_gate_total  = 0
+
     # ------------------------------------------------------------------
-    # Windowed D-optimal selection (γ₀ > 1 cutoff, no D_norm)
+    # 4. Windowed selection with OOD filter and D-opt
     # ------------------------------------------------------------------
     cand_global = []
-    records     = []
-    
+    records_tmp = []
+    all_frame_records = {}
+    ood_total   = 0
+
     for w0 in range(0, n_pool_frames, window_size):
         w1  = min(w0 + window_size, n_pool_frames)
         win = list(range(w0, w1))
         print(f"\n[Pool-AL] Window {w0}-{w1}: {len(win)} total frames")
 
-        # NEW FILTER: Only candidates exceeding any threshold and not in bad_global
-        # 1. Not in bad_global (geometry)
-        win_good = [i for i in win if i not in bad_global]
-        print(f"[Pool-AL]   {len(win_good)} pass bad_global (loose geometry)")
+        # (1) RDF pass
+        win_good = [i for i in win if rdf_ok_mask[i]]
+        print(f"[Pool-AL]   {len(win_good)} pass RDF hard cutoff")
 
-        # 2. Energy cap
-        win_E = [i for i in win_good if E_atom_pool[i] < thr_E_hi]
-        print(f"[Pool-AL]   {len(win_E)} below E/atom cap ({thr_E_hi:.3f} eV)")
+        # (2) per-atom energy sanity
+        win_E = [i for i in win_good if mu_E_atom_pool[i] < thr_E_hi_atom]
+        print(f"[Pool-AL]   {len(win_E)} below E/atom cap ({thr_E_hi_atom:.3f} eV/atom)")
 
-        # 2.5 CI-overlap filter
+        # (3) per-atom energy CI overlap
+        train_min = E_train_min_atom
+        train_max = E_train_max_atom
         win_CI = [
             i for i in win_E
-            if (E_hi_pool[i] >= E_train_min) and
-               (E_lo_pool[i] <= E_train_max + margin_hi)
-        ]
-        print(f"[Pool-AL]   {len(win_CI)} frames pass CI overlap")
-
-        # 3. Uncertainty/force/energy upper caps
-        win_sigmaE = [i for i in win_CI if sigma_E_per_atom_pool[i] < thr_sigma_E_hi]
-        print(f"[Pool-AL]   {len(win_sigmaE)} below sigma_E/atom cap ({thr_sigma_E_hi:.3f} eV)")
-
-        win_sigmaF = [i for i in win_sigmaE if sigma_F_pool_max[i] < thr_sigma_F_hi]
-        print(f"[Pool-AL]   {len(win_sigmaF)} below sigma_F cap ({thr_sigma_F_hi:.3f} eV/Å)")
-
-        win_sigmaFmean = [i for i in win_sigmaF if sigma_F_pool_mean[i] < thr_sigma_Fmean_hi]
-        print(f"[Pool-AL]   {len(win_sigmaFmean)} below sigma_Fmean cap ({thr_sigma_Fmean_hi:.3f} eV/Å)")
-
-        win_Fmag = [i for i in win_sigmaFmean if frame_max_force_pool[i] < thr_Fmag_hi]
-        print(f"[Pool-AL]   {len(win_Fmag)} below |F| cap ({thr_Fmag_hi:.3f} eV/Å)")
-
-        # 4. LOWER bounds: "interesting" (at least one metric above its lower bound)
-        high = [
-            i for i in win_Fmag if (
-                (sigma_E_per_atom_pool[i]   > thr_sigma_E_low) or
-                (sigma_F_pool_max[i]        > thr_sigma_F) or
-                (sigma_F_pool_mean[i]       > thr_sigma_Fmean) or
-                (frame_max_force_pool[i]    > thr_Fmag)
+            if (
+                (E_hi_pool_atom[i] >= (train_min - allowed_offset_eff)) and
+                (E_lo_pool_atom[i] <= (train_max + allowed_offset_eff))
             )
         ]
-        print(f"[Pool-AL]   {len(high)} above at least one 'interesting' threshold (lower bounds)")
+        print(f"[Pool-AL]   {len(win_CI)} frames pass adaptive CI overlap "
+              f"(train=[{train_min:.3f},{train_max:.3f}] ± {allowed_offset_eff:.3f})")
+
+        # (4) enforce adaptive upper caps on σE/σF/σFmean
+        win_sigmaE = [i for i in win_CI if sigma_E_per_atom_pool[i] < thr_sigma_E_hi_eff]
+        win_sigmaF = [i for i in win_sigmaE if sigma_F_pool_max[i] < thr_sigma_F_hi_eff]
+        win_sigmaFmean = [i for i in win_sigmaF if sigma_F_pool_mean[i] < thr_sigma_Fmean_hi_eff]
+        win_Fcap = [i for i in win_sigmaFmean if frame_max_force_pool[i] < thr_Fmag_hi_eff]
+        win_phys = win_Fcap
+        print(f"[Pool-AL]   {len(win_phys)} pass σE/σF/σFmean/|F|_max adaptive caps")
+
+        # (5) NEW: hard AL trigger (literature-like)
+        high = []
+        for i in win_phys:
+            cond_E    = (sigma_E_per_atom_pool[i]  >= hard_sigma_E_atom_min)
+            cond_Favg = (sigma_F_pool_mean[i]      >= hard_sigma_F_mean_min)
+            cond_Fmax = (sigma_F_pool_max[i]       >= hard_sigma_F_max_min)
+            cond_Fmag = (frame_max_force_pool[i]   <= train_Fmax_hard_cap)
+            if cond_Fmag and (cond_E or cond_Favg or cond_Fmax):
+                high.append(i)
+        print(f"[Pool-AL]   {len(high)} pass HARD AL triggers "
+              f"(σE≥{hard_sigma_E_atom_min}, σF_mean≥{hard_sigma_F_mean_min}, "
+              f"σF_max≥{hard_sigma_F_max_min}, |F|≤train×{hard_Fmax_train_mult})")
 
         if not high:
-            print(f"[Pool-AL]   No high-uncertainty frames in this window.")
+            print("[Pool-AL]   No HARD-trigger frames in this window.")
+            # still record diagnostics for all frames in this window
+            win_all = np.array(win, dtype=int)
+            sub_G_all = G_pool[win_all].astype(np.float64)
+            quad_all   = np.einsum("id,dk,ik->i", sub_G_all, M_inv_global, sub_G_all)
+            gamma_all  = np.sqrt(quad_all)
+            diff_all   = sub_G_all - mu_Gtrain
+            dM2_all    = np.einsum("id,dk,ik->i", diff_all, Cov_inv, diff_all)
+            dM_all     = np.sqrt(dM2_all)
+            dgain_train_all = np.log1p(quad_all)
+            raw_score_all   = gamma_all * dgain_train_all
+            keep_gamma_mask_all = (gamma_all > gamma_thr)
+            win_good_set = set(win_good)
+            win_phys_set = set(win_phys)
+            high_set     = set(high)
+            for j_local, pidx in enumerate(win_all):
+                rec = {
+                    "pool_idx": int(pidx),
+                    "window":   f"{w0}-{w1}",
+                    "rdf_ok":     bool(pidx in win_good_set),
+                    "pass_caps":  bool(pidx in win_phys_set),
+                    "force_inf":  bool(pidx in high_set),      # here: hard-triggered
+                    "gamma_gate": bool(keep_gamma_mask_all[j_local]),
+                    "above_lower": bool(pidx in high_set),     # keep legacy name
+                    "gamma0":           float(gamma_all[j_local]),
+                    "dM":               float(dM_all[j_local]),
+                    "dgain_train":      float(dgain_train_all[j_local]),
+                    "dgain_greedy":     float("nan"),
+                    "raw_score_window": float(raw_score_all[j_local]),
+                    "sigma_E_atom": float(sigma_E_per_atom_pool[pidx]),
+                    "sigma_F_max":  float(sigma_F_pool_max[pidx]),
+                    "sigma_F_mean": float(sigma_F_pool_mean[pidx]),
+                    "Fmax":         float(frame_max_force_pool[pidx]),
+                    "mu_E_atom":    float(mu_E_atom_pool[pidx]),
+                    # training-relative ratios just for plots
+                    "r_sigmaF_max":  float(sigma_F_pool_max[pidx]  / (avg_sigmaF_train_max  + 1e-12)),
+                    "r_sigmaF_mean": float(sigma_F_pool_mean[pidx] / (avg_sigmaF_train_mean + 1e-12)),
+                    "r_Fmag":        float(frame_max_force_pool[pidx] / (avg_Fmag_train + 1e-12)),
+                    "selected": False,
+                }
+                all_frame_records[int(pidx)] = rec
             continue
 
-        sub_G = G_pool[high].astype(np.float64)
-        print(f"[Pool-AL]   sub_G shape = {sub_G.shape}")
-   
-        # raw Mahalanobis distances w.r.t. *current* training set
-        quad0  = np.einsum("id,dk,ik->i", sub_G, M_inv_global, sub_G)
-        gamma0 = np.sqrt(quad0)
+        # ----- A. Metrics for ALL frames in this window (no filtering yet) -----
+        win_all = np.array(win, dtype=int)
+        sub_G_all = G_pool[win_all].astype(np.float64)
 
-#        gamma_thr = 1.0  
-        print(f"[Pool-AL]   Mahalanobis γ₀: mean={gamma0.mean():.3f}, "
-              f"std={gamma0.std():.3f}, min={gamma0.min():.3f}, max={gamma0.max():.3f}")
-        keep = np.where(gamma0 > gamma_thr)[0]
-        print(f"[Pool-AL]   {len(keep)} frames are OOD (γ₀ > {gamma_thr:.2f})")
-        if keep.size == 0:
-           print(f"[Pool-AL]   Skipping window; no OOD candidates.")
-           continue
-        # ---- D-optimal ordering on OOD subset ----
-        X_cand_OOD = sub_G[keep]
-        order, gains_full, gamma0_sub = d_optimal_full_order(
-            X_cand=X_cand_OOD,
-            X_train=G_train,
-            reg=reg,
-        )
-        print(
-            f"[Pool-AL]   D-opt got {len(order)} OOD candidates, "
-            f"gains ∈ [{gains_full.min():.3f}, {gains_full.max():.3f}]"
-        )
-    
-        # Optional: print some of the top OOD γ₀/gain values
-        for n in range(min(3, len(order))):
-            idx = order[n]
-            print(f"  [DEBUG][OOD]   Pick {n+1}: γ₀={gamma0[keep[idx]]:.3f}, Dgain={gains_full[n]:.3f}")
+        quad_all   = np.einsum("id,dk,ik->i", sub_G_all, M_inv_global, sub_G_all)
+        gamma_all  = np.sqrt(quad_all)
 
-        # --- Hybrid gain threshold + min_k fallback ---
-        gain_floor = np.percentile(gains_full, 90)  # top 20% only
-        idx_keep = np.where(gains_full > gain_floor)[0]
-        print(f"[Pool-AL]   {len(idx_keep)} frames above gain_floor={gain_floor:.3f}")
-        
-        if idx_keep.size == 0:
-            # No gains above floor; fallback to first min_k picks
-            idx_keep = order[:min_k]
-            print(f"[Pool-AL]   Fallback: taking first {min_k} by D-opt order.")
-        elif idx_keep.size < min_k:
-            # If not enough, pad with next-best frames (by D-opt order)
-            extras = [i for i in order if i not in idx_keep][: (min_k - idx_keep.size)]
-            idx_keep = list(idx_keep) + extras
-            print(f"[Pool-AL]   Padded to min_k={min_k} with D-opt order.")
-        
-        # Map back to global indices
-        picks = [high[keep[i]] for i in idx_keep]
-        print(f"[Pool-AL]   Selected {len(picks)} frames in this window (hybrid logic).")
+        diff_all   = sub_G_all - mu_Gtrain
+        dM2_all    = np.einsum("id,dk,ik->i", diff_all, Cov_inv, diff_all)
+        dM_all     = np.sqrt(dM2_all)
 
-        cand_global.extend(picks)
+        dgain_train_all = np.log1p(quad_all)
+        raw_score_all   = gamma_all * dgain_train_all
 
-        for idx_local, pick in enumerate(picks):
-            gain_val  = gains_full[idx_local]
-            gamma_val = gamma0[keep[idx_keep[idx_local]]]
-            E_lo, E_hi = E_lo_pool[pick], E_hi_pool[pick]
-            records.append((
-                pick,
-                mu_E_pool[pick],
-                sigma_E_pool[pick],
-                E_lo,
-                E_hi,
-                gain_val,
-                gamma_val,
-                f"{w0}-{w1}"
-            ))
-        
-    # ------------------------------------------------------------------
-    # Write out the selection log
-    # ------------------------------------------------------------------
-    idx_file = f"{base}_idxs.txt"
-    with open(idx_file, "w") as fh:
-        fh.write("idx\tpred_E\tσ\tE_lo\tE_hi\tDgain\tgamma0\twindow\n")
-        for idx, pred_E, sigma, E_lo, E_hi, dgain, g0, window in records:
-            fh.write(
-                f"{idx}\t"
-                f"{pred_E:.5f}\t{sigma:.5f}\t"
-                f"{E_lo:.5f}\t{E_hi:.5f}\t"
-                f"{dgain:.5f}\t{g0:.3f}\t"
-                f"{window}\n"
+        print(f"[Pool-AL]   Mahalanobis γ₀ (ALL in window): mean={gamma_all.mean():.3f}, "
+              f"min={gamma_all.min():.3f}, max={gamma_all.max():.3f}")
+        print(f"[Pool-AL]   dM to-train (ALL in window):   mean={dM_all.mean():.3f}, "
+              f"min={dM_all.min():.3f}, max={dM_all.max():.3f}")
+        print(f"[Pool-AL]   Raw γ×Dgain_train stats: mean={raw_score_all.mean():.3f}, "
+              f"min={raw_score_all.min():.3f}, max={raw_score_all.max():.3f}")
+
+        keep_gamma_mask_all = (gamma_all > gamma_thr)
+        ood_total += int(keep_gamma_mask_all.sum())
+
+        win_good_set = set(win_good)
+        win_phys_set = set(win_phys)
+        high_set     = set(high)
+
+        is_high_all = np.array([(idx in high_set) for idx in win_all], dtype=bool)
+
+        cand_mask = is_high_all & keep_gamma_mask_all
+
+        n_uncertain_total  += int(is_high_all.sum())
+        n_gamma_gate_total += int(cand_mask.sum())
+
+        cand_idx_local  = np.where(cand_mask)[0]
+
+        dgain_greedy_all = np.full(win_all.shape[0], np.nan, dtype=float)
+
+        selected_local   = []
+        gains_full_greedy = None
+
+        if cand_idx_local.size > 0:
+            X_cand = sub_G_all[cand_idx_local]
+            order, gains_full_greedy, gamma0_sub = d_optimal_full_order(
+                X_cand=X_cand,
+                X_train=G_train,
+                reg=reg,
             )
-    print(f"[AL] wrote log with {len(records)} entries to {idx_file}")
-    
-    sel_frames = [pool_frames[i] for i in cand_global]
-    return sel_frames, cand_global
+
+            diff_expanded = X_cand[:, None, :] - X_cand[None, :, :]
+            dist_mat = np.linalg.norm(diff_expanded, axis=2)
+
+            remaining = list(range(X_cand.shape[0]))
+            while (len(selected_local) < min_k) and remaining:
+                best_r = None
+                best_score = -np.inf
+                for r in remaining:
+                    score_inter = gains_full_greedy[r]
+                    if not selected_local:
+                        diversity_penalty = 1.0
+                    else:
+                        diversity_penalty = float(np.min(dist_mat[r, selected_local]))
+                    score_candidate = score_inter * diversity_penalty
+                    if score_candidate > best_score:
+                        best_score = score_candidate
+                        best_r = r
+                selected_local.append(best_r)
+                remaining.remove(best_r)
+
+            for loc_r in range(len(order)):
+                j_local = cand_idx_local[loc_r]
+                dgain_greedy_all[j_local] = float(gains_full_greedy[loc_r])
+
+        if len(selected_local) > 0:
+            picks_abs = win_all[cand_idx_local[selected_local]].tolist()
+        else:
+            picks_abs = []
+
+        print(f"[Pool-AL]   Selected {len(picks_abs)} frames in this window "
+              f"(γ gate + D-opt gain + intra-batch diversity).")
+
+        # ----- D. Record EVERY frame’s metrics into all_frame_records (for .txt) -----
+        for j_local, pidx in enumerate(win_all):
+            r_sigmaF_max  = float(sigma_F_pool_max[pidx]  / (avg_sigmaF_train_max  + 1e-12))
+            r_sigmaF_mean = float(sigma_F_pool_mean[pidx] / (avg_sigmaF_train_mean + 1e-12))
+            r_Fmag        = float(frame_max_force_pool[pidx] / (avg_Fmag_train + 1e-12))
+
+            rec = {
+                "pool_idx": int(pidx),
+                "window":   f"{w0}-{w1}",
+                "rdf_ok":     bool(pidx in win_good_set),
+                "pass_caps":  bool(pidx in win_phys_set),
+                "force_inf":  bool(pidx in high_set),                  # <- NOW: means "passed hard AL trigger"
+                "gamma_gate": bool(keep_gamma_mask_all[j_local]),
+                "above_lower": bool(pidx in high_set),                  # legacy name, same meaning
+                "gamma0":           float(gamma_all[j_local]),
+                "dM":               float(dM_all[j_local]),
+                "dgain_train":      float(dgain_train_all[j_local]),
+                "dgain_greedy":     float(dgain_greedy_all[j_local]) if not np.isnan(dgain_greedy_all[j_local]) else float("nan"),
+                "raw_score_window": float(raw_score_all[j_local]),
+                "sigma_E_atom": float(sigma_E_per_atom_pool[pidx]),
+                "sigma_F_max":  float(sigma_F_pool_max[pidx]),
+                "sigma_F_mean": float(sigma_F_pool_mean[pidx]),
+                "Fmax":         float(frame_max_force_pool[pidx]),
+                "mu_E_atom":    float(mu_E_atom_pool[pidx]),
+                "r_sigmaF_max":  r_sigmaF_max,
+                "r_sigmaF_mean": r_sigmaF_mean,
+                "r_Fmag":        r_Fmag,
+            }
+
+            rec["selected"] = bool(pidx in picks_abs)
+
+            all_frame_records[int(pidx)] = rec
+
+        # ----- E. Keep compact record for final shortlist -----
+        if len(selected_local) > 0:
+            for pick_rel_idx, r_sel in enumerate(selected_local):
+                j_local = int(cand_idx_local[r_sel])
+                pidx    = int(win_all[j_local])
+
+                gamma_val = float(gamma_all[j_local])
+                dM_val    = float(dM_all[j_local])
+                dgain_val = float(gains_full_greedy[r_sel])
+                raw_val   = float(gamma_val * dgain_train_all[j_local])
+
+                cand_global.append(pidx)
+                records_tmp.append({
+                    "pool_idx":     pidx,
+                    "E_atom_pred":  float(mu_E_atom_pool[pidx]),
+                    "sigma_E_atom": float(sigma_E_per_atom_pool[pidx]),
+                    "E_lo_atom":    float(E_lo_pool_atom[pidx]),
+                    "E_hi_atom":    float(E_hi_pool_atom[pidx]),
+                    "sigma_F_max":  float(sigma_F_pool_max[pidx]),
+                    "sigma_F_mean": float(sigma_F_pool_mean[pidx]),
+                    "Fmax":         float(frame_max_force_pool[pidx]),
+                    "gamma0":       gamma_val,
+                    "dM":           dM_val,
+                    "dgain":        dgain_val,
+                    "raw_score":    raw_val,
+                    "window":       f"{w0}-{w1}",
+                })
+
+    # ------------------------------------------------------------------
+    # 5. Normalize debug score across ALL frames
+    # ------------------------------------------------------------------
+    if len(all_frame_records) > 0:
+        rs = np.array([rec["raw_score_window"] for rec in all_frame_records.values()], dtype=float)
+        rs_max = float(rs.max()) if rs.size else 1.0
+        if rs_max == 0.0:
+            rs_max = 1.0
+        for rec in all_frame_records.values():
+            rec["score_norm"] = rec["raw_score_window"] / rs_max
+    else:
+        print("[AL][WARN] No frames recorded in all_frame_records.")
+
+    # ------------------------------------------------------------------
+    # 6. Deduplicate global picks and score them (final shortlist we return)
+    # ------------------------------------------------------------------
+    unique_map = {}
+    for rec in records_tmp:
+        idxp = rec["pool_idx"]
+        if (idxp not in unique_map) or (rec["raw_score"] > unique_map[idxp]["raw_score"]):
+            unique_map[idxp] = rec
+
+    unique_records = list(unique_map.values())
+    picked_total = len(unique_records)
+
+    eps = 1e-12
+    if picked_total > 0:
+        all_raw = np.array([r["raw_score"] for r in unique_records], dtype=float)
+        raw_norm = all_raw / (all_raw.max() + eps)
+        for i, r in enumerate(unique_records):
+            r["score"] = float(raw_norm[i])
+    else:
+        for r in unique_records:
+            r["score"] = 0.0
+
+    unique_records.sort(key=lambda x: x["score"], reverse=True)
+
+    if budget_max and len(unique_records) > budget_max:
+        print(f"[AL] Budget cap active: picked_total={picked_total} > budget_max={budget_max}")
+        unique_records = unique_records[:budget_max]
+        picked_total = budget_max
+
+    final_pool_indices = [r["pool_idx"] for r in unique_records]
+
+    # ------------------------------------------------------------------
+    # 7. Diagnostics file
+    # ------------------------------------------------------------------
+    diag_file = f"{base}_per_frame_diagnostics.txt"
+    with open(diag_file, "w") as fh:
+        fh.write("# Active Learning diagnostics (full pool)\n")
+        fh.write("#\n")
+        fh.write("# For every frame in every window:\n")
+        fh.write("#   rdf_ok        : passed RDF geometric sanity\n")
+        fh.write("#   pass_caps     : passed σE/σF/σFmean adaptive *upper* caps\n")
+        fh.write("#   force_inf     : passed HARD AL trigger (σE or σF_mean or σF_max) AND within |F| cap\n")
+        fh.write("#   gamma_gate    : gamma0 > gamma_thr (novel vs training span)\n")
+        fh.write("#   gamma0        : leverage-like Mahalanobis novelty vs training span (x^T M^{-1} x)^0.5\n")
+        fh.write("#   dM            : classical Mahalanobis to train mean (drift monitor only)\n")
+        fh.write("#   dgain_train   : log(1 + x^T M^{-1} x), 1-step D-opt gain vs TRAIN ALONE\n")
+        fh.write("#   dgain_greedy  : D-opt greedy gain used in window selection (only defined for γ-high ∧ force_inf)\n")
+        fh.write("#   raw_γxD       : gamma0 * dgain_train (defined for ALL frames)\n")
+        fh.write("#   score_norm    : raw_γxD normalized to [0,1] across ALL frames (debug ranking proxy)\n")
+        fh.write("#   selected      : 1 if frame made the greedy min_k batch in its own window\n")
+        fh.write("#   shortlist     : 1 if frame survived global dedupe+budget (will actually be suggested to add)\n")
+        fh.write("#\n")
+        fh.write("# ------------------- GLOBAL THRESHOLDS / CUTS -------------------\n")
+        fh.write(f"# percentile_gamma      = {percentile_gamma:.1f}\n")
+        fh.write(f"# gamma_thr             = {gamma_thr:.6f}   # γ gate cutoff\n")
+        fh.write(f"# basin_percentile      = {basin_percentile:.1f}\n")
+        fh.write(f"# dM_thr                = {dM_thr:.6f}      # 99th pct Mahalanobis-to-mean radius of TRAIN\n")
+        fh.write("#\n")
+        fh.write(f"# percentile_F_low      = {percentile_F_low:.1f}\n")
+        fh.write(f"# percentile_F_hi       = {percentile_F_hi:.1f}\n")
+        fh.write(f"# thr_sigma_E_low       = {thr_sigma_E_low:.6f}  eV/atom   # lower floor on σ(E/atom)\n")
+        fh.write(f"# thr_sigma_E_hi_eff    = {thr_sigma_E_hi_eff:.6f}  eV/atom # adaptive upper cap on σ(E/atom)\n")
+        fh.write(f"# thr_sigma_F           = {thr_sigma_F:.6f}    eV/Å       # lower floor on σF_max\n")
+        fh.write(f"# thr_sigma_F_hi_eff    = {thr_sigma_F_hi_eff:.6f}    eV/Å   # adaptive upper cap on σF_max\n")
+        fh.write(f"# thr_sigma_Fmean       = {thr_sigma_Fmean:.6f}  eV/Å     # lower floor on σF_mean\n")
+        fh.write(f"# thr_sigma_Fmean_hi_eff= {thr_sigma_Fmean_hi_eff:.6f}  eV/Å # adaptive upper cap on σF_mean\n")
+        fh.write(f"# thr_Fmag              = {thr_Fmag:.6f}    eV/Å         # lower floor on |F|_max\n")
+        fh.write(f"# thr_Fmag_hi_eff       = {thr_Fmag_hi_eff:.6f}    eV/Å   # adaptive upper cap on |F|_max\n")
+        fh.write(f"# allowed_offset_eff    = {allowed_offset_eff:.6f}  eV/atom # CI slack for energy overlap\n")
+        fh.write("#\n")
+        fh.write(f"# HARD AL TRIGGERS (from config):\n")
+        fh.write(f"#   hard_sigma_E_atom_min = {hard_sigma_E_atom_min:.6f}  eV/atom\n")
+        fh.write(f"#   hard_sigma_F_mean_min = {hard_sigma_F_mean_min:.6f}  eV/Å\n")
+        fh.write(f"#   hard_sigma_F_max_min  = {hard_sigma_F_max_min:.6f}  eV/Å\n")
+        fh.write(f"#   train_Fmax_hard_cap   = {train_Fmax_hard_cap:.6f}  eV/Å  # = {hard_Fmax_train_mult:.3f} × max |F| in TRAIN\n")
+        fh.write("#\n")
+        fh.write(f"# min_k                 = {min_k}\n")
+        fh.write(f"# window_size           = {window_size}\n")
+        fh.write(f"# budget_max            = {budget_max}\n")
+        fh.write("#\n")
+
+        shortlist_set = set(final_pool_indices)
+
+        # header row for pool table
+        fh.write(
+            f"{'idx':<8}"
+            f"{'window':>12}"
+            f"{'rdf_ok':>8}"
+            f"{'caps_ok':>8}"
+            f"{'force_inf':>10}"
+            f"{'γ_gate':>8}"
+            f"{'gamma0':>12}"
+            f"{'dM':>12}"
+            f"{'Dgain_train':>14}"
+            f"{'Dgain_greedy':>15}"
+            f"{'raw_γxD':>12}"
+            f"{'score_norm':>12}"
+            f"{'σE_atom':>12}"
+            f"{'σF_max':>12}"
+            f"{'σF_mean':>12}"
+            f"{'Fmax':>12}"
+            f"{'μE_atom':>12}"
+            f"{'r_σFmax':>10}"
+            f"{'r_σFmean':>10}"
+            f"{'r_|F|max':>10}"
+            f"{'selected':>10}"
+            f"{'shortlist':>11}"
+            "\n"
+        )
+        fh.write("-" * 240 + "\n")
+
+        for pidx in sorted(all_frame_records.keys()):
+            R = all_frame_records[pidx]
+            fh.write(
+                f"{pidx:<8d}"
+                f"{R['window']:>12}"
+                f"{int(R['rdf_ok']):>8d}"
+                f"{int(R['pass_caps']):>8d}"
+                f"{int(R['force_inf']):>10d}"
+                f"{int(R['gamma_gate']):>8d}"
+                f"{R['gamma0']:>12.6f}"
+                f"{R['dM']:>12.6f}"
+                f"{R['dgain_train']:>14.6f}"
+                f"{(R['dgain_greedy'] if not np.isnan(R['dgain_greedy']) else float('nan')):>15.6f}"
+                f"{R['raw_score_window']:>12.6f}"
+                f"{R.get('score_norm', float('nan')):>12.6f}"
+                f"{R['sigma_E_atom']:>12.6f}"
+                f"{R['sigma_F_max']:>12.6f}"
+                f"{R['sigma_F_mean']:>12.6f}"
+                f"{R['Fmax']:>12.6f}"
+                f"{R['mu_E_atom']:>12.6f}"
+                f"{R['r_sigmaF_max']:>10.3f}"
+                f"{R['r_sigmaF_mean']:>10.3f}"
+                f"{R['r_Fmag']:>10.3f}"
+                f"{int(R.get('selected', False)):>10d}"
+                f"{int(pidx in shortlist_set):>11d}"
+                "\n"
+            )
+
+        # ------------------------------------------------------------------
+        # EXTRA: TRAIN-DATASET UNCERTAINTY DUMP (frame by frame)
+        # ------------------------------------------------------------------
+        fh.write("\n# ---------------------------------------------------------------\n")
+        fh.write("# TRAIN DATASET UNCERTAINTIES (per frame)\n")
+        fh.write("# Columns: train_idx  sigma_E_atom  sigma_F_max  sigma_F_mean  Fmax\n")
+        fh.write("# Units  : eV/atom    eV/Å          eV/Å         eV/Å\n")
+        fh.write("# ---------------------------------------------------------------\n")
+        for t in range(n_train_frames):
+            fh.write(
+                f"{t:<8d}"
+                f"{sigma_E_per_atom_train[t]:>14.6f}"
+                f"{sigma_F_train_max[t]:>14.6f}"
+                f"{sigma_F_train_mean[t]:>14.6f}"
+                f"{frame_max_force_train[t]:>14.6f}"
+                "\n"
+            )
+
+    # ------------------------------------------------------------------
+    # 8. Summary / stop check
+    # ------------------------------------------------------------------
+    frac_geom_ok = float(rdf_ok_mask.sum()) / float(len(rdf_ok_mask)) if len(rdf_ok_mask) > 0 else 0.0
+    picked_after_budget = len(final_pool_indices)
+
+    print("\n[AL] Summary for stop check:")
+    print(f"    geom_ok fraction                         : {frac_geom_ok:.3f}")
+    print(f"    frames passing HARD triggers             : {n_uncertain_total}")
+    print(f"    ... of which also pass γ gate            : {n_gamma_gate_total}")
+    print(f"    shortlisted after greedy+diversity       : {picked_total}")
+    print(f"    kept after global budget cap ({budget_max}) : {picked_after_budget}")
+
+    converged_geometry   = (frac_geom_ok >= 0.9)
+    converged_uncert_gam = (n_gamma_gate_total == 0)
+    converged_budget     = (picked_after_budget == 0)
+
+    if converged_geometry and converged_uncert_gam and converged_budget:
+        print("[AL] >>> TRUE CONVERGENCE: model sufficiently covers this regime.")
+    else:
+        print("[AL] Active learning still in progress (not converged).")
+
+    sel_frames = [pool_frames[i] for i in final_pool_indices]
+    return sel_frames, final_pool_indices
 
 
 # =============================================================================
