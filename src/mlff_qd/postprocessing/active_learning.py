@@ -2246,61 +2246,62 @@ def adaptive_learning_mig_pool_windowed(
 
         shortlist_set = set(final_pool_indices)
 
-        # header row for pool table
+        # header row for pool table (single space between columns)
         fh.write(
-            f"{'idx':<8}"
-            f"{'window':>12}"
-            f"{'rdf_ok':>8}"
-            f"{'caps_ok':>8}"
-            f"{'force_inf':>10}"
-            f"{'γ_gate':>8}"
-            f"{'gamma0':>12}"
-            f"{'dM':>12}"
-            f"{'Dgain_train':>14}"
-            f"{'Dgain_greedy':>15}"
-            f"{'raw_γxD':>12}"
-            f"{'score_norm':>12}"
-            f"{'σE_atom':>12}"
-            f"{'σF_max':>12}"
-            f"{'σF_mean':>12}"
-            f"{'Fmax':>12}"
-            f"{'μE_atom':>12}"
-            f"{'r_σFmax':>10}"
-            f"{'r_σFmean':>10}"
-            f"{'r_|F|max':>10}"
-            f"{'selected':>10}"
-            f"{'shortlist':>11}"
+            f"{'idx':<8} "
+            f"{'window':>12} "
+            f"{'rdf_ok':>8} "
+            f"{'caps_ok':>8} "
+            f"{'force_inf':>10} "
+            f"{'γ_gate':>8} "
+            f"{'gamma0':>12} "
+            f"{'dM':>12} "
+            f"{'Dgain_train':>14} "
+            f"{'Dgain_greedy':>15} "
+            f"{'raw_γxD':>12} "
+            f"{'score_norm':>12} "
+            f"{'σE_atom':>12} "
+            f"{'σF_max':>12} "
+            f"{'σF_mean':>12} "
+            f"{'Fmax':>12} "
+            f"{'μE_atom':>12} "
+            f"{'r_σFmax':>10} "
+            f"{'r_σFmean':>10} "
+            f"{'r_|F|max':>10} "
+            f"{'selected':>10} "
+            f"{'shortlist':>11} "
             "\n"
         )
-        fh.write("-" * 240 + "\n")
-
+        fh.write("-" * 260 + "\n")  # increase line to cover extra spaces
+        
         for pidx in sorted(all_frame_records.keys()):
             R = all_frame_records[pidx]
             fh.write(
-                f"{pidx:<8d}"
-                f"{R['window']:>12}"
-                f"{int(R['rdf_ok']):>8d}"
-                f"{int(R['pass_caps']):>8d}"
-                f"{int(R['force_inf']):>10d}"
-                f"{int(R['gamma_gate']):>8d}"
-                f"{R['gamma0']:>12.6f}"
-                f"{R['dM']:>12.6f}"
-                f"{R['dgain_train']:>14.6f}"
-                f"{(R['dgain_greedy'] if not np.isnan(R['dgain_greedy']) else float('nan')):>15.6f}"
-                f"{R['raw_score_window']:>12.6f}"
-                f"{R.get('score_norm', float('nan')):>12.6f}"
-                f"{R['sigma_E_atom']:>12.6f}"
-                f"{R['sigma_F_max']:>12.6f}"
-                f"{R['sigma_F_mean']:>12.6f}"
-                f"{R['Fmax']:>12.6f}"
-                f"{R['mu_E_atom']:>12.6f}"
-                f"{R['r_sigmaF_max']:>10.3f}"
-                f"{R['r_sigmaF_mean']:>10.3f}"
-                f"{R['r_Fmag']:>10.3f}"
-                f"{int(R.get('selected', False)):>10d}"
-                f"{int(pidx in shortlist_set):>11d}"
+                f"{pidx:<8d} "
+                f"{R['window']:>12} "
+                f"{int(R['rdf_ok']):>8d} "
+                f"{int(R['pass_caps']):>8d} "
+                f"{int(R['force_inf']):>10d} "
+                f"{int(R['gamma_gate']):>8d} "
+                f"{R['gamma0']:>12.6f} "
+                f"{R['dM']:>12.6f} "
+                f"{R['dgain_train']:>14.6f} "
+                f"{(R['dgain_greedy'] if not np.isnan(R['dgain_greedy']) else float('nan')):>15.6f} "
+                f"{R['raw_score_window']:>12.6f} "
+                f"{R.get('score_norm', float('nan')):>12.6f} "
+                f"{R['sigma_E_atom']:>20.12f} "
+                f"{R['sigma_F_max']:>12.6f} "
+                f"{R['sigma_F_mean']:>12.6f} "
+                f"{R['Fmax']:>12.6f} "
+                f"{R['mu_E_atom']:>12.6f} "
+                f"{R['r_sigmaF_max']:>10.3f} "
+                f"{R['r_sigmaF_mean']:>10.3f} "
+                f"{R['r_Fmag']:>10.3f} "
+                f"{int(R.get('selected', False)):>10d} "
+                f"{int(pidx in shortlist_set):>11d} "
                 "\n"
             )
+
 
         # ------------------------------------------------------------------
         # EXTRA: TRAIN-DATASET UNCERTAINTY DUMP (frame by frame)
@@ -2313,7 +2314,7 @@ def adaptive_learning_mig_pool_windowed(
         for t in range(n_train_frames):
             fh.write(
                 f"{t:<8d}"
-                f"{sigma_E_per_atom_train[t]:>14.6f}"
+                f"{sigma_E_per_atom_train[t]:>20.12f}"
                 f"{sigma_F_train_max[t]:>14.6f}"
                 f"{sigma_F_train_mean[t]:>14.6f}"
                 f"{frame_max_force_train[t]:>14.6f}"

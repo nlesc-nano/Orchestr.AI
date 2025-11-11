@@ -400,22 +400,73 @@ class MyTorchCalculator(Calculator):
                  latent_frame = np.array([])
                  latent_per_atom_avg_np = None
 
-        else: # Standard Inference (No Dropout)
+        else:  # Standard Inference (No Dropout)
             self.model.eval()
-            # Always enable gradients for the model call
-            inference_context = torch.set_grad_enabled(True)
-
-            with inference_context, torch.amp.autocast("cuda", enabled=amp_enabled):
-                results = self.model(inputs) # Model calculates E and F
-
-            # Process results
-            E_ml = results["energy"].float().item()
-            # Get forces - they should always be calculated now
+        
+            # --- Force FP64 inference but KEEP autograd enabled (required for forces) ---
+            # Convert model parameters to double precision (in-place). This ensures forward
+            # is executed in FP64 and avoids float32 quantization of large energies.
+            try:
+                self.model = self.model.double()
+            except Exception:
+                # Fallback: convert parameters individually if .double() is not supported
+                for p in self.model.parameters():
+                    p.data = p.data.to(torch.float64)
+                    if p.grad is not None:
+                        p.grad.data = p.grad.data.to(torch.float64)
+        
+            # Ensure all floating inputs are float64 and on the model device
+            param = next(self.model.parameters())
+            model_device = param.device
+            for k, v in list(inputs.items()):
+                if torch.is_tensor(v) and v.is_floating_point():
+                    inputs[k] = v.to(device=model_device, dtype=torch.float64)
+        
+            # Make sure the positions tensor requires gradients (needed for autograd-based forces)
+            if position_key_found and torch.is_tensor(inputs[position_key_found]):
+                inputs[position_key_found].requires_grad_(True)
+        
+            # Do forward WITHOUT autocast; gradients must be enabled for force computation.
+            # NOTE: do NOT use torch.no_grad() here because the model uses autograd internally.
+            results = self.model(inputs)   # model computes energy + autograd-based forces
+        
+            # --- Extract predictions preserving FP64 precision ---
+            # energy: keep a numpy float64 array representation
+            energy_tensor = results["energy"].detach().cpu()
+            # Convert to 0-d or 1-d numpy array (we keep the array for UQ precision)
+            energy_np = np.asarray(energy_tensor.numpy(), dtype=np.float64)
+            # Also create a python scalar for legacy logging/formatting compatibility
+            # (safe conversion only if energy_np is scalar-like)
+            try:
+                energy_scalar = float(np.ravel(energy_np)[0])
+            except Exception:
+                energy_scalar = float(energy_np.item()) if hasattr(energy_np, "item") else float(energy_np.tolist()[0])
+        
+            # forces: detach to CPU and keep float64
             if "forces" in results:
-                 F_ml = results["forces"].float().detach().cpu().numpy().astype(np.float64)
+                F_ml = results["forces"].detach().cpu().numpy().astype(np.float64)
             else:
-                 F_ml = np.full((len(atoms), 3), np.nan) # Indicate failure
-                 print("Error: 'forces' key not found in model output during standard inference.")
+                F_ml = np.full((len(atoms), 3), np.nan)
+                print("Error: 'forces' key not found in model output during standard inference.")
+        
+            # latent handling unchanged, just keep types consistent
+            if self.latent is not None:
+                latent_per_atom_avg_np = self.latent.cpu().numpy().astype(np.float32)
+                latent_frame = np.sum(latent_per_atom_avg_np, axis=0).astype(np.float64)
+            else:
+                latent_frame = np.array([])
+                latent_per_atom_avg_np = None
+        
+            # Use both high-precision array and scalar for compatibility:
+            E_ml = energy_np       # high-precision numpy array (for UQ)
+            E_ml_scalar = energy_scalar  # python float for logs/backwards-compatible uses
+
+            # forces: detach to CPU and keep float64
+            if "forces" in results:
+                F_ml = results["forces"].detach().cpu().numpy().astype(np.float64)
+            else:
+                F_ml = np.full((len(atoms), 3), np.nan)
+                print("Error: 'forces' key not found in model output during standard inference.")
 
             sigma_energy = 0.0
             if self.latent is not None:
@@ -448,17 +499,24 @@ class MyTorchCalculator(Calculator):
         # --- End Coulomb ---
 
         # --- Store Results ---
-        self.results["energy"] = E_ml + E_ref + E_coul
-        self.results["forces"] = F_ml + F_coul # F_ml could be NaN if model failed
+        # Store both a high-precision numpy energy array (for UQ) and a scalar for legacy code/logging.
+        # E_ml is the numpy array; E_ml_scalar is the python float.
+        energy_total_np = np.asarray(E_ml, dtype=np.float64) + np.float64(E_ref) + np.float64(E_coul)
+        energy_total_scalar = float(np.ravel(energy_total_np)[0])
+        
+        self.results["energy_np"] = energy_total_np            # high-precision array (use this for UQ)
+        self.results["energy"] = energy_total_scalar           # legacy scalar for logs and formatting
+        self.results["forces"] = (np.asarray(F_ml, dtype=np.float64) + np.asarray(F_coul, dtype=np.float64))
         self.results["ml_time"] = ml_time
         self.results["coul_fn_time"] = coul_time
         self.results["calc_total_time"] = time.time() - calc_start
         self.results["sigma_energy"] = sigma_energy
         self.results["latent"] = latent_frame
         self.results["per_atom_latent"] = latent_per_atom_avg_np
-        self.results["E_ml_avg"] = E_ml
+        self.results["E_ml_avg"] = energy_total_np             # keep array average for downstream UQ if needed
         self.results["E_ref"] = E_ref
         self.results["coul_fn_energy"] = E_coul
+
 
     def __del__(self):
         """Ensures that the hook handle is removed upon deletion."""
@@ -469,6 +527,34 @@ class MyTorchCalculator(Calculator):
                 pass # Ignore errors during cleanup
 
 # --- Model Evaluation Function (Minimal Fixes) ---
+# --- safe scalarizer helper (place inside evaluate_model or module top) ---
+def _to_scalar(x):
+    """Return a Python float from x if possible.
+    Works for Python numbers, numpy scalars/0-d arrays, 1-D arrays (takes first element),
+    and torch tensors (takes item() if scalar or ravel()[0] if array-like).
+    """
+    import torch
+    try:
+        # torch tensors
+        if isinstance(x, torch.Tensor):
+            if x.numel() == 0:
+                return float("nan")
+            if x.numel() == 1:
+                return float(x.item())
+            return float(x.detach().cpu().numpy().ravel()[0])
+        # numpy and array-like
+        a = np.asarray(x)
+        if a.size == 0:
+            return float("nan")
+        # if it's already a scalar numpy type this cast will work
+        return float(a.ravel()[0])
+    except Exception:
+        try:
+            return float(x)
+        except Exception:
+            return float("nan")
+
+
 def evaluate_model(frames, true_energies, true_forces, model_obj, device, batch_size,
                    uq_method_flag, n_mc, eval_log_file, unique_mc_log_file, config, neighbor_list):
     """
@@ -482,6 +568,15 @@ def evaluate_model(frames, true_energies, true_forces, model_obj, device, batch_
         print(f"Error initializing MyTorchCalculator: {e_calc}")
         traceback.print_exc()
         return None, None, None, None, None  # Indicate failure
+
+    # ------------------------------------------------------------------
+    # SAFETY PATCH for PaiNN checkpoints trained with older schnetpack
+    import torch.nn as nn
+
+    rep = getattr(calc.model, "representation", None)
+    if rep is not None and not hasattr(rep, "electronic_embeddings"):
+        rep.electronic_embeddings = nn.ModuleList([])
+    # ------------------------------------------------------------------
 
     # Configure calculator for UQ
     if uq_method_flag == "dropout":
@@ -534,24 +629,42 @@ def evaluate_model(frames, true_energies, true_forces, model_obj, device, batch_
                 results = calc.results # Get results dictionary from calculator
 
                 # Append results, using .get for safety
-                batch_energies.append(results.get("energy", np.nan))
+                batch_energies.append(_to_scalar(results.get("energy", np.nan)))
                 batch_forces.append(results.get("forces", np.full((len(frame), 3), np.nan)))
                 batch_latents.append(results.get("latent")) # Frame average latent (could be None or np.array)
                 batch_per_atom_latents.append(results.get("per_atom_latent")) # Per-atom latent (could be None or np.array)
-                batch_sigmas.append(results.get("sigma_energy", 0.0)) # Energy std dev
+                batch_sigmas.append(_to_scalar(results.get("sigma_energy", 0.0)))
 
-                # Logging (using results directly)
+                # Logging (using results directly) - safe scalarized logging
                 if frame_idx_global == 0 or frame_idx_global == n_frames - 1:
+                    # true energy (coerce to float if possible)
                     true_e_val = float(true_energies[frame_idx_global]) if frame_idx_global < len(true_energies) else np.nan
-                    pred_e_val = results.get("energy", np.nan)
-                    e_ml = results.get("E_ml_avg", np.nan) # Get avg ML energy
-                    e_coul = results.get("coul_fn_energy", np.nan) # Get Coulomb energy
-                    step_time = results.get("calc_total_time", 0.0)
+
+                    # Prefer the scalar 'energy' for legacy logging; if missing, try energy_np
+                    pred_raw = results.get("energy", None)
+                    if pred_raw is None:
+                        pred_raw = results.get("energy_np", np.nan)
+
+                    # Safe conversion of prediction and other numeric fields
+                    pred_e_val = _to_scalar(pred_raw)
+                    e_ml_raw = results.get("E_ml_avg", np.nan)
+                    e_coul_raw = results.get("coul_fn_energy", np.nan)
+                    step_time_raw = results.get("calc_total_time", 0.0)
+                    ml_time_raw = results.get("ml_time", 0.0)
+                    coul_time_raw = results.get("coul_fn_time", 0.0)
+
+                    # Scalarize everything before formatting
+                    e_ml = _to_scalar(e_ml_raw)
+                    e_coul = _to_scalar(e_coul_raw)
+                    step_time = _to_scalar(step_time_raw)
+                    ml_time = _to_scalar(ml_time_raw)
+                    coul_time = _to_scalar(coul_time_raw)
+
                     energy_diff = pred_e_val - true_e_val if not (np.isnan(pred_e_val) or np.isnan(true_e_val)) else np.nan
 
                     try:
                         if not log_header_written and eval_log_file:
-                            header = ( # Corrected Header for clarity
+                            header = (
                                 f"{'Frame':>6s} | {'True Energy (eV)':>18s} | {'Pred Energy (eV)':>18s} | "
                                 f"{'Energy Diff (eV)':>15s} | {'E_ML_avg (eV)':>15s} | {'E_Coul (eV)':>12s} | "
                                 f"{'MLtime(s)':>10s} | {'CoulTime(s)':>10s} | {'StepTime(s)':>10s} | {'CumTime(s)':>10s}\n"
@@ -562,14 +675,15 @@ def evaluate_model(frames, true_energies, true_forces, model_obj, device, batch_
 
                         if eval_log_file:
                             with open(eval_log_file, "a") as elog:
-                                elog.write( # Corrected format string
+                                elog.write(
                                     f"{frame_idx_global:6d} | {true_e_val:18.6f} | {pred_e_val:18.6f} | "
                                     f"{energy_diff:15.6f} | {e_ml:15.6f} | {e_coul:12.6f} | "
-                                    f"{results.get('ml_time', 0.0):10.4f} | {results.get('coul_fn_time', 0.0):10.4f} | "
-                                    f"{step_time:10.4f} | {cum_eval_time + (time.time()-batch_start_time):10.4f}\n" # Log current cumulative time
+                                    f"{ml_time:10.4f} | {coul_time:10.4f} | "
+                                    f"{step_time:10.4f} | {cum_eval_time + (time.time()-batch_start_time):10.4f}\n"
                                 )
                     except IOError as log_e:
                         print(f"Warn: Log failed frame {frame_idx_global}: {log_e}")
+
 
         except Exception as e_batch_calc:
             print(f"Error calculating batch starting {batch_start}: {e_batch_calc}")
