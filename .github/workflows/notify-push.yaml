@@ -18,6 +18,7 @@ jobs:
           commit_message_single_line=$(printf "%s" "$commit_message" | tr '\n' ' ')
 
           commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          push_time=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
 
           payload=$(jq -n \
             --arg ref   "$GITHUB_REF_NAME" \
@@ -25,6 +26,7 @@ jobs:
             --arg url   "$commit_url" \
             --arg sha   "$short_sha" \
             --arg msg   "$commit_message_single_line" \
+            --arg time  "$push_time" \
             '{
               attachments: [{
                 color: "good",
@@ -33,7 +35,8 @@ jobs:
                   (":rocket: *New Push to Branch*: `"+$ref+"`"
                    + "\n:bust_in_silhouette: *Pushed by*: "+$actor
                    + "\n:link: *Commit*: <"+$url+"|`"+$sha+"`>"
-                   + "\n:memo: *Message*: `"+$msg+"`")
+                   + "\n:memo: *Message*: `"+$msg+"`"
+                   + "\n:clock3: *Time*: "+$time)
               }]
             }')
 
