@@ -347,17 +347,17 @@ def evaluate_and_cache_ensemble(frames,
             loaded_models.append(mdl)   
 
             # evaluate_model now returns latent_per_atom
-            pred_E, pred_F_per_frame, latent_per_frame, latent_per_atom, _ = evaluate_model(
+            pred_E, pred_F_per_frame, latent_per_frame, latent_per_atom = evaluate_model(
                 frames,
                 dummy_E,
                 dummy_F,
                 mdl,
                 device,
                 batch_size,
-                "ensemble",
-                1,
+#                "ensemble",
+#                1,
                 log_path,
-                None,
+#                None,
                 config,
                 neighbor_list,
             )
@@ -398,7 +398,7 @@ def evaluate_and_cache_ensemble(frames,
     # ------------------------------------------------------------------
     # 4. Stack & save (cast to float32 to shrink file size)
     # ------------------------------------------------------------------
-    arr_E      = np.stack(energy_list).astype(np.float32)          # (n_models, n_frames)
+    arr_E      = np.stack(energy_list).astype(np.float64)          # (n_models, n_frames)
     arr_F      = np.stack(force_list).astype(np.float32)           # (n_models, total_atoms, 3)
     arr_L      = np.stack(latent_list).astype(np.float32)          # (n_models, n_frames, latent_dim)
     arr_L_atom = np.stack(latent_atom_list).astype(np.float32)     # (n_models, total_atoms, latent_atom_dim)
@@ -557,17 +557,17 @@ def run_eval(config):
     all_latent = None
     all_peratom_latent = None
     if need_base and base_model:
-        pred_E, pred_F, all_latent, all_peratom_latent, _ = evaluate_model(
+        pred_E, pred_F, all_latent, all_peratom_latent = evaluate_model(
             all_frames,
             list(all_true_E),
             all_true_F,
             base_model,
             device,
             batch_size,
-            tag="none",
-            n_mc=1,
+#            tag="none",
+#            n_mc=1,
             log_path=eval_log,
-            unique_log=None,
+#            unique_log=None,
             config=config,
             neighbor_list=neighbour_list
         )
