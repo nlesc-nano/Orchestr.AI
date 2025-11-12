@@ -30,10 +30,10 @@ jobs:
                 color: "good",
                 mrkdwn_in: ["text"],
                 text:
-                  ("*New Push to Branch*: `"+$ref+"`"
-                   + "\nPushed by: *"+$actor+"*"
-                   + "\nCommit: <"+$url+"|`"+$sha+"`>"
-                   + "\nCommit Message: `"+$msg+"`")
+                  (":rocket: *New Push to Branch*: `"+$ref+"`"
+                   + "\n:bust_in_silhouette: *Pushed by*: "+$actor
+                   + "\n:link: *Commit*: <"+$url+"|`"+$sha+"`>"
+                   + "\n:memo: *Message*: `"+$msg+"`")
               }]
             }')
 
