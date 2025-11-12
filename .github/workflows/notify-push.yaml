@@ -1,0 +1,25 @@
+name: Notify on Push to dev_z
+on:
+  push:
+    branches: [dev_z]  # Later main
+jobs:
+  notify-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack (push to branch)
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$(cat <<EOF
+          {
+            "attachments": [
+              {
+                "color": "good",
+                "text": "*New Push to Branch*: \`$GITHUB_REF_NAME\`\nPushed by: *$GITHUB_ACTOR*\nCommit: \`$GITHUB_SHA\`\n<${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}|View Commit>"
+              }
+            ]
+          }
+          EOF
+          )" \
+            "$SLACK_WEBHOOK_URL"
