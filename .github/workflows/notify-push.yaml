@@ -10,13 +10,19 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.MLFF_SLACK_WEBHOOK_URL }}
         run: |
-          curl -X POST -H 'Content-type: application/json' \
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          commit_message=$(jq -r '.head_commit.message // "No commit message"' "$GITHUB_EVENT_PATH")
+          commit_message=$(printf "%s" "$commit_message" | tr '\n' ' ')
+
+          curl -sS -X POST -H 'Content-type: application/json' \
             --data "$(cat <<EOF
           {
             "attachments": [
               {
                 "color": "good",
-                "text": "*New Push to Branch*: \`$GITHUB_REF_NAME\`\nPushed by: *$GITHUB_ACTOR*\nCommit: \`$GITHUB_SHA\`\n<${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}|View Commit>"
+                "text": "*New Push to Branch*: \`$GITHUB_REF_NAME\`\\nPushed by: *$GITHUB_ACTOR*\\nCommit: <${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}|\\\`$short_sha\\\`>\\nCommit Message: \\\`$commit_message\\\`"
               }
             ]
           }
