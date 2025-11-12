@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Notify Slack (push to branch)
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.MLFF_SLACK_WEBHOOK_URL }}
         run: |
           curl -X POST -H 'Content-type: application/json' \
             --data "$(cat <<EOF
