@@ -18,7 +18,7 @@ jobs:
           commit_message_single_line=$(printf "%s" "$commit_message" | tr '\n' ' ')
 
           commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
-          push_time=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          push_time=$(TZ="Europe/Madrid" date +"%Y-%m-%d %H:%M:%S %Z")
 
           payload=$(jq -n \
             --arg ref   "$GITHUB_REF_NAME" \
