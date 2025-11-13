@@ -38,7 +38,7 @@ def consolidate_dataset(cfg: Dict):
     logger.info(f"[Consolidate] parsing {infile}…")
     # 2) Parse stacked XYZ
     E, P, F, atoms = parse_stacked_xyz(infile)
-    labels_full = np.arange(len(E))  # Or your group/label logic here
+    labels_full = np.arange(len(E))  
 
     n_frames = len(E)
     n_atoms  = len(atoms)
@@ -52,7 +52,7 @@ def consolidate_dataset(cfg: Dict):
     var_force = F.var(axis=(1,2))
     global_feats = np.vstack((E, avg_force, var_force)).T
 
-    # 5) Outlier stats
+    # 5) Outlier statistics and suggested thresholds
     force_stats = analyze_reference_forces(F, atoms)
     suggest_thresholds(force_stats)
 
@@ -64,7 +64,7 @@ def consolidate_dataset(cfg: Dict):
     raw_feats = np.hstack((global_feats, local_feats))
     feats     = StandardScaler().fit_transform(raw_feats)
 
-    # 8) IsolationForest filtering
+    # 8) Outlier detection via IsolationForest
     inliers_mask = detect_outliers(
         feats,
         contamination=cont,
