@@ -1,0 +1,33 @@
+name: dev_z Basic CI
+
+on:
+  push:
+    branches: [dev_z]
+
+jobs:
+  basic-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Conda (mlff env)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: mlff
+          environment-file: environment.yaml
+          python-version: "3.12"
+          auto-activate-base: false
+
+      - name: Install extra pip deps
+        shell: bash -l {0}
+        run: |
+          pip install --upgrade pip
+          pip install mace-torch==0.3.13
+          pip install -e .
+
+      - name: Smoke test – import mlff_qd
+        shell: bash -l {0}
+        run: |
+          python -c "import mlff_qd; print('Imported mlff_qd OK')"
