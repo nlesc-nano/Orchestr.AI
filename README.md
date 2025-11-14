@@ -1,5 +1,14 @@
 # MLFF_QD
-Machine Learning Force Fields for Quantum Dots platform. 🚀
+## Machine Learning Force Fields for Quantum Dots platform. 🚀
+
+**MLFF_QD** is a unified, modular, and engine‑agnostic framework for training state‑of‑the‑art machine learning force fields (MLFFs) for **quantum dots (QDs)**.  
+It integrates multiple ML engines under a single interface:
+
+✅ **SchNet**
+✅ **PaiNN**
+✅ **NequIP**
+✅ **Allegro**
+✅ **MACE**
 
 ## Installation
 For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
