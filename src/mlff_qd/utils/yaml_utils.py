@@ -34,6 +34,11 @@ KEY_MAPPINGS = {
         "loss.energy_weight": ["outputs.energy.loss_weight"],
         "loss.forces_weight": ["outputs.forces.loss_weight"],
         "data.input_xyz_file": ["data.dataset_path"],
+        "fine_tuning.pretrained_model": ["fine_tuning.pretrained_checkpoint"],
+        "fine_tuning.learning_rate": ["fine_tuning.lr"],
+        "fine_tuning.early_stopping_patience": ["fine_tuning.early_stopping_patience"],
+        "fine_tuning.freeze_backbone": ["fine_tuning.freeze_all_representation"],
+
     },
     "painn": {},  # Will inherit from schnet and apply patch in code
     "fusion": {}, # Will inherit from schnet and apply patch in code
@@ -657,6 +662,101 @@ def validate_mace_launch_policy(cfg: dict):
 
     logging.info("[MACE] Launch context OK: distributed=%s, world_size=%d", dist, ws)
 
+def handle_nequip_finetuning(engine_cfg, user_cfg):
+    """
+    Modifies the NequIP config structure in-memory to enable fine-tuning.
+    """
+    ft_cfg = user_cfg.get("fine_tuning", {})
+    
+    if not ft_cfg.get("enabled", False):
+        return engine_cfg
+
+    pretrained_path = ft_cfg.get("pretrained_model")
+    if not pretrained_path:
+        raise ValueError("[NequIP] Fine-tuning enabled but 'pretrained_model' is missing in input.yaml")
+
+    if "learning_rate" in ft_cfg:
+        # NequIP expects LR at training_module.optimizer.lr
+        if "training_module" in engine_cfg and "optimizer" in engine_cfg["training_module"]:
+            engine_cfg["training_module"]["optimizer"]["lr"] = ft_cfg["learning_rate"]
+
+    # Override Early Stopping (if specified)
+    if "early_stopping_patience" in ft_cfg:
+        callbacks = engine_cfg.get("trainer", {}).get("callbacks", [])
+        for cb in callbacks:
+            if "EarlyStopping" in cb.get("_target_", ""):
+                cb["patience"] = ft_cfg["early_stopping_patience"]
+
+    # Build the Modifier Block (The NequIP specific logic)
+    modifier_block = {
+        "modifier": "modify_PerTypeScaleShift",
+        "scales": "${training_data_stats:per_type_forces_rms}",
+        "shifts_trainable": True, 
+        "scales_trainable": True,
+    }
+    
+    # Handle custom shifts if provided (Need Fix)
+    if "per_species_shifts" in ft_cfg:
+        modifier_block["shifts"] = ft_cfg["per_species_shifts"]
+
+    # SMART LOADER: Check if it is a Checkpoint (.ckpt) or Package (.nequip/.pth)
+    path_str = str(pretrained_path).lower()
+    
+    if path_str.endswith(".ckpt"):
+        # It is a PyTorch Lightning checkpoint
+        model_loader = {
+            "_target_": "nequip.model.ModelFromCheckpoint",
+            "checkpoint_path": pretrained_path
+        }
+    else:
+        # Assume it is a deployed package (.nequip, .pth, .zip)
+        model_loader = {
+            "_target_": "nequip.model.ModelFromPackage",
+            "package_path": pretrained_path
+        }
+
+    new_model_structure = {
+        "_target_": "nequip.model.modify",
+        "modifiers": [modifier_block],
+        "model": model_loader
+    }
+
+    # Inject into the correct location in the dictionary
+    if "training_module" in engine_cfg and "model" in engine_cfg["training_module"]:
+        engine_cfg["training_module"]["model"] = new_model_structure
+    elif "model" in engine_cfg:
+        engine_cfg["model"] = new_model_structure
+    
+    return engine_cfg
+
+def handle_mace_finetuning(engine_cfg, user_cfg):
+    """
+    Injects MACE fine-tuning parameters (foundation_model) if enabled.
+    """
+    ft_cfg = user_cfg.get("fine_tuning", {})
+    
+    if not ft_cfg.get("enabled", False):
+        return engine_cfg
+
+    pretrained_path = ft_cfg.get("pretrained_model")
+    if not pretrained_path:
+        raise ValueError("[MACE] Fine-tuning enabled but 'pretrained_model' is missing.")
+    
+    # MACE expects this key to trigger transfer learning
+    engine_cfg["foundation_model"] = pretrained_path
+
+    # Overrides (LR, Patience)
+    if "learning_rate" in ft_cfg:
+        engine_cfg["lr"] = ft_cfg["learning_rate"]
+        
+    if "early_stopping_patience" in ft_cfg:
+        engine_cfg["patience"] = ft_cfg["early_stopping_patience"]
+
+    # MACE often benefits from explicit E0s="average" during fine-tuning 
+    if "E0s" not in engine_cfg:
+        engine_cfg["E0s"] = "average"
+
+    return engine_cfg
 
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # ---- Load configs
@@ -746,8 +846,11 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     if platform in ['nequip', 'allegro']:
         apply_autoddp(engine_cfg)
     elif platform == 'mace':
-        apply_mace_distributed_from_devices(user_cfg, engine_cfg)
+        apply_mace_distributed_from_devices(user_cfg, engine_cfg)    
+        # MACE Fine-Tuning 
+        engine_cfg = handle_mace_finetuning(engine_cfg, user_cfg)
+   # nequip and allegro Fine-Tuning 
+    if platform in ["nequip", "allegro"]:
+        engine_cfg = handle_nequip_finetuning(engine_cfg, user_cfg)
     
     return engine_cfg
-
-

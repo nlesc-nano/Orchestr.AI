@@ -15,9 +15,11 @@ from mlff_qd.training.training import run_schnet_training
 from mlff_qd.training.inference import run_schnet_inference
 from mlff_qd.utils.standardize_output import standardize_output
 from mlff_qd.utils.yaml_utils import get_dataset_paths_from_yaml
-
 from mlff_qd.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
-
+try:
+    from mlff_qd.fine_tuning.fine_tune import main as run_schnet_fine_tuning
+except ImportError:
+    run_schnet_fine_tuning = None
 
 def run_benchmark(args, scratch_dir):
     engines = ['schnet', 'painn', 'fusion', 'nequip', 'allegro', 'mace']
@@ -236,11 +238,28 @@ def main():
     if not (args.only_generate or (is_unified and not args.train_after_generate)):
         print(f"[INFO] Engine YAML generated at: {engine_yaml}")
         print(f"[INFO] Now starting training for {platform}...\n")
-        
+    
+    # Fine-tuning 
     try:
+        is_finetuning = user_yaml_dict.get("common", {}).get("fine_tuning", {}).get("enabled", False)
         if platform in ["schnet", "painn", "fusion"]:
-            run_schnet_training(engine_yaml)
-            run_schnet_inference(engine_yaml)
+        
+            if is_finetuning:
+                print(f"[CLI] Fine-tuning mode detected for {platform}.")
+                
+                if run_schnet_fine_tuning is None:
+                    raise ImportError("Could not import 'main' from mlff_qd.fine_tuning.fine_tune.")
+
+                # Create mock args because fine_tune.py expects args.config
+                class MockArgs:
+                    config = engine_yaml
+                
+                run_schnet_fine_tuning(MockArgs())
+                print(f"[CLI] Fine-tuning completed.")
+            else:
+                run_schnet_training(engine_yaml)
+                run_schnet_inference(engine_yaml)
+
         elif platform == "nequip":
             run_nequip_training(os.path.abspath(engine_yaml))
         elif platform == "mace":
