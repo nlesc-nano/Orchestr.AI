@@ -157,9 +157,8 @@ def get_num_atoms(filename):
     return num_atoms
     
     
-# ─────────────────────────────────────────────────────────────── #
-# Newer consolidated I/O helpers (moved from consolidate_ter.py)  #
-# ─────────────────────────────────────────────────────────────── #
+
+# Newer consolidated I/O helpers (moved from consolidate_ter.py)
 
 def save_to_npz(
     filename: str,
@@ -176,7 +175,7 @@ def save_to_npz(
     """
     N, A, _ = positions.shape
 
-    # ---- numeric arrays -------------------------------------------------
+    # numeric arrays
     R = np.asarray(positions, dtype=np.float32)          # (N,A,3)
     F = np.asarray(forces,    dtype=np.float32)          # (N,A,3)
 
@@ -190,7 +189,7 @@ def save_to_npz(
     if z.ndim != 1 or z.size != A:
         raise ValueError(f"atomic_numbers must be 1-D of length {A}, got {z.shape}")
 
-    # ---- assemble dict --------------------------------------------------
+    # assemble dict 
     base = {
         "type": "dataset",
         "name": os.path.splitext(os.path.basename(filename))[0],

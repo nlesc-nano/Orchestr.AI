@@ -13,7 +13,7 @@ def run_mace_training(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
         
-        # NEW: fail-fast validation (stop on mismatch)
+        # fail-fast validation (stop on mismatch)
         from mlff_qd.utils.yaml_utils import validate_mace_launch_policy
         validate_mace_launch_policy(config)
         

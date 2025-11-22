@@ -172,7 +172,7 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
 @timer
 def run_schnet_inference(config_file=None):
     if config_file is None:
-        args = parse_args()  # Use your helper function
+        args = parse_args()  
         config_file = args.config  # Get the config file path
         
     config = load_config(config_file)

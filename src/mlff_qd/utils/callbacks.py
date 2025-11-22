@@ -2,7 +2,7 @@ import sys
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
-# helper ----------------------------------------------------------------------
+# helper 
 def _tb_log(trainer, key, value, global_step=None):
     """Log to TensorBoard if the trainer has a TensorBoard logger."""
     if trainer.logger is None:
@@ -14,7 +14,7 @@ def _tb_log(trainer, key, value, global_step=None):
         else:  # text
             tb.add_text(key, str(value), global_step or trainer.global_step)
 
-# ② LR threshold --------------------------------------------------------------
+# LR threshold 
 class StopWhenLRBelow(pl.Callback):
     def __init__(self, threshold):
         self.threshold = threshold
@@ -28,7 +28,7 @@ class StopWhenLRBelow(pl.Callback):
             _tb_log(trainer, "early_stop_reason", reason)
             print(f"[StopWhenLRBelow] {reason}", flush=True)
 
-# ③ Accuracy target -----------------------------------------------------------
+# Accuracy target 
 class StopWhenGoodEnough(pl.Callback):
     def __init__(self, monitor, target):
         self.monitor, self.target = monitor, target
@@ -42,7 +42,7 @@ class StopWhenGoodEnough(pl.Callback):
             _tb_log(trainer, "early_stop_reason", reason)
             print(f"[StopWhenGoodEnough] {reason}", flush=True)
 
-# ① Early stopping with log ---------------------------------------------------
+# Early stopping with log 
 class EarlyStoppingWithLog(EarlyStopping):
     def on_validation_end(self, trainer, pl_module):
         super().on_validation_end(trainer, pl_module)

@@ -77,8 +77,8 @@ def run_benchmark(args, scratch_dir):
         shutil.copytree(standardized_src, engine_results_dir, dirs_exist_ok=True)
         shutil.rmtree(standardized_src)
         
-        # Extract metrics (use your extract logic here or from benchmark_mlff.py if separate)
-        engine_df = extract_metrics(engine_results_dir, engine, engine_cfg)  # Assume you have this function
+        # Extract metrics
+        engine_df = extract_metrics(engine_results_dir, engine, engine_cfg)
         results.append(engine_df)
     
     if results:
@@ -94,7 +94,7 @@ def parse_args():
     parser.add_argument("--input", help="Path to input XYZ file (overrides input_xyz_file in YAML)")
     parser.add_argument("--only-generate", action="store_true", help="Only generate engine YAML, do not run training")
     parser.add_argument("--train-after-generate", action="store_true", help="Generate engine YAML and immediately start training")
-    parser.add_argument("--benchmark", action="store_true", help="Run benchmarking across all engines")  # New flag
+    parser.add_argument("--benchmark", action="store_true", help="Run benchmarking across all engines") 
     parser.add_argument("--post-process", action="store_true", help="Post-process benchmark results and generate summary")
     return parser.parse_args()
 
@@ -142,7 +142,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
             "Either add the correct dataset path to your YAML or provide --input."
         )
            
-     # --- NEW: extension validation only, no conversion ---
+     # Input validation only, no conversion 
     data_path = validate_input_file(data_path, platform)
     
     # Patch original path back into config (no conversion)
@@ -153,8 +153,6 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     elif platform == "mace":
         config["train_file"] = data_path
     
-     # Normalize DDP keys before writing the YAML
-    # apply_autoddp(config)
     # Normalize engine-specific flags before writing the YAML
     if platform in ["nequip", "allegro"]:
         apply_autoddp(config)
@@ -183,11 +181,6 @@ def main():
 
     scratch_dir = os.environ.get("SCRATCH_DIR", tempfile.gettempdir())
     os.makedirs(scratch_dir, exist_ok=True)
-
-
-    # if args.benchmark:
-        # run_benchmark(args, scratch_dir)
-        # return
         
     if args.benchmark:
         run_benchmark(args, scratch_dir)

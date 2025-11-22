@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 def load_config_preproc(config_file=None):
     # If no config file is specified, use a default path relative to this script.
     if config_file is None:
-        # Adjust parents[...] as necessary based on your directory structure
         default_path = "preprocess_config.yaml"
         config_file = str(default_path)  # convert Path object to string if needed
 
