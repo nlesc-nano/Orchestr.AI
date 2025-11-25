@@ -48,9 +48,10 @@ KEY_MAPPINGS = {
         "model.n_rbf": ["training_module.model.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
         "model.chemical_symbols": [
-            "chemical_symbols",  # root-level in template
+            "model_type_names",  # root-level in template
+            "chemical_species",
             "training_module.model.type_names",
-            "data.transforms[1].chemical_symbols",
+            "data.transforms[0].model_type_names",
             "training_module.model.pair_potential.chemical_species"
         ],
         "model.parity": ["training_module.model.parity"],
@@ -58,7 +59,8 @@ KEY_MAPPINGS = {
         "training.seed": ["data.seed", "training_module.model.seed"],
         "training.batch_size": [
             "data.train_dataloader.batch_size",
-            "data.val_dataloader.batch_size"
+            "data.val_dataloader.batch_size",
+            "data.stats_manager.dataloader_kwargs.batch_size"
         ],
         "training.epochs": ["trainer.max_epochs"],
         "training.learning_rate": ["training_module.optimizer.lr"],
@@ -84,15 +86,16 @@ KEY_MAPPINGS = {
     },
     
     "allegro": {
-        "model.cutoff": ["training_module.model.r_max"],
+        "model.cutoff": ["cutoff_radius", "training_module.model.r_max"],
         "model.mp_layers": ["training_module.model.num_layers"],
-        "model.features": ["training_module.model.num_scalar_features"],  # Allegro: num_scalar_features
+        "model.features": ["num_scalar_features", "training_module.model.num_scalar_features"], 
         "model.n_rbf": ["training_module.model.radial_chemical_embed.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
         "model.chemical_symbols": [
-            "chemical_symbols",
+            "model_type_names",  # root-level in template
+            "chemical_species",
             "training_module.model.type_names",
-            "data.transforms[1].chemical_symbols",
+            "data.transforms[1].model_type_names",
             "training_module.model.pair_potential.chemical_species"
         ],
         "model.parity": ["training_module.model.parity"],
@@ -100,7 +103,8 @@ KEY_MAPPINGS = {
         "training.seed": ["data.seed", "training_module.model.seed"],
         "training.batch_size": [
             "data.train_dataloader.batch_size",
-            "data.val_dataloader.batch_size"
+            "data.val_dataloader.batch_size",
+            "data.stats_manager.dataloader_kwargs.batch_size"
         ],
         "training.epochs": ["trainer.max_epochs"],
         "training.learning_rate": ["training_module.optimizer.lr"],

@@ -28,7 +28,7 @@ To set up the conda environment, use the provided `environment.yaml` file. Once 
 ```bash
 conda env create -f environment.yaml
 conda activate mlff
-pip install mace-torch==0.3.13
+pip install mace-torch==0.3.14
 ```
 ####  Install the mlff_qd package
 Finally, install the package in editable mode:
