@@ -15,7 +15,7 @@ def main():
     cfg = load_config_preproc(args.config)
     logger.info(f"Loaded config: {args.config}")
 
-    # --- Resolve dataset input: use input_file if present; otherwise build it from pos/frc via compact step ---
+    # Resolve dataset inputs: prefer input_file; otherwise construct stacked XYZ from pos/frc.
     ds = cfg.get("dataset", {})
     input_file = ds.get("input_file")
     pos_file   = ds.get("pos_file")
@@ -29,7 +29,7 @@ def main():
             logger.info(f"No dataset.input_file given; building stacked XYZ via compact step using pos={pos_file}, frc={frc_file}")
             create_stacked_xyz(pos_file, frc_file, out_hartree, out_ev)
             
-            # write back into cfg so consolidate_ter uses it transparently
+            # Update config so consolidation uses the generated XYZ file.
             cfg.setdefault("dataset", {})["input_file"] = out_ev
             logger.info(f"Set dataset.input_file to: {out_ev}")
         else:

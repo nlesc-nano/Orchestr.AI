@@ -12,5 +12,5 @@ dependencies:
   - pip:
       - schnetpack
       - dscribe
-      - nequip==0.10.0
-      - git+https://github.com/mir-group/allegro.git@v0.6.1
+      - nequip==0.16.0
+      - git+https://github.com/mir-group/allegro.git@v0.8.0

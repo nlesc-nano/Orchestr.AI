@@ -139,7 +139,7 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     for d in standardized_dirs.values():
         os.makedirs(d, exist_ok=True)
 
-    # ---- Always copy the YAML file actually used for this run ----
+    # Always copy the YAML file actually used for this run
     if config_yaml_path and os.path.exists(config_yaml_path):
         dst = os.path.join(standardized_dirs["engine_yaml"], os.path.basename(config_yaml_path))
         shutil.copy(config_yaml_path, dst)
@@ -191,10 +191,6 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
         for ckpt_file in glob.glob(os.path.join(results_dir, "*.ckpt")):
             move_if_exists(ckpt_file, standardized_dirs["checkpoints"])
 
-        # Move checkpoints (.ckpt) from results/
-        #move_if_exists(os.path.join(results_dir, "best.ckpt"), standardized_dirs["checkpoints"])
-        #move_if_exists(os.path.join(results_dir, "last.ckpt"), standardized_dirs["checkpoints"])
-        
         # Move lightning logs (tutorial_log/version_0) from results/
         tutorial_log = os.path.join(results_dir, "tutorial_log")
         if os.path.exists(tutorial_log):

@@ -1,55 +1,64 @@
 run: [train, val, test]
 
-cutoff_radius: 12.0
+cutoff_radius: 5.0
 
-chemical_symbols: [Cd, Cl, Se] 
-model_type_names: ${chemical_symbols}
+num_layers: 4 
+l_max: 1   
+num_features: 32
+
+model_type_names: [C, H, O, Cu]
+chemical_species: ${model_type_names}
+
+monitored_metric: val0_epoch/weighted_sum
+
 
 data:
   _target_: nequip.data.datamodule.ASEDataModule
   seed: 456             # dataset seed for reproducibility
-  
+
   split_dataset:
-    file_path:   #./basic_consolidated_dataset_1000CdSe.xyz
+    file_path: fcu.xyz
     train: 0.8
     val: 0.1
     test: 0.1
-
+  
   transforms:
+    - _target_: nequip.data.transforms.ChemicalSpeciesToAtomTypeMapper
+      model_type_names: ${model_type_names}
+
     - _target_: nequip.data.transforms.NeighborListTransform
       r_max: ${cutoff_radius}
 
-    - _target_: nequip.data.transforms.ChemicalSpeciesToAtomTypeMapper
-      chemical_symbols: ${chemical_symbols}
 
   train_dataloader:
     _target_: torch.utils.data.DataLoader
-    batch_size: 16
+    batch_size: 5
     num_workers: 5
     shuffle: true
   val_dataloader:
     _target_: torch.utils.data.DataLoader
-    batch_size: 16
-    num_workers: ${data.train_dataloader.num_workers}  # we want to use the same num_workers -- variable interpolation helps
-  test_dataloader: ${data.val_dataloader}  # variable interpolation comes in handy again
+    batch_size: 10
+    num_workers: ${data.train_dataloader.num_workers}  
+  test_dataloader: ${data.val_dataloader} 
 
   stats_manager:
     _target_: nequip.data.CommonDataStatisticsManager
-
     dataloader_kwargs:
-      batch_size: 16
+      batch_size: 10
 
     type_names: ${model_type_names}
 
+
 trainer:
   _target_: lightning.Trainer
-  accelerator: auto
+  accelerator: gpu
   devices: 1    # NO of GPUs
   enable_checkpointing: true
-  max_epochs: 3
+  max_epochs: 1000
   max_time: 03:00:00:00
   check_val_every_n_epoch: 1  # how often to validate
-  log_every_n_steps: 1       # how often to log
+  log_every_n_steps: 20       # how often to log
+
 
   logger:
     - _target_: lightning.pytorch.loggers.TensorBoardLogger
@@ -59,17 +68,18 @@ trainer:
       default_hp_metric: false
 
   callbacks:
+
     - _target_: lightning.pytorch.callbacks.EarlyStopping
-      monitor: val0_epoch/weighted_sum        # validation metric to monitor
+      monitor: ${monitored_metric}            # validation metric to monitor
       min_delta: 1e-3                         # how much to be considered a "change"
       patience: 20                            # how many instances of "no change" before stopping
 
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
-      monitor: val0_epoch/weighted_sum        # validation metric to monitor
-      dirpath: ./results    
-      filename: best                          # best.ckpt is the checkpoint name
-      save_last: true                         # last.ckpt will be saved
-      
+      monitor: ${monitored_metric}            # validation metric to monitor
+      dirpath: ${hydra:runtime.output_dir}    # use hydra output directory
+      filename: best                          # `best.ckpt` is the checkpoint name
+      save_last: true                         # `last.ckpt` will be saved
+
     - _target_: lightning.pytorch.callbacks.LearningRateMonitor
       logging_interval: epoch
 
@@ -82,22 +92,24 @@ training_module:
     _target_: nequip.train.EnergyForceLoss
     per_atom_energy: true
     coeffs:
-      total_energy: 0.05
-      forces: 0.95
+      total_energy: 1.0
+      forces: 1.0
 
   val_metrics:
     _target_: nequip.train.EnergyForceMetrics
     coeffs:
       total_energy_mae: 1.0
       forces_mae: 1.0
-      # keys `total_energy_rmse` and `forces_rmse`, `per_atom_energy_rmse` and `per_atom_energy_mae` are also available
+
 
   train_metrics: ${training_module.val_metrics}  # use variable interpolation
   test_metrics: ${training_module.val_metrics}  # use variable interpolation
 
+
   optimizer:
     _target_: torch.optim.Adam
-    lr: 0.03
+    lr: 0.01
+
 
   lr_scheduler:
     scheduler:
@@ -106,29 +118,36 @@ training_module:
       patience: 5
       threshold: 0.2
       min_lr: 1e-6
-    monitor: val0_epoch/weighted_sum
+    monitor: ${monitored_metric}
     interval: epoch
     frequency: 1
 
+
   model:
     _target_: nequip.model.NequIPGNNModel
+    
+    # compile_mode: compile
 
     seed: 456
     model_dtype: float32
     type_names: ${model_type_names}
     r_max: ${cutoff_radius}
 
+
     num_bessels: 8                # number of basis functions used in the radial Bessel basis, the default of 8 usually works well
     bessel_trainable: false       # set true to train the bessel weights (default false)
     polynomial_cutoff_p: 6        # p-exponent used in polynomial cutoff function, smaller p corresponds to stronger decay with distance
 
-    num_layers: 3       # number of interaction blocks, we find 3-5 to work best
-    l_max: 1            # the maximum irrep order (rotation order) for the network's features, l=1 is a good default, l=2 is more accurate but slower
-    parity: true        # whether to include features with odd mirror parity; often turning parity off gives equally good results but faster networks, so do consider this
-    num_features: 32    # the multiplicity of the features, 32 is a good default for accurate network, if you want to be more accurate, go larger, if you want to be faster, go lower
+    num_layers: ${num_layers}      # number of interaction blocks, we find 3-5 to work best
+    l_max: ${l_max}                # the maximum irrep order (rotation order) for the network's features, l=1 is a good default, l=2 is more accurate but slower
+    parity: true                   # whether to include features with odd mirror parity; often turning parity off gives equally good results but faster networks, so do consider this
+    num_features: ${num_features}  # the multiplicity of the features, 32 is a good default for accurate network, if you want to be more accurate, go larger, if you want to be faster, go lower
 
-    radial_mlp_depth: 2         # number of radial layers, usually 1-3 works best, smaller is faster
-    radial_mlp_width: 64        # number of hidden neurons in radial function, smaller is faster
+
+
+    radial_mlp_depth: 2            # number of radial layers, usually 1-3 works best, smaller is faster
+    radial_mlp_width: 64           # number of hidden neurons in radial function, smaller is faster
+
 
     avg_num_neighbors: ${training_data_stats:num_neighbors_mean}
 
@@ -137,10 +156,8 @@ training_module:
     per_type_energy_scales_trainable: false
     per_type_energy_shifts_trainable: false
 
+
     pair_potential:
       _target_: nequip.nn.pair_potential.ZBL
-      units: metal     # Ang and kcal/mol, LAMMPS unit names;  allowed values "metal" and "real"
-      chemical_species: ${chemical_symbols}   # must tell ZBL the chemical species of the various model atom types
-
-global_options:
-  allow_tf32: false
+      units: metal     # Ang and kcal/mol; LAMMPS unit names;  allowed values "metal" and "real"
+      chemical_species: ${chemical_species}   # must tell ZBL the chemical species of the various model atom types

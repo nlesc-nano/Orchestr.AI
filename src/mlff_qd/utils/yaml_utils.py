@@ -3,7 +3,6 @@ import os
 import logging
 from copy import deepcopy
 
-# ======== KEY MAPPINGS =========
 KEY_MAPPINGS = {
     "schnet": {
         "model.cutoff": ["model.cutoff"],
@@ -34,9 +33,14 @@ KEY_MAPPINGS = {
         "loss.energy_weight": ["outputs.energy.loss_weight"],
         "loss.forces_weight": ["outputs.forces.loss_weight"],
         "data.input_xyz_file": ["data.dataset_path"],
+        "fine_tuning.pretrained_model": ["fine_tuning.pretrained_checkpoint"],
+        "fine_tuning.learning_rate": ["fine_tuning.lr"],
+        "fine_tuning.early_stopping_patience": ["fine_tuning.early_stopping_patience"],
+        "fine_tuning.freeze_backbone": ["fine_tuning.freeze_all_representation"],
+
     },
-    "painn": {},  # Will inherit from schnet and apply patch in code
-    "fusion": {}, # Will inherit from schnet and apply patch in code
+    "painn": {},  
+    "fusion": {},
     "nequip": {
         "model.cutoff": ["training_module.model.r_max"],
         "model.mp_layers": ["training_module.model.num_layers"],
@@ -44,9 +48,10 @@ KEY_MAPPINGS = {
         "model.n_rbf": ["training_module.model.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
         "model.chemical_symbols": [
-            "chemical_symbols",  # root-level in template
+            "model_type_names",  # root-level in template
+            "chemical_species",
             "training_module.model.type_names",
-            "data.transforms[1].chemical_symbols",
+            "data.transforms[0].model_type_names",
             "training_module.model.pair_potential.chemical_species"
         ],
         "model.parity": ["training_module.model.parity"],
@@ -54,12 +59,13 @@ KEY_MAPPINGS = {
         "training.seed": ["data.seed", "training_module.model.seed"],
         "training.batch_size": [
             "data.train_dataloader.batch_size",
-            "data.val_dataloader.batch_size"
+            "data.val_dataloader.batch_size",
+            "data.stats_manager.dataloader_kwargs.batch_size"
         ],
         "training.epochs": ["trainer.max_epochs"],
         "training.learning_rate": ["training_module.optimizer.lr"],
         "training.optimizer": ["training_module.optimizer._target_"],
-        "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],  # Or ...scheduler.type if you use a string
+        "training.scheduler": ["training_module.lr_scheduler.scheduler._target_"],
         "training.scheduler.factor": ["training_module.lr_scheduler.scheduler.factor"],
         "training.scheduler.patience": ["training_module.lr_scheduler.scheduler.patience"],
         "training.num_workers": ["data.train_dataloader.num_workers", "data.val_dataloader.num_workers"],
@@ -80,15 +86,16 @@ KEY_MAPPINGS = {
     },
     
     "allegro": {
-        "model.cutoff": ["training_module.model.r_max"],
+        "model.cutoff": ["cutoff_radius", "training_module.model.r_max"],
         "model.mp_layers": ["training_module.model.num_layers"],
-        "model.features": ["training_module.model.num_scalar_features"],  # Allegro: num_scalar_features
+        "model.features": ["num_scalar_features", "training_module.model.num_scalar_features"], 
         "model.n_rbf": ["training_module.model.radial_chemical_embed.num_bessels"],
         "model.l_max": ["training_module.model.l_max"],
         "model.chemical_symbols": [
-            "chemical_symbols",
+            "model_type_names",  # root-level in template
+            "chemical_species",
             "training_module.model.type_names",
-            "data.transforms[1].chemical_symbols",
+            "data.transforms[1].model_type_names",
             "training_module.model.pair_potential.chemical_species"
         ],
         "model.parity": ["training_module.model.parity"],
@@ -96,7 +103,8 @@ KEY_MAPPINGS = {
         "training.seed": ["data.seed", "training_module.model.seed"],
         "training.batch_size": [
             "data.train_dataloader.batch_size",
-            "data.val_dataloader.batch_size"
+            "data.val_dataloader.batch_size",
+            "data.stats_manager.dataloader_kwargs.batch_size"
         ],
         "training.epochs": ["trainer.max_epochs"],
         "training.learning_rate": ["training_module.optimizer.lr"],
@@ -191,7 +199,7 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
     if platform in {"schnet", "painn", "fusion"}:
         dp = cfg.get("data", {}).get("dataset_path")
         if dp: paths.append(_resolve_path(yaml_dir, dp))
-        # optional extras if you use them:
+
         for k in ("val_dataset_path", "test_dataset_path"):
             p = cfg.get("data", {}).get(k)
             if p: paths.append(_resolve_path(yaml_dir, p))
@@ -222,7 +230,6 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
 for plat in ["painn", "fusion"]:
     KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
-# ======= EARLY STOPPING HELPERS =======
 def get_early_stopping_monitor(platform):
     if platform in ["schnet", "painn", "fusion"]:
         return "val_loss"
@@ -389,7 +396,6 @@ def smart_round(x, ndigits=4):
     return round(float(x), ndigits)
 
 def adjust_splits_for_engine(train_size, val_size, test_size, platform):
-    # Handle omitted/None as 0 for test
     if test_size is None:
         test_size = 0.0
     total = train_size + val_size + test_size
@@ -454,7 +460,7 @@ def apply_overrides_with_common_check(
         full_path = parent_path + tuple(key_parts)
         dot_key = ".".join(full_path)
             
-        # --- 1. Handle EarlyStopping: skip override if common section has it! ---
+        # Handle EarlyStopping: skip override if common section has it!
         if (
             dot_key.startswith("training.early_stopping")
             or dot_key.startswith("callbacks")
@@ -474,24 +480,23 @@ def apply_overrides_with_common_check(
             )
             continue
             
-        # --- 2. Check if this override key is set from the common section (directly or via key mapping) ---
-        # Check if this key is already set in common via KEY_MAPPINGS
+        # Check if this override key is set from the common section (directly or via key mapping)
         if path_is_set_from_common(flat_common, key_mapping, dot_key):
             logging.warning(f"[OVERRIDE WARNING] Key {dot_key} already set from common section; ignoring expert override.")
             continue
 
-        # --- 3. If value is a dict, recurse (only if it's not a dot path, which can't be a dict) ---
+        # If value is a dict, recurse (only if it's not a dot path, which can't be a dict)
         if isinstance(v, dict) and len(key_parts) == 1:
             engine_cfg.setdefault(k, {})
             tmpl_sub = template.get(k, {}) if isinstance(template, dict) else {}
             apply_overrides_with_common_check(engine_cfg[k], v, tmpl_sub, flat_common, key_mapping, parent_path + (k,))
             continue
 
-        # --- 4. List-style keys (handled by set_nested already) ---
+        # List-style keys (handled by set_nested already)
         if any("[" in part and part.endswith("]") for part in key_parts):
             pass  # The code below already handles list-style keys
 
-        # --- 5. Check if this key exists in the template ---
+        # Check if this key exists in the template
         tmpl_ptr = template
         is_in_template = True
         for part in full_path:
@@ -516,17 +521,17 @@ def apply_overrides_with_common_check(
             logging.warning(f"[OVERRIDE WARNING] Key {dot_key} not present in template! Skipping.")
             continue
 
-        # --- 6. Apply the override ---
+        # Apply the override
         set_nested(engine_cfg, list(full_path), v)
         logging.info(f"[OVERRIDE INFO] Key {dot_key} set by expert override (value: {v!r}).")
 
 def warn_unused_common_keys(user_cfg, platform):
-    # 1. Flatten user config
+    # Flatten user config
     flat_common = flatten_dict(user_cfg)
-    # 2. Get mapped keys for platform
+    # Get mapped keys for platform
     key_mapping = KEY_MAPPINGS[platform]
     mapped_keys = set(key_mapping.keys())
-    # 3. Unused keys: in flat_common but not in mapping
+    # Unused keys: in flat_common but not in mapping
     unused_keys = [k for k in flat_common if k not in mapped_keys]
     if unused_keys:
         logging.info(
@@ -604,7 +609,6 @@ def apply_mace_distributed_from_devices(user_cfg: dict, engine_cfg: dict):
     if devv is None:
         return  # unified didn't specify devices; leave engine_cfg['distributed'] untouched
     try:
-        # reuse your existing helper
         n = _int_or_len_devices(devv)
     except NameError:
         try:
@@ -657,20 +661,110 @@ def validate_mace_launch_policy(cfg: dict):
 
     logging.info("[MACE] Launch context OK: distributed=%s, world_size=%d", dist, ws)
 
+def handle_nequip_finetuning(engine_cfg, user_cfg):
+    """
+    Modifies the NequIP config structure in-memory to enable fine-tuning.
+    """
+    ft_cfg = user_cfg.get("fine_tuning", {})
+    
+    if not ft_cfg.get("enabled", False):
+        return engine_cfg
+
+    pretrained_path = ft_cfg.get("pretrained_model")
+    if not pretrained_path:
+        raise ValueError("[NequIP] Fine-tuning enabled but 'pretrained_model' is missing in input.yaml")
+
+    if "learning_rate" in ft_cfg:
+        # NequIP expects LR at training_module.optimizer.lr
+        if "training_module" in engine_cfg and "optimizer" in engine_cfg["training_module"]:
+            engine_cfg["training_module"]["optimizer"]["lr"] = ft_cfg["learning_rate"]
+
+    # Override Early Stopping (if specified)
+    if "early_stopping_patience" in ft_cfg:
+        callbacks = engine_cfg.get("trainer", {}).get("callbacks", [])
+        for cb in callbacks:
+            if "EarlyStopping" in cb.get("_target_", ""):
+                cb["patience"] = ft_cfg["early_stopping_patience"]
+
+    # Build the Modifier Block (The NequIP specific logic)
+    modifier_block = {
+        "modifier": "modify_PerTypeScaleShift",
+        "scales": "${training_data_stats:per_type_forces_rms}",
+        "shifts_trainable": True, 
+        "scales_trainable": True,
+    }
+    
+    # Handle custom shifts if provided (Need Fix)
+    if "per_species_shifts" in ft_cfg:
+        modifier_block["shifts"] = ft_cfg["per_species_shifts"]
+
+    path_str = str(pretrained_path).lower()
+    
+    if path_str.endswith(".ckpt"):
+        model_loader = {
+            "_target_": "nequip.model.ModelFromCheckpoint",
+            "checkpoint_path": pretrained_path
+        }
+    else:
+        model_loader = {
+            "_target_": "nequip.model.ModelFromPackage",
+            "package_path": pretrained_path
+        }
+
+    new_model_structure = {
+        "_target_": "nequip.model.modify",
+        "modifiers": [modifier_block],
+        "model": model_loader
+    }
+
+    # Inject into the correct location in the dictionary
+    if "training_module" in engine_cfg and "model" in engine_cfg["training_module"]:
+        engine_cfg["training_module"]["model"] = new_model_structure
+    elif "model" in engine_cfg:
+        engine_cfg["model"] = new_model_structure
+    
+    return engine_cfg
+
+def handle_mace_finetuning(engine_cfg, user_cfg):
+    """
+    Injects MACE fine-tuning parameters (foundation_model) if enabled.
+    """
+    ft_cfg = user_cfg.get("fine_tuning", {})
+    
+    if not ft_cfg.get("enabled", False):
+        return engine_cfg
+
+    pretrained_path = ft_cfg.get("pretrained_model")
+    if not pretrained_path:
+        raise ValueError("[MACE] Fine-tuning enabled but 'pretrained_model' is missing.")
+    
+    engine_cfg["foundation_model"] = pretrained_path
+
+    if "learning_rate" in ft_cfg:
+        engine_cfg["lr"] = ft_cfg["learning_rate"]
+        
+    if "early_stopping_patience" in ft_cfg:
+        engine_cfg["patience"] = ft_cfg["early_stopping_patience"]
+
+    # MACE often benefits from explicit E0s="average" during fine-tuning 
+    if "E0s" not in engine_cfg:
+        engine_cfg["E0s"] = "average"
+
+    return engine_cfg
 
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
-    # ---- Load configs
+    # Load configs
     user_cfg, config = extract_common_config(master_yaml_path)
     user_cfg = preprocess_optimizer(user_cfg)
 
-    # --- Data splits ---
+    # Data splits
     training_cfg = user_cfg.get("training", {})
     train_size = training_cfg.get("train_size", 0.8)
     val_size   = training_cfg.get("val_size", 0.2)
     test_size  = training_cfg.get("test_size", 0.0)
     train_size, val_size, test_size = adjust_splits_for_engine(train_size, val_size, test_size, platform)
 
-    # -- Find input_xyz_file --
+    # Find input_xyz_file 
     input_xyz_file = None
     if "data" in user_cfg and "input_xyz_file" in user_cfg["data"]:
         input_xyz_file = user_cfg["data"]["input_xyz_file"]
@@ -681,10 +775,10 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     if not input_xyz_file or not os.path.exists(input_xyz_file):
         raise ValueError(f"Input XYZ file not found: {input_xyz_file}")
 
-    # --- NEW: extension validation only, no conversion ---
+    # extension validation only, no conversion
     input_xyz_file = validate_input_file(input_xyz_file, platform)
 
-    # -- Prepare template and mapping as before --
+    # Prepare template and mapping as before
     engine_base = load_template(platform)
     engine_cfg = deepcopy(engine_base)
     apply_key_mapping(user_cfg, engine_cfg, KEY_MAPPINGS[platform])
@@ -694,7 +788,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
         set_nested(engine_cfg, p.split("."), input_xyz_file)
 
-    # --- Patch split sizes
+    # Patch split sizes
     if platform in ["nequip", "allegro"]:
         set_nested(engine_cfg, ["data", "split_dataset", "train"], smart_round(train_size))
         set_nested(engine_cfg, ["data", "split_dataset", "val"], smart_round(val_size))
@@ -704,7 +798,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         set_nested(engine_cfg, ["training", "num_val"], smart_round(val_size))
         set_nested(engine_cfg, ["training", "num_test"], smart_round(test_size))
 
-    # --- Special patches
+    # Special patches
     handle_pair_potential(user_cfg, engine_cfg, platform)
     if platform == "painn":
         engine_cfg["model"]["model_type"] = "painn"
@@ -718,7 +812,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
 
     engine_cfg = prune_to_template(engine_cfg, engine_base)
 
-    # ... Handle overrides section
+    # Handle overrides section
     flat_common = flatten_dict(user_cfg)
     if "overrides" in config and platform in config["overrides"]:
         overrides = config["overrides"][platform]
@@ -731,7 +825,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         engine_cfg["valid_file"] = None
         engine_cfg["test_file"] = None
         
-    # --- EarlyStopping logic
+    # EarlyStopping logic
     apply_early_stopping(user_cfg, engine_cfg, platform, KEY_MAPPINGS[platform])
 
     # Patch for test_size=0 (after splits adjusted)
@@ -746,8 +840,11 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     if platform in ['nequip', 'allegro']:
         apply_autoddp(engine_cfg)
     elif platform == 'mace':
-        apply_mace_distributed_from_devices(user_cfg, engine_cfg)
+        apply_mace_distributed_from_devices(user_cfg, engine_cfg)    
+        # MACE Fine-Tuning 
+        engine_cfg = handle_mace_finetuning(engine_cfg, user_cfg)
+   # nequip and allegro Fine-Tuning 
+    if platform in ["nequip", "allegro"]:
+        engine_cfg = handle_nequip_finetuning(engine_cfg, user_cfg)
     
     return engine_cfg
-
-

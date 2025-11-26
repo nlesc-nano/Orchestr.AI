@@ -347,17 +347,17 @@ def evaluate_and_cache_ensemble(frames,
             loaded_models.append(mdl)   
 
             # evaluate_model now returns latent_per_atom
-            pred_E, pred_F_per_frame, latent_per_frame, latent_per_atom, _ = evaluate_model(
+            pred_E, pred_F_per_frame, latent_per_frame, latent_per_atom = evaluate_model(
                 frames,
                 dummy_E,
                 dummy_F,
                 mdl,
                 device,
                 batch_size,
-                "ensemble",
-                1,
+#                "ensemble",
+#                1,
                 log_path,
-                None,
+#                None,
                 config,
                 neighbor_list,
             )
@@ -398,7 +398,7 @@ def evaluate_and_cache_ensemble(frames,
     # ------------------------------------------------------------------
     # 4. Stack & save (cast to float32 to shrink file size)
     # ------------------------------------------------------------------
-    arr_E      = np.stack(energy_list).astype(np.float32)          # (n_models, n_frames)
+    arr_E      = np.stack(energy_list).astype(np.float64)          # (n_models, n_frames)
     arr_F      = np.stack(force_list).astype(np.float32)           # (n_models, total_atoms, 3)
     arr_L      = np.stack(latent_list).astype(np.float32)          # (n_models, n_frames, latent_dim)
     arr_L_atom = np.stack(latent_atom_list).astype(np.float32)     # (n_models, total_atoms, latent_atom_dim)
@@ -462,10 +462,10 @@ def run_eval(config):
     percentile_gamma   = eval_cfg.get("percentile_gamma", 90.0) 
     percentile_F_low   = eval_cfg.get("percentile_F_low", 95.0) 
     percentile_F_hi    = eval_cfg.get("percentile_F_hi", 99.0) 
-    thr_sE_atom   = eval_cfg.get("thr_sE_atom", 0.002)  # eV/atom  (2 meV/atom)
-    thr_sF_mean   = eval_cfg.get("thr_sF_mean", 0.10)   # eV/Å
-    thr_sF_max    = eval_cfg.get("thr_sF_max", 0.20)    # eV/Å
-    thr_Fmax_mult = eval_cfg.get("thr_Fmax_mult", 1.5)  # × max |F| in TRAIN
+    thr_sE_atom        = eval_cfg.get("thr_sE_atom", 0.002)  # eV/atom  (2 meV/atom)
+    thr_sF_mean        = eval_cfg.get("thr_sF_mean", 0.10)   # eV/Å
+    thr_sF_max         = eval_cfg.get("thr_sF_max", 0.20)    # eV/Å
+    thr_Fmax_mult      = eval_cfg.get("thr_Fmax_mult", 1.5)  # × max |F| in TRAIN
     neighbour_list     = setup_neighbor_list(config)
 
     # disable validation AL if pool is present
@@ -498,15 +498,39 @@ def run_eval(config):
         except Exception as e:
             print(f"Purge error: {e}. Continuing with full validation set.")
 
-    all_frames    = train_frames + val_frames
-    all_true_E    = np.array(train_E + val_E)
-    all_true_F    = train_F + val_F
+    all_frames      = train_frames + val_frames
+    all_true_E      = np.array(train_E + val_E)
+    all_true_F      = train_F + val_F
+    all_true_F_list = train_F + val_F
 
     n_train = len(train_frames)
     n_val   = len(val_frames)
     train_mask = np.array([True]*n_train + [False]*n_val, dtype=bool)
     val_mask   = np.array([False]*n_train + [True]*n_val, dtype=bool)
     print(f"Total frames: {len(all_frames)} (train={n_train}, val={n_val})")
+
+    # --- convenience indices available downstream (avoid UnboundLocal issues) ---
+    train_idx = np.where(train_mask)[0]
+    val_idx   = np.where(val_mask)[0]
+
+    # --- Ensure forces_train is a NumPy array with shape (n_frames, n_atoms, 3) ---
+    # all_true_F_list is a list of (n_atoms,3) arrays for every frame (train+val).
+    # We'll try a safe stack but fail clearly if frames have different sizes.
+    forces_train_arr = None
+    try:
+        forces_train_arr = np.asarray(all_true_F_list, dtype=float)
+        if forces_train_arr.ndim != 3 or forces_train_arr.shape[2] != 3:
+            # it's possible np.asarray returned a 1D array of objects -> fall back to stack
+            raise ValueError("forces_train_arr not a (n_frames,n_atoms,3) array")
+    except Exception:
+        # defensive check: verify consistent atom counts
+        atom_counts = [f.shape[0] for f in all_true_F_list]
+        if len(set(atom_counts)) != 1:
+            raise RuntimeError(
+                f"Inconsistent atom counts across frames: {sorted(set(atom_counts))}. "
+                "adaptive_learning_mig_pool_windowed requires fixed-size frames or needs refactor."
+            )
+        forces_train_arr = np.stack(all_true_F_list, axis=0).astype(float)
 
     # 3) Load base model if needed
     base_model = None
@@ -533,17 +557,17 @@ def run_eval(config):
     all_latent = None
     all_peratom_latent = None
     if need_base and base_model:
-        pred_E, pred_F, all_latent, all_peratom_latent, _ = evaluate_model(
+        pred_E, pred_F, all_latent, all_peratom_latent = evaluate_model(
             all_frames,
             list(all_true_E),
             all_true_F,
             base_model,
             device,
             batch_size,
-            tag="none",
-            n_mc=1,
+#            tag="none",
+#            n_mc=1,
             log_path=eval_log,
-            unique_log=None,
+#            unique_log=None,
             config=config,
             neighbor_list=neighbour_list
         )
@@ -603,16 +627,27 @@ def run_eval(config):
         n_models = min(eval_cfg.get("ensemble_size", available), available)
         print(f"n_models = {n_models}") 
         # consider only the first `n_models` ensembles as per config
-        ens_E_sel       = ens_E[:n_models]
-        ens_F_sel       = ens_F[:n_models]
-        ens_L_frame_sel = ens_L_frame[:n_models]
- 
-        mu_E          = np.mean(ens_E_sel, axis=0)
-        sigma_mu_E    = np.std(ens_E_sel, axis=0)
+        ens_E_sel       = ens_E[:n_models]           # shape (n_models, n_frames)
+        ens_F_sel       = ens_F[:n_models]           # shape depends on evaluate_and_cache_ensemble
+        ens_L_frame_sel = ens_L_frame[:n_models]     # (n_models, n_frames, d_lat)
 
-        mu_F_flat     = np.mean(ens_F_sel, axis=0)
+        # Precompute ensemble summary stats ONCE (frame-wise and component-wise)
+        mu_E_frame  = np.mean(ens_E_sel, axis=0)            # (n_frames,)
+        std_E_frame = np.std(ens_E_sel, axis=0, ddof=0)
+        sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
+        min_E_frame = np.min(ens_E_sel, axis=0)
+        max_E_frame = np.max(ens_E_sel, axis=0)
 
-        mean_L_frame  = np.mean(ens_L_frame_sel, axis=0)   # (n_frames, d_frame)
+        # Forces: ensemble mean and std across models (flattening semantics preserved)
+        mu_F_flat = np.mean(ens_F_sel, axis=0)
+        sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
+        mu_F_comp = mu_F_flat
+        std_F_comp = sigma_F_flat.flatten()
+        min_F_comp = np.min(ens_F_sel, axis=0).flatten()
+        max_F_comp = np.max(ens_F_sel, axis=0).flatten()
+
+        # Latents averaged across ensemble (frame-level)
+        mean_L_frame = np.mean(ens_L_frame_sel, axis=0)     # (n_frames, d_lat)
 
         # build MLFFStats ----------------------------------------------------
         mf_list, idx = [], 0
@@ -620,128 +655,64 @@ def run_eval(config):
             n = len(fr)
             mf_list.append(mu_F_flat[idx:idx+n])
             idx += n
-        stats_ens = MLFFStats(all_true_E, mu_E, all_true_F, mf_list, train_mask, val_mask)
-        # ---- bookkeeping -------------------------------------------------
-        atom_counts     = stats_ens.atom_counts              # shape (n_frames,)
-        total_comp      = 3 * atom_counts.sum()
-        comp_mask       = np.repeat(val_mask, atom_counts * 3)   # shape (total_comp,)
-        latents_comp    = np.repeat(mean_L_atom, 3, axis=0)
-
-        # Convert all_true_F list to NumPy array
-        all_true_F = np.array(all_true_F)  # Shape: (n_frames, n_atoms, 3)
-        n_frames, n_atoms = all_true_F.shape[:2]
-        print(f"n_frames: {n_frames}")
-        print(f"n_atoms: {n_atoms}")
-        N_tot_atoms = n_frames * n_atoms
-        
-        force_res_flat = stats_ens.all_force_residuals.flatten()  # Shape: (3*N_tot_atoms,)
-        res_per_frame_atom = force_res_flat.reshape(n_frames, n_atoms, 3)  # Shape: (n_frames, n_atoms, 3)
-        
-        # Compute RMSE (absolute residuals) per component per atom per frame
-        rmse_force_comp = np.sqrt(res_per_frame_atom**2)  # Shape: (n_frames, n_atoms, 3)
-        max_rmse_force_comp = np.max(rmse_force_comp, axis=(1, 2))  # Shape: (n_frames,)
-        max_indices = np.argmax(rmse_force_comp.reshape(n_frames, -1), axis=1)  # Shape: (n_frames,)
-        atom_indices = max_indices // 3  # Atom index
-        comp_indices = max_indices % 3   # Component index (0, 1, 2 for x, y, z)
-        
-        # Find the frame with the overall maximum RMSE
-        overall_max_frame_idx = np.argmax(max_rmse_force_comp)  # Index of frame with max RMSE
-        overall_max_rmse = max_rmse_force_comp[overall_max_frame_idx]  # Scalar
-        overall_atom_idx = atom_indices[overall_max_frame_idx]  # Atom index
-        overall_comp_idx = comp_indices[overall_max_frame_idx]  # Component index
-        
-        # Extract true and predicted forces for the max RMSE component
-        true_force = all_true_F[overall_max_frame_idx, overall_atom_idx, overall_comp_idx]  # Scalar (eV/Å)
-        pred_force = true_force + res_per_frame_atom[overall_max_frame_idx, overall_atom_idx, overall_comp_idx]  # Scalar (eV/Å)
-        
-        # Compute absolute DFT forces
-        abs_true_F = np.abs(all_true_F)  # Shape: (n_frames, n_atoms, 3)
-        max_abs_true_F = abs_true_F[np.arange(n_frames), atom_indices, comp_indices]  # Shape: (n_frames,)
-        
-        # Compute relative RMSE for maximum force component per frame
-        F0 = 0.01 * np.mean(abs_true_F)  # eV/Å floor
-        print(f"F0: {F0} eV/Å")  # Debug F0
-        denom = np.maximum(max_abs_true_F, F0)  # Shape: (n_frames,)
-        rel_max_rmse_force_comp = max_rmse_force_comp / denom  # Shape: (n_frames,)
-        
-        # Debug max relative error
-        max_rel_idx = np.argmax(rel_max_rmse_force_comp)
-        print(f"Frame with max rel_max_rmse_force_comp: {max_rel_idx}")
-        print(f"Max rel_max_rmse_force_comp value: {rel_max_rmse_force_comp[max_rel_idx]}")
-        print(f"Corresponding max_rmse_force_comp: {max_rmse_force_comp[max_rel_idx]} eV/Å")
-        print(f"Corresponding max_abs_true_F: {max_abs_true_F[max_rel_idx]} eV/Å")
-        print(f"Corresponding denom: {denom[max_rel_idx]} eV/Å")
-        print(f"Frames with rel_max : {rel_max_rmse_force_comp}")
-        
-        # Compute relative RMSE for all components
-        rmse_force_comp = rmse_force_comp.flatten()  # Shape: (3*n_frames*n_atoms,)
-        abs_true_F = abs_true_F.flatten()  # Shape: (3*n_frames*n_atoms,)
-        denom_all = np.maximum(abs_true_F, F0)
-        rel_rmse_force_comp = rmse_force_comp / denom_all  # Shape: (3*n_frames*n_atoms,)
-        
-        # Print diagnostics
-        print(f"rmse_force_comp: {np.min(rmse_force_comp)} {np.max(rmse_force_comp)}")
-        print(f"rel_rmse_force_comp: {np.min(rel_rmse_force_comp)} {np.max(rel_rmse_force_comp)}")
-        print(f"max_rmse_force_comp: {np.min(max_rmse_force_comp)} {np.max(max_rmse_force_comp)}")
-        print(f"rel_max_rmse_force_comp: {np.min(rel_max_rmse_force_comp)} {np.max(rel_max_rmse_force_comp)}")
-        print(f"Overall max RMSE: {overall_max_rmse} eV/Å at frame {overall_max_frame_idx}, "
-              f"atom {overall_atom_idx}, component {['x', 'y', 'z'][overall_comp_idx]}")
-        print(f"True DFT force: {true_force} eV/Å")
-        print(f"Predicted force: {pred_force} eV/Å")
-        print(f"Absolute error: {abs(pred_force - true_force)} eV/Å")
-        print(f"Relative error: {abs(pred_force - true_force) / np.maximum(abs(true_force), F0)}")
-        
+        stats_ens = MLFFStats(all_true_E, mu_E_frame, all_true_F_list, mf_list, train_mask, val_mask)
+       
+        # Try to create stacked force array only when possible (we assume fixed-size frames)
+        all_true_F_arr = None
+        try:
+            tmp = np.asarray(all_true_F_list, dtype=float)
+            if tmp.ndim == 3:
+                all_true_F_arr = tmp  # (n_frames, n_atoms, 3)
+        except Exception:
+            all_true_F_arr = None
+ 
         if n_models > 1:
             # Ensemble-based spreads
-            sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
-            sigma_comp  = np.std(ens_F_sel, axis=0, ddof=1).flatten()
+            sigma_comp = sigma_F_flat.flatten()
+            sigma_E_used = sigma_E_raw
         else:
+            
             # Energy uncertainty from GP calibration
             F_val_lat    = mean_L_frame[val_mask]
             y_val_E      = stats_ens.delta_E_frame[val_mask]
             print(f"Calibrating energy uncertainty on single model")
             alpha_sq_E, _, terms_lat_E, _, _ = calibrate_alpha_reg_gcv(F_val_lat, y_val_E)
-            sigma_val_E  = np.sqrt(alpha_sq_E * terms_lat_E)
-            sigma_E_raw  = np.full_like(all_true_E, np.nan)
-            sigma_E_raw[val_mask] = sigma_val_E
+            sigma_val_E   = np.sqrt(alpha_sq_E * terms_lat_E)
+            sigma_E_used  = np.full_like(all_true_E, np.nan)
+            sigma_E_used[val_mask] = sigma_val_E
     
             # -------- NEW: latent‑GP for forces -------------------------------
-            F_val_lat_F = latents_comp[comp_mask]              # (n_val_comp, d_atom)
-            y_val_F     = np.abs(force_res_flat[comp_mask])        # (n_val_comp,)
-            print(f"Calibrating force uncertainty on single model")
-            alpha_sq_F, _, _, _, L_F = calibrate_alpha_reg_gcv(F_val_lat_F, y_val_F)
-            G_all_F     = scipy.linalg.solve_triangular(L_F, latents_comp.T, lower=True).T
-            terms_lat_F_all = np.sum(G_all_F**2, axis=1)          # (total_comp,)
-            sigma_comp_full = np.sqrt(alpha_sq_F * terms_lat_F_all)   # (total_comp,)
-            sigma_comp = sigma_comp_full 
-            
-        sigma_atom = np.linalg.norm(sigma_comp.reshape(-1,3), axis=1)  
-    
-    
-        # plotting & metrics -------------------------------------------------
-        # ——— ensemble summary statistics ———
-        # per-frame energy slices
-        mu_E_frame  = mu_E                           # (n_frames,)
-        std_E_frame = np.std(ens_E_sel, axis=0)     # (n_frames,)
-        min_E_frame = np.min(ens_E_sel, axis=0)     # (n_frames,)
-        max_E_frame = np.max(ens_E_sel, axis=0)     # (n_frames,)
-    
-        # per-component force slices (flattened)
-        mu_F_comp   = mu_F_flat                      # (total_components,)
-        std_F_comp  = np.std(ens_F_sel, axis=0).flatten()
-        min_F_comp  = np.min(ens_F_sel, axis=0).flatten()
-        max_F_comp  = np.max(ens_F_sel, axis=0).flatten()
-    
-        # overall summaries
+            if mean_L_atom is not None:
+                try:
+                    atom_counts = stats_ens.atom_counts
+                    comp_mask = np.repeat(val_mask, atom_counts * 3)
+                    latents_comp = np.repeat(mean_L_atom, 3, axis=0)
+                    F_val_lat_F = latents_comp[comp_mask]
+                    y_val_F     = np.abs(stats_ens.all_force_residuals.flatten()[comp_mask])
+                    print("Calibrating force uncertainty on single model")
+                    alpha_sq_F, _, _, _, L_F = calibrate_alpha_reg_gcv(F_val_lat_F, y_val_F)
+                    G_all_F     = scipy.linalg.solve_triangular(L_F, latents_comp.T, lower=True).T
+                    terms_lat_F_all = np.sum(G_all_F**2, axis=1)
+                    sigma_comp_full = np.sqrt(alpha_sq_F * terms_lat_F_all)
+                    sigma_comp = sigma_comp_full
+                except Exception as e:
+                    print(f"Force latent calibration failed: {e}")
+                    sigma_comp = np.full((mean_L_atom.shape[0] * 3,), np.nan)
+            else:
+                sigma_comp = np.full(1, np.nan)
+
+        # per-atom uncertainty
+        if sigma_comp is not None and sigma_comp.size % 3 == 0:
+            sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+        else:
+            sigma_atom = np.array([])
+
+        # Ensemble summary
         print("=== Ensemble summary ===")
-        print(f"Energy: mean={mu_E_frame.mean():.4f}, "
-              f"std={mu_E_frame.std():.4f}, "
-              f"min={min_E_frame.min():.4f}, "
-              f"max={max_E_frame.max():.4f}")
-        print(f"Force : mean={mu_F_comp.mean():.4f},  "
-              f"std={mu_F_comp.std():.4f},  "
-              f"min={min_F_comp.min():.4f},  "
-              f"max={max_F_comp.max():.4f}")
+        print(f"Energy: mean={mu_E_frame.mean():.4f}, std={mu_E_frame.std():.4f}, min={min_E_frame.min():.4f}, max={max_E_frame.max():.4f}")
+        print(f"Force : mean={mu_F_comp.mean():.4f}, std={std_F_comp.std():.4f}, min={min_F_comp.min():.4f}, max={max_F_comp.max():.4f}")
+
+        # plotting & metrics -------------------------------------------------
     
         # histograms if plotting
 #        do_plot = False  
@@ -779,14 +750,12 @@ def run_eval(config):
     
             plt.show()
         # ——— end ensemble summary ———
-
-
 #        do_plot = False  
-        if do_plot:
-            features_all, min_dists_all, _, pca, scaler = compute_features(
-                all_frames, config, train_xyz_path, train_mask, val_mask)
-            plot_mlff_stats(stats_ens, min_dists_all,
-                            "validation_results_ensemble", True, train_mask, val_mask)
+#        if do_plot:
+#            features_all, min_dists_all, _, pca, scaler = compute_features(
+#                all_frames, config, train_xyz_path, train_mask, val_mask)
+#            plot_mlff_stats(stats_ens, min_dists_all,
+#                            "validation_results_ensemble", True, train_mask, val_mask)
 
         metrics_train = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom,
                                              sigma_E_raw, "Train", "ensemble", eval_log)
@@ -995,29 +964,216 @@ def run_eval(config):
             plt.close(fig)
             print("[Pool-AL] Saved plot pool_energy_uncertainty.png")
 
-            # -------------------------------------------------
-            # 7. Build design matrix and calibrate α², λ
-            # -------------------------------------------------
+            # ------------------ Isotonic calibration (clean, no fallbacks) ------------------
+            from mlff_qd.postprocessing.uq_metrics_calculator import IsotonicCalibrator
+           
+            # --- 1) Latent GP calibration (unchanged) ----------------------------------------
             print("[Pool-AL] Calibrating α² and λ (GCV)...")
             F_train_full = mean_L_frame[train_idx].astype(float)
             y_train_full = stats_ens.delta_E_frame[train_idx].astype(float)
-
-            # guard: drop non-finite rows
+            
             good_rows = np.isfinite(F_train_full).all(axis=1) & np.isfinite(y_train_full)
-            F_train   = F_train_full[good_rows]
-            y_train   = y_train_full[good_rows]
-
+            F_train = F_train_full[good_rows]
+            y_train = y_train_full[good_rows]
+            
             alpha_sq, lambda_opt, _, _, L_chol = calibrate_alpha_reg_gcv(
                 F_eval=F_train,
                 y=y_train,
                 lambda_bounds=(1e-6, 1e4)
             )
             assert np.isfinite(L_chol).all(), "L_chol has NaNs/Infs!"
-            print("[Pool-AL] Calibration done.")
+            print("[Pool-AL] Latent calibration done (alpha_sq, lambda_opt).")
 
-            # -------------------------------------------------
-            # 8. Run windowed AL on thinned pool
-            # -------------------------------------------------
+            # --- UNCERTAINTY Calibrator (iso_unc) ---
+            # --- Make sure you have these imports at the top ---
+            from sklearn.isotonic import IsotonicRegression # <-- The ONLY calibrator you need
+            # from mlff_qd.postprocessing.uq_metrics_calculator import IsotonicCalibrator # <-- You can remove this
+            
+            # --- UNCERTAINTY Calibrator (iso_unc) ---
+            # --- 2) Isotonic calibration mapping ensemble σ -> expected |ΔE| -------------------
+            print("[Pool-AL] Fitting UNCERTAINTY calibrator (sigma -> |ΔE|)...")
+    
+            # training arrays (already computed above)
+            sigma_train_raw = sigma_E_raw[train_idx].astype(float)       # ensemble std on training frames
+            delta_train_abs = np.abs(stats_ens.delta_E_frame[train_idx].astype(float)) # DFT - ML on training frames
+            
+            # fit isotonic calibrator (maps sigma -> expected |ΔE|)
+            # --- FIX: Use standard sklearn class. It's robust and correct. ---
+            iso_unc = IsotonicRegression(y_min=0.0, out_of_bounds='clip')
+            iso_unc.fit(sigma_train_raw, delta_train_abs)
+            print("[Pool-AL] Uncertainty calibrator fitted.")
+            
+            # diagnostics: transform training sigma and compute correlation + binned table
+            # --- FIX: Use .predict() instead of .transform() ---
+            sigma_train_cal = iso_unc.predict(sigma_train_raw)
+            corr = np.corrcoef(sigma_train_cal, delta_train_abs)[0, 1]
+            print(f"[Pool-AL] Calibration correlation corr(f(σ), |ΔE|) = {corr:.4f}")
+    
+            # --- 2. BIAS Calibrator (iso_bias) ---
+            # GOAL: Map mu_E (X) -> expected_signed_error (y)
+        
+            print("[Pool-AL] Fitting BIAS calibrator (mu_E -> ΔE)...")
+            # The input (X) is the predicted energy
+            mu_E_train = mu_E_frame[train_idx].astype(float)
+            # The target (y) is the SIGNED error
+            delta_train_signed = stats_ens.delta_E_frame[train_idx].astype(float)
+        
+            # --- FIX: Use standard sklearn class to prevent crash ---
+            iso_bias = IsotonicRegression(y_min=None, y_max=None, out_of_bounds='clip')
+            iso_bias.fit(mu_E_train, delta_train_signed)
+            print("[Pool-AL] Bias calibrator fitted.")
+            
+            # --- 3A. UNCERTAINTY Plots (Your existing code, now fixed) ---
+            
+            # binned diagnostics
+            n_bins = 8
+            bins = np.quantile(sigma_train_raw, np.linspace(0, 1, n_bins + 1))
+            bin_idx = np.digitize(sigma_train_raw, bins, right=True) - 1
+            bin_info = []
+            for i in range(n_bins):
+                sel = bin_idx == i
+                if sel.any():
+                    # --- FIX: Use delta_train_abs (already abs'd) ---
+                    bin_info.append((i, np.median(sigma_train_raw[sel]), np.mean(delta_train_abs[sel]),
+                                     np.median(sigma_train_cal[sel]), sel.sum()))
+                    print(f"  UNCERT bin {i:2d}: median_sigma={bin_info[-1][1]:.4e}, mean|ΔE|={bin_info[-1][2]:.4e}, "
+                          f"median_f(sigma)={bin_info[-1][3]:.4e}, count={bin_info[-1][4]}")
+            
+            # plots
+            # 1) scatter: f(sigma) vs |delta|
+            plt.figure(figsize=(5,4))
+            # --- FIX: Use delta_train_abs (already abs'd) ---
+            plt.scatter(sigma_train_raw, delta_train_abs, s=8, alpha=0.6, label="train")
+            s_sorted = np.sort(sigma_train_raw)
+            # --- FIX: Use .predict() ---
+            plt.plot(s_sorted, iso_unc.predict(s_sorted), color="C1", lw=2, label="isotonic f(σ)")
+            plt.plot([s_sorted.min(), s_sorted.max()], [s_sorted.min(), s_sorted.max()], 'k--', lw=1, label="identity")
+            plt.xlabel("ensemble σ (training)")
+            plt.ylabel("|ΔE| (training)")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig("calibration_scatter.png", dpi=200)
+            plt.close()
+            print("[Pool-AL] Saved calibration_scatter.png")
+            
+            # 2) binned means plot
+            medians_sigma = [b[1] for b in bin_info]
+            means_absdelta = [b[2] for b in bin_info]
+            medians_f = [b[3] for b in bin_info]
+            plt.figure(figsize=(5,4))
+            plt.plot(medians_sigma, means_absdelta, 'o-', label="mean |ΔE| (bin)")
+            plt.plot(medians_sigma, medians_f, 's--', label="median f(σ) (bin)")
+            plt.xlabel("median ensemble σ (bin)")
+            plt.ylabel("energy (eV)")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig("calibration_binned.png", dpi=200)
+            plt.close()
+            print("[Pool-AL] Saved calibration_binned.png")
+    
+            # ---------- Log-log Error vs Uncertainty plot (uses your plotting helper) ----------
+            from mlff_qd.postprocessing.plotting import plot_swapped_final_tight
+            
+            # prepare arrays (use positive, finite values only)
+            mask_plot = (sigma_train_raw > 0) & np.isfinite(sigma_train_raw) & np.isfinite(delta_train_abs)
+            if np.any(mask_plot):
+                x_plot = sigma_train_raw[mask_plot]
+                y_plot = delta_train_abs[mask_plot]
+                # figure and ax
+                fig, ax = plt.subplots(1, 1, figsize=(6,5))
+                # reuse your plotting function in log scale
+                plot_swapped_final_tight(ax, x_plot, y_plot, scale="log",
+                                         title="|Δ| vs σ (training) — isotonic fit (log-log)",
+                                         xlabel="Predicted uncertainty σ", ylabel="|Δ|",
+                                         q_low=0.005, q_high=0.995)
+                # overlay isotonic fit as a solid line
+                s_sorted = np.sort(x_plot)
+                # --- FIX: Use .predict() ---
+                ax.plot(s_sorted, iso_unc.predict(s_sorted), color="tab:orange", lw=2.2, label="Isotonic f(σ)")
+                # overlay binned median for extra clarity
+                bins = np.logspace(np.log10(s_sorted.min()), np.log10(s_sorted.max()), 30)
+                from scipy.stats import binned_statistic
+                bin_med_sigma, _, _ = binned_statistic(x_plot, x_plot, statistic="median", bins=bins)
+                bin_med_absdelta, _, _ = binned_statistic(x_plot, y_plot, statistic="median", bins=bins)
+                ok = ~np.isnan(bin_med_sigma) & ~np.isnan(bin_med_absdelta)
+                if ok.sum() > 1:
+                    ax.plot(bin_med_sigma[ok], bin_med_absdelta[ok], 's-', color="tab:purple", lw=1, markersize=4, label="binned median")
+                ax.legend(fontsize=8)
+                fig.tight_layout()
+                fig.savefig("calibration_abs_vs_sigma_log.png", dpi=200)
+                plt.close(fig)
+                print("[Pool-AL] Saved calibration_abs_vs_sigma_log.png")
+            else:
+                print("[Pool-AL] No valid points to plot log-log calibration.")
+            # ---------- end plot ----------
+    
+            # --- 3B. --- NEW PLOTS --- BIAS Calibrator Diagnostics ---
+            
+            print("[Pool-AL] Generating diagnostic plots for BIAS calibrator...")
+            
+            # Get calibrated bias predictions for diagnostics
+            bias_train_cal = iso_bias.predict(mu_E_train)
+            
+            # Plot 4) scatter: f(E) vs delta_E
+            plt.figure(figsize=(5,4))
+            plt.scatter(mu_E_train, delta_train_signed, s=8, alpha=0.6, label="train (signed error)")
+            e_sorted = np.sort(mu_E_train)
+            plt.plot(e_sorted, iso_bias.predict(e_sorted), color="C1", lw=2, label="isotonic bias f(E)")
+            plt.plot([e_sorted.min(), e_sorted.max()], [0, 0], 'k--', lw=1, label="zero bias")
+            plt.xlabel("Predicted Energy μE (training)")
+            plt.ylabel("Signed Error ΔE (training)")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig("bias_calibration_scatter.png", dpi=200)
+            plt.close()
+            print("[Pool-AL] Saved bias_calibration_scatter.png")
+    
+            # Binned diagnostics (for bias)
+            # We bin by the predictor: mu_E_train
+            bins_bias = np.quantile(mu_E_train, np.linspace(0, 1, n_bins + 1))
+            bin_idx_bias = np.digitize(mu_E_train, bins_bias, right=True) - 1
+            bin_info_bias = []
+            for i in range(n_bins):
+                sel_bias = bin_idx_bias == i
+                if sel_bias.any():
+                    med_E = np.median(mu_E_train[sel_bias])
+                    mean_delta_E = np.mean(delta_train_signed[sel_bias])
+                    med_f_E = np.median(bias_train_cal[sel_bias])
+                    bin_info_bias.append((med_E, mean_delta_E, med_f_E, sel_bias.sum()))
+                    print(f"  BIAS bin {i:2d}:   median_μE={bin_info_bias[-1][0]:.4e}, mean_ΔE={bin_info_bias[-1][1]:.4e}, "
+                          f"median_f(E)={bin_info_bias[-1][2]:.4e}, count={bin_info_bias[-1][3]}")
+    
+            # Plot 5) binned means plot (for bias)
+            medians_E = [b[0] for b in bin_info_bias]
+            means_delta = [b[1] for b in bin_info_bias]
+            medians_f_E = [b[2] for b in bin_info_bias]
+            plt.figure(figsize=(5,4))
+            plt.plot(medians_E, means_delta, 'o-', label="mean ΔE (bin)")
+            plt.plot(medians_E, medians_f_E, 's--', label="median f(E) (bin)")
+            plt.plot([min(medians_E), max(medians_E)], [0, 0], 'k--', lw=1, label="zero bias")
+            plt.xlabel("median predicted μE (bin)")
+            plt.ylabel("energy (eV)")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig("bias_calibration_binned.png", dpi=200)
+            plt.close()
+            print("[Pool-AL] Saved bias_calibration_binned.png")
+            
+            # --- END OF NEW PLOTS ---
+            
+            print("[Pool-AL] Calibrating ENTIRE labeled set (train+val) sigmas...")
+            # --- FIX: Use .predict() ---
+            sigma_E_labeled_calibrated = iso_unc.predict(sigma_E_raw.astype(float))
+        
+            # apply isotonic transform to thinned pool ensemble sigmas
+            # --- FIX: Use .predict() ---
+            sigma_E_calibrated_thin = iso_unc.predict(sigma_E_pool_thin.astype(float))
+            print(f"[Pool-AL] Calibrated sigma (thinned pool) stats: min/med/max = "
+                  f"{np.nanmin(sigma_E_calibrated_thin):.4e}/{np.nanmedian(sigma_E_calibrated_thin):.4e}/{np.nanmax(sigma_E_calibrated_thin):.4e}")
+    
+            
+            # --- THIS BLOCK IS UNCHANGED, AS YOU REQUESTED ---
+            # run AL using calibrated sigma as the energy-uncertainty measure
             print("[Pool-AL] Running windowed active learning on thinned pool ...")
             Sel_objs_thin, sel_rel_thin = adaptive_learning_mig_pool_windowed(
                 pool_frames_thin,
@@ -1025,8 +1181,8 @@ def run_eval(config):
                 F_train_thin,
                 alpha_sq,
                 L_chol,
-                forces_train     = all_true_F,
-                sigma_energy     = sigma_E_raw,
+                forces_train     = forces_train_arr,
+                sigma_energy     = sigma_E_raw,  # calibrated σ' per thin-pool frame
                 sigma_force      = sigma_comp,
                 mu_E_frame_train = mu_E_frame[train_idx],
                 mu_E_pool        = mu_E_pool_thin,
@@ -1034,21 +1190,21 @@ def run_eval(config):
                 mu_F_pool        = mu_F_pool,
                 sigma_F_pool     = sigma_F_pool,
                 rdf_thresholds   = rdf_thresholds,
-                rho_eV           = 0.002,
-                min_k            = 5,
+                rho_eV           = eval_cfg.get("rho_eV", 0.002),
+                min_k            = eval_cfg.get("pool_min_k", 5),
                 window_size      = eval_cfg.get("pool_window", 100),
                 base             = "al_pool_v1",
                 budget_max       = budget_max,
                 percentile_gamma = percentile_gamma,
                 percentile_F_low = percentile_F_low,
                 percentile_F_hi  = percentile_F_hi,
-                # --- NEW: map short YAML → long function args ---
-                hard_sigma_E_atom_min = thr_sE_atom,
-                hard_sigma_F_mean_min = thr_sF_mean,
-                hard_sigma_F_max_min  = thr_sF_max,
-                hard_Fmax_train_mult  = thr_Fmax_mult,
+                hard_sigma_E_atom_min = eval_cfg.get("thr_sE_atom", thr_sE_atom),
+                hard_sigma_F_mean_min = eval_cfg.get("thr_sF_mean", thr_sF_mean),
+                hard_sigma_F_max_min  = eval_cfg.get("thr_sF_max", thr_sF_max),
+                hard_Fmax_train_mult  = eval_cfg.get("thr_Fmax_mult", thr_Fmax_mult),
             )
-
+            print("[Pool-AL] Windowed AL finished.")
+    
             # -------------------------------------------------
             # 9. Log window metadata
             # -------------------------------------------------
@@ -1062,23 +1218,51 @@ def run_eval(config):
                 fh.write(f"window_size\t{w_size}\n")
                 fh.write(f"num_windows\t{n_win}\n")
             print("[Pool-AL] wrote pool_window_log.txt")
-
-            # -------------------------------------------------
-            # 10. Map selected thin indices back to full pool indices
-            # -------------------------------------------------
+            
+            # map thin indices back to full indices and save selected frames with comments
             sel_global_idx = thin_idx[sel_rel_thin]
             sel_objs       = [pool_frames[i] for i in sel_global_idx]
-
+    
+            # --- THIS BLOCK IS FOR APPLYING CALIBRATION TO THE POOL ---
+            
             if sel_objs:
                 with open("to_DFT_labelling_from_pool.xyz", "w") as fh:
-                    for orig_idx, atoms in zip(sel_global_idx, sel_objs):
-                        e_pred = mu_E_pool[orig_idx]
-                        comment = f"frame={orig_idx},  pred_E={e_pred:.5f}"
+                    for orig_idx in sel_global_idx:
+                        atoms = pool_frames[orig_idx]
+                        
+                        # --- 1. Get raw predictions for this frame ---
+                        e_pred_raw = float(mu_E_pool[orig_idx])
+                        s_raw = float(sigma_E_pool[orig_idx])
+    
+                        # --- 2. Apply BOTH calibrations ---
+                        # --- FIX: Use .predict() and np.array() to prevent crash ---
+                        
+                        # Get the bias correction by applying iso_bias to the raw energy
+                        bias_correction = float(iso_bias.predict(np.array([e_pred_raw]))[0])
+                        
+                        # Get the calibrated uncertainty by applying iso_unc to the raw sigma
+                        s_calibrated = float(iso_unc.predict(np.array([s_raw]))[0])
+    
+                        # --- 3. Create your new calibrated "ballpark" values ---
+                        # (Assuming delta=E_ml - E_true, so E_true = E_ml - delta)
+                        e_pred_calibrated = e_pred_raw - bias_correction 
+                        
+                        # --- 4. Write the rich, new comment ---
+                        comment = (
+                            f"frame={orig_idx}, "
+                            f"e_pred_raw={e_pred_raw:.6f}, "
+                            f"s_raw={s_raw:.6f}, "
+                            f"bias_corr={-bias_correction:.6f}, " # Note: -bias_correction
+                            f"s_calibrated={s_calibrated:.6f}, "
+                            f"BALLPARK=[{e_pred_calibrated - s_calibrated:.6f}, {e_pred_calibrated + s_calibrated:.6f}]"
+                        )
                         write(fh, atoms, format="xyz", comment=comment)
+                            
                 print(f"[Pool-AL] Saved {len(sel_objs)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
             else:
                 print("[Pool-AL] No pool frames selected; nothing to save.")
-
+            
+            # ------------------ end isotonic replacement ------------------
 
 
     # 9) GMM UQ

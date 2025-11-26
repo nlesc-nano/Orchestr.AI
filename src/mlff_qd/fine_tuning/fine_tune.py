@@ -5,7 +5,7 @@ import numpy as np
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping, Callback
-from pytorch_lightning.loggers import CSVLogger  # Import CSVLogger
+from pytorch_lightning.loggers import CSVLogger 
 
 import schnetpack as spk
 
@@ -35,7 +35,7 @@ def freeze_layers(model, freeze_embedding=True, freeze_interactions_up_to=0, fre
                 param.requires_grad = True
         logging.info("Output modules remain trainable")
     else:
-        if freeze_embedding:   # add because during printing found there is embedding layer, chatgpt
+        if freeze_embedding:
             for param in schnet.embedding.parameters():
                 param.requires_grad = False
             logging.info("Froze embedding layer")
@@ -60,7 +60,7 @@ def print_layer_info(model):
     for name, param in model.named_parameters():
         print(f"{name:<50} {str(param.shape):<20} {param.requires_grad:<10}")
 
-class SaveBestModelPt(Callback): # not able to save the model as we are doing in training, so grok suggestion
+class SaveBestModelPt(Callback):
     def __init__(self, save_dir):
         super().__init__()
         self.save_dir = save_dir
@@ -123,7 +123,7 @@ def main(args):
     
     nnpot, outputs = setup_model(config)
     
-    # just to make sure fodler has checkpoints
+    # Make sure fodler has checkpoints
     fine_tune_checkpoint = config['fine_tuning'].get('pretrained_checkpoint')
     if not fine_tune_checkpoint or not os.path.exists(fine_tune_checkpoint):
         raise FileNotFoundError(f"Pre-trained checkpoint not found at {fine_tune_checkpoint}")
@@ -131,8 +131,7 @@ def main(args):
     logging.info(f"Loading pre-trained model from {fine_tune_checkpoint}")
     checkpoint = torch.load(fine_tune_checkpoint, map_location=device)
     state_dict = checkpoint['state_dict']
-    
-    # facing error but resolve by deepseek but we need to study this, 
+     
     for key in state_dict:
         if 'postprocessors.1.mean' in key:
             if state_dict[key].shape == torch.Size([]):
@@ -144,7 +143,7 @@ def main(args):
     scheduler_name = config['training']['scheduler']['type']
     optimizer_cls = get_optimizer_class(optimizer_name)
     scheduler_cls = get_scheduler_class(scheduler_name)
-    fine_tune_lr = config['fine_tuning'].get('lr', 1e-4) # if user want to change the learning rate
+    fine_tune_lr = config['fine_tuning'].get('lr', 1e-4) 
     
     # preapre the same architecture  
     task = spk.task.AtomisticTask(
@@ -198,7 +197,6 @@ def main(args):
         LearningRateMonitor(logging_interval='epoch')
     ]
     
-    # we should add in tranining also
     early_stopping_patience = config['fine_tuning'].get('early_stopping_patience', 0)
     if early_stopping_patience > 0:
         callbacks.append(

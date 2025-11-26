@@ -37,7 +37,7 @@ def setup_task_and_trainer(config, nnpot, outputs, folder):
         LearningRateMonitor(logging_interval='epoch')
     ]
 
-    # ① EarlyStopping ---------------------------------------------------------
+    # EarlyStopping ---------------------------------------------------------
     if 'early_stopping' in config['training']:
         es = config['training']['early_stopping']
         callbacks.append(
@@ -50,12 +50,12 @@ def setup_task_and_trainer(config, nnpot, outputs, folder):
             )
         )
 
-    # ② LR threshold ----------------------------------------------------------
+    # LR threshold ----------------------------------------------------------
     lr_thr = config['training'].get('lr_stop_threshold')
     if lr_thr is not None:
         callbacks.append(StopWhenLRBelow(threshold=lr_thr))
 
-    # ③ Accuracy target -------------------------------------------------------
+    # Accuracy target -------------------------------------------------------
     tgt_cfg = config['training'].get('targets', {}).get('stop_when_good_enough')
     if tgt_cfg:
         callbacks.append(

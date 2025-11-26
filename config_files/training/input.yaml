@@ -66,6 +66,18 @@ common:
 
   output:
     output_dir: ./resultsNewNewX
+   
+  fine_tuning:
+    enabled: false                  # If false, standard training runs
+    pretrained_model: "" # Model Path
+    learning_rate: 1.0e-4         
+    early_stopping_patience: 10    
+    freeze_backbone: true          # Unified flag: Freezes representation layers (Only for Schnet and Painn)
+    
+    # Optional advanced args (NequIP specific), we should not put it here 
+    # per_species_shifts: 
+      # Cd: -150.0
+      # Se: -13.0
 
 # ------------------------------------------------------------------------------
 # Overrides section:
