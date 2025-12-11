@@ -44,24 +44,3 @@ def sample_indices(n_total: int,
     for _ in range(max(1,bootstrap_factor)):
         reps.append(rng.choice(n_total, n_target, replace=True))
     return np.concatenate(reps)
-    
-def generate_md_random_subsets(input_file: str,
-                               md_subset_size: int,
-                               output_prefix: str,
-                               sizes: Sequence[int],
-                               sampling: str="subsample",
-                               n_sets: int=1,
-                               bootstrap_factor: int=1):
-    """
-    Subset only first md_subset_size frames, then delegate to generate_random_subsets.
-    """
-    energies, positions, forces, atom_types = parse_stacked_xyz(input_file)
-    mdn = min(md_subset_size, len(energies))
-    # write a temp truncated file or slice arrays directly
-    # Here we slice arrays and loop
-    tmp_file = None
-    for n in sizes:
-        generate_random_subsets(input_file, output_prefix, [n],
-                                sampling=sampling, n_sets=n_sets,
-                                bootstrap_factor=bootstrap_factor)
-

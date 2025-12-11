@@ -11,9 +11,7 @@ from mlff_qd.utils.plots import ( plot_energy_and_forces,
 from mlff_qd.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
 from mlff_qd.utils.pca import detect_outliers
-from mlff_qd.utils.cluster import ( select_kmeans_medoids,
-    generate_md_random_subsets,
-)
+from mlff_qd.utils.cluster import select_kmeans_medoids
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
 
