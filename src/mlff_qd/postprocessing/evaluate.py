@@ -25,7 +25,7 @@ import scipy.linalg
 from ase.io import read, write  # Needed for reading training/eval data
 
 # === Local Module Imports ===
-from mlff_qd.postprocessing.parsing import parse_extxyz, save_stacked_xyz
+from mlff_qd.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
 from mlff_qd.postprocessing.calculator import setup_neighbor_list, assign_charges, evaluate_model
 from mlff_qd.postprocessing.stats import MLFFStats
 from mlff_qd.postprocessing.features import compute_features

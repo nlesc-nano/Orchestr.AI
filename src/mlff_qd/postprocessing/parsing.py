@@ -134,7 +134,7 @@ def parse_extxyz(file_path, label="dataset"):
     return energies, forces, positions
 
 
-def save_stacked_xyz(filename, energies, positions, forces, atom_types):
+def save_stacked_xyz_schnetpack(filename, energies, positions, forces, atom_types):
     """
     Saves data to a SchNetPack-compatible extended XYZ file.
 
