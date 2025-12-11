@@ -16,24 +16,23 @@ import heapq
 import traceback
 import matplotlib.pyplot as plt
 import scipy.optimize
-import torch
+import time
+from itertools import combinations
 from typing import List, Optional, Tuple
 from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
 from scipy.special import erfinv
 from scipy.stats import spearmanr
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
+from scipy.ndimage import gaussian_filter1d
+import scipy.linalg
+import scipy.linalg, scipy.spatial.distance
 from ase.data import chemical_symbols
 from ase import Atoms
 from ase.geometry.analysis import Analysis
-from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict
-
-import scipy.linalg
-import scipy.linalg, scipy.spatial.distance
-from mlff_qd.postprocessing.plotting import plot_swapped_final_tight
 from typing import Tuple, List, Optional 
-from scipy.ndimage import gaussian_filter1d
 
 # Check for hdbscan availability
 try:
@@ -57,11 +56,6 @@ except ImportError:
 # -----------------------------------------------------------------------------
 # 1. Hyper‑parameter calibration (reg, α²) via GCV + moment‑matching
 # -----------------------------------------------------------------------------
-
-import numpy as np
-import scipy.optimize
-import scipy.linalg
-from typing import Tuple
 
 def calibrate_alpha_reg_gcv(
     F_eval: np.ndarray,
@@ -462,16 +456,6 @@ def adaptive_learning_mig_calibrated(
 #  Ensemble‑based active learning  (n_models ≥ 2)
 # =============================================================================
 
-import time
-import numpy as np
-from scipy.ndimage import gaussian_filter1d
-from scipy.spatial import cKDTree
-
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter1d
-from itertools import combinations
-
 def debug_plot_rdfs(reference_frames,
                     rdf_thresholds,
                     r_max=6.0,
@@ -554,7 +538,6 @@ def debug_plot_rdfs(reference_frames,
         plt.close()
         print(f"[RDF] wrote {outname}")
 
-
 def _collect_species_lists(frames, stride: int):
     """
     Return (positions_list, types_list, unique_pairs) using only every `stride`-th frame.
@@ -582,7 +565,6 @@ def _collect_species_lists(frames, stride: int):
 
     unique_pairs = sorted(species_sets)
     return positions_list, types_list, unique_pairs
-
 
 def _gather_pair_distances_vectorized(positions_list, types_list, A, B, cutoff):
     """
@@ -646,11 +628,8 @@ def compute_rdf_thresholds_from_reference(
     rdf_thresholds_cache.npz (same filename you already save).
     """
 
-    import time
     import numpy as np
     from collections import defaultdict
-    from itertools import combinations
-    from scipy.ndimage import gaussian_filter1d
 
     t0_all = time.time()
 
@@ -846,8 +825,6 @@ def fast_filter_by_rdf_kdtree(
         False -> at least one catastrophic contact < r_hard
     """
 
-    import time
-    import numpy as np
     from scipy.spatial import cKDTree
 
     n_frames = len(frames)
@@ -945,7 +922,6 @@ def fast_filter_by_rdf_kdtree(
 
     return ok_mask
 
-
 def collect_pair_distances(frames, cutoff: float = 6.0):
     """
     Build a dict of all pair distances per element pair across a list of frames.
@@ -956,7 +932,6 @@ def collect_pair_distances(frames, cutoff: float = 6.0):
         { (A,B): [r_1, r_2, ...] } with A,B sorted alphabetically.
     """
     from collections import defaultdict
-    from itertools import combinations
     import numpy as np
 
     pair_distances = defaultdict(list)
@@ -976,7 +951,6 @@ def collect_pair_distances(frames, cutoff: float = 6.0):
         pair_distances[pair] = np.asarray(vals, dtype=float)
 
     return pair_distances
-
 
 def make_rdf_hist(pair_distance_dict,
                   cutoff: float = 6.0,
@@ -999,7 +973,6 @@ def make_rdf_hist(pair_distance_dict,
         }
     """
     import numpy as np
-    from scipy.ndimage import gaussian_filter1d
 
     rdf_dict = {}
 
@@ -1023,7 +996,6 @@ def make_rdf_hist(pair_distance_dict,
 
     return rdf_dict
 
-
 def plot_rdf_comparison(
         pair,
         rdf_ref,
@@ -1043,7 +1015,6 @@ def plot_rdf_comparison(
 
     Saves to disk as f"{outprefix}_{A}{B}.png".
     """
-    import matplotlib.pyplot as plt
 
     # If we don't have this pair in ref, just skip
     if pair not in rdf_ref:
@@ -1089,7 +1060,6 @@ def plot_rdf_comparison(
     plt.close(fig)
 
     print(f"[RDF-plot] Wrote {outname}")
-
 
 def adaptive_learning_ensemble_calibrated(
         all_frames: List,
@@ -1376,7 +1346,6 @@ def adaptive_learning_ensemble_calibrated(
     sel_objs = [all_frames[i] for i in sel_idx]
     return sel_objs, sel_idx
 
-
 def adaptive_learning_ensemble_calibrated_old(
         all_frames: List,
         eval_mask: np.ndarray,
@@ -1518,8 +1487,6 @@ def adaptive_learning_ensemble_calibrated_old(
 # MIG For Unlabelled
 # ======================
 
-import numpy as np
-import torch
 from scipy.linalg import solve_triangular
 
 def predict_sigma_from_L(
@@ -1582,7 +1549,6 @@ def adaptive_learning_mig_pool(
     print(f"[Pool‑AL] saved selection indices + stats to {idx_file}")
 
     return sel_frames, sel_rel
-
 
 def _compute_relative_thresholds(
         sigma_energy_train: np.ndarray,
