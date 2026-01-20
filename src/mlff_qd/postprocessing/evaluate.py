@@ -32,20 +32,12 @@ from mlff_qd.postprocessing.features import compute_features
 from mlff_qd.postprocessing.uq_models import train_uq_models, predict_uncertainties, fit_gmm_and_compute_uncertainty
 from mlff_qd.postprocessing.uq_metrics_calculator import VarianceScalingCalibrator, run_uq_metrics, calculate_uq_metrics
 from mlff_qd.postprocessing.mlff_plotting import plot_mlff_stats
-from mlff_qd.postprocessing.plotting import (
-    generate_uq_plots, 
-    generate_al_influence_plots, generate_al_traditional_plots
-)
-from mlff_qd.postprocessing.active_learning import adaptive_learning, adaptive_learning_mig_calibrated, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv, predict_sigma_from_L, adaptive_learning_mig_pool_windowed, adaptive_learning_ensemble_calibrated 
-
-from mlff_qd.postprocessing.active_learning import (
-    compute_rdf_thresholds_from_reference,
-    fast_filter_by_rdf_kdtree,
-    collect_pair_distances,
-    make_rdf_hist,
-    plot_rdf_comparison,
-    debug_plot_rdfs
-)
+from mlff_qd.postprocessing.plotting import generate_uq_plots, generate_al_influence_plots, generate_al_traditional_plots
+from mlff_qd.postprocessing.active_learning import ( adaptive_learning, adaptive_learning_mig_pool,calibrate_alpha_reg_gcv,
+                                                    predict_sigma_from_L, adaptive_learning_mig_pool_windowed,
+                                                    adaptive_learning_ensemble_calibrated, compute_rdf_thresholds_from_reference,
+                                                    collect_pair_distances, debug_plot_rdfs, fast_filter_by_rdf_kdtree,
+                                                    make_rdf_hist, plot_rdf_comparison )
 
 def setup_evaluation(config):
     """
