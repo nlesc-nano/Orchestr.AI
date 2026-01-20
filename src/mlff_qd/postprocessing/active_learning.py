@@ -15,19 +15,20 @@ import shutil
 import heapq
 import traceback
 import matplotlib.pyplot as plt
-import scipy.optimize
 import time
 from itertools import combinations
 from typing import List, Optional, Tuple
 from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
-from scipy.special import erfinv
-from scipy.stats import spearmanr
-from scipy.spatial import cKDTree
-from scipy.spatial.distance import cdist
-from scipy.ndimage import gaussian_filter1d
 import scipy.linalg
 import scipy.linalg, scipy.spatial.distance
+from scipy.linalg import solve_triangular
+from scipy.ndimage import gaussian_filter1d
+import scipy.optimize
+from scipy.special import erfinv
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+from scipy.stats import spearmanr
 from ase.data import chemical_symbols
 from ase import Atoms
 from ase.geometry.analysis import Analysis
@@ -628,9 +629,6 @@ def compute_rdf_thresholds_from_reference(
     rdf_thresholds_cache.npz (same filename you already save).
     """
 
-    import numpy as np
-    from collections import defaultdict
-
     t0_all = time.time()
 
     # -------- 0. subsample trusted frames for speed --------
@@ -825,8 +823,6 @@ def fast_filter_by_rdf_kdtree(
         False -> at least one catastrophic contact < r_hard
     """
 
-    from scipy.spatial import cKDTree
-
     n_frames = len(frames)
     ok_mask  = np.ones(n_frames, dtype=bool)
 
@@ -931,8 +927,6 @@ def collect_pair_distances(frames, cutoff: float = 6.0):
     pair_distances : dict
         { (A,B): [r_1, r_2, ...] } with A,B sorted alphabetically.
     """
-    from collections import defaultdict
-    import numpy as np
 
     pair_distances = defaultdict(list)
 
@@ -972,7 +966,6 @@ def make_rdf_hist(pair_distance_dict,
           ...
         }
     """
-    import numpy as np
 
     rdf_dict = {}
 
@@ -1487,7 +1480,6 @@ def adaptive_learning_ensemble_calibrated_old(
 # MIG For Unlabelled
 # ======================
 
-from scipy.linalg import solve_triangular
 
 def predict_sigma_from_L(
         F_new: np.ndarray,
@@ -1606,9 +1598,6 @@ def adaptive_learning_mig_pool_windowed(
       - **NEW**: hard literature-style AL triggers on σ(E), σF_mean, σF_max
       - **NEW**: training-dataset per-frame uncertainty dump at the bottom
     """
-
-    import numpy as np
-    from scipy.linalg import solve_triangular
 
     # ---------------- helper ----------------
     def clamp_threshold(name: str, lower: float, upper: float) -> float:
@@ -2373,7 +2362,6 @@ def adaptive_learning(all_frames, eval_mask, sigma_atom_all_al, force_rmse_atom_
 
     print("Step 1: Computing pairwise distance features...")
     distance_features_list = []
-    import torch
     for i in eval_frame_indices:
         frame_pos = torch.tensor(all_frames[i].get_positions(), dtype=torch.float32)
         if len(frame_pos) < 2:
