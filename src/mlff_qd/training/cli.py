@@ -124,6 +124,15 @@ def get_output_dir(engine_cfg, platform):
             continue
     return "./results"
 
+EXPLICIT_KEYS = ("train_file_path", "val_file_path", "test_file_path")
+
+def _key_present(dct, key: str) -> bool:
+    # key exists in YAML even if value is null/empty
+    return isinstance(dct, dict) and (key in dct)
+
+def _missing_value(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
 def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None, write_temp=True):
     with open(yaml_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
@@ -133,56 +142,58 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     if not data_path:
         if platform in ["schnet", "painn", "fusion"]:
             data_path = config.get("data", {}).get("dataset_path", None)
-
+        
         elif platform in ["nequip", "allegro"]:
             d = config.get("data", {}) or {}
 
-            # Check if any of the file paths (train, val, or test) is provided
-            if d.get("train_file_path") or d.get("val_file_path") or d.get("test_file_path"):
+            # MODE A intent: if user provided ANY explicit key (even null/empty), treat as explicit-mode attempt
+            explicit_intent = any(_key_present(d, k) for k in EXPLICIT_KEYS)
+
+            if explicit_intent:
                 logging.info(f"[{platform}] Running in MODE A: Explicit files (train_file_path, val_file_path, test_file_path)")
-                
-                # Ensure that if one file is provided, all should be present
-                if not d.get("train_file_path") or not d.get("val_file_path") or not d.get("test_file_path"):
-                    raise ValueError(f"[{platform}] Missing one or more required file paths: train, val, test")
 
-                # Check if file paths are empty strings
-                for k in ("train_file_path", "val_file_path", "test_file_path"):
-                    p = d.get(k)
-                    if p == "":
-                        raise ValueError(f"[{platform}] File path '{k}' cannot be an empty string.")
-                                             
-                # MODE A: explicit files (any of the file paths is provided)
-                if d.get("train_file_path") and d.get("val_file_path"):
-                    # Validate all provided explicit files (test is optional)
-                    for k in ("train_file_path", "val_file_path", "test_file_path"):
-                        p = d.get(k)
-                        if p is None:
-                            continue
-                        if not os.path.exists(p):
-                            raise ValueError(f"[{platform}] Missing file: {p}")
-                        validate_input_file(p, platform)
+                # Require all three keys
+                missing_keys = [k for k in EXPLICIT_KEYS if not _key_present(d, k)]
+                if missing_keys:
+                    raise ValueError(
+                        f"[{platform}] Explicit file mode detected, but missing keys: {', '.join(missing_keys)}. "
+                        f"Either provide all of {', '.join(EXPLICIT_KEYS)} OR remove them and use data.split_dataset."
+                    )
 
+                # Require non-empty values
+                bad_vals = [k for k in EXPLICIT_KEYS if _missing_value(d.get(k))]
+                if bad_vals:
+                    raise ValueError(
+                        f"[{platform}] Explicit file mode detected, but these are null/empty: {', '.join(bad_vals)}. "
+                        f"Either set valid paths for all three OR remove those keys and use data.split_dataset instead."
+                    )
 
+                # Validate files exist + extension
+                for k in EXPLICIT_KEYS:
+                    p = d[k]
+                    if not os.path.exists(p):
+                        raise ValueError(f"[{platform}] Missing file: {p}")
+                    validate_input_file(p, platform)
 
-                    # Remove split_dataset to avoid ambiguity
-                    d.pop("split_dataset", None)
-                    config["data"] = d
+                # Remove split_dataset to avoid ambiguity
+                d.pop("split_dataset", None)
+                config["data"] = d
 
-                    # Placeholder to keep legacy flow happy
-                    data_path = d["train_file_path"]
+                # Placeholder for the legacy flow checks below
+                data_path = d["train_file_path"]
 
-            # If no valid train/val files, switch to MODE B: split_dataset logic
             else:
                 logging.info(f"[{platform}] Running in MODE B: Using split_dataset for data split.")
-                data_path = d.get("split_dataset", {}).get("file_path", None)
-                # Handle split_dataset logic (MODE B)
-                if data_path:
-                    # Validate and process split_dataset file
-                    if not os.path.exists(data_path):
-                        raise ValueError(f"[{platform}] Missing file for split_dataset: {data_path}")
-                else:
-                    raise ValueError(f"[{platform}] Missing required file path or split_dataset section.")
+                data_path = (d.get("split_dataset") or {}).get("file_path", None)
 
+                if not data_path:
+                    raise ValueError(
+                        f"[{platform}] Missing split_dataset.file_path (and no explicit train/val/test keys provided)."
+                    )
+                if not os.path.exists(data_path):
+                    raise ValueError(f"[{platform}] Missing file for split_dataset: {data_path}")
+
+        
         elif platform == "mace":
             data_path = config.get("train_file", None)
 
@@ -190,7 +201,8 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     # In explicit mode, we do NOT override train/val/test with --input.
     if platform in ["nequip", "allegro"] and xyz_path:
         d = config.get("data", {}) or {}
-        explicit_mode = bool(d.get("train_file_path") and d.get("val_file_path"))
+        explicit_mode = any(k in d for k in ("train_file_path", "val_file_path", "test_file_path"))
+
         if not explicit_mode:
             data_path = xyz_path
 
@@ -215,7 +227,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
         if d.get("train_file_path") and d.get("val_file_path"):
             d.pop("split_dataset", None)
 
-            # (Optional) re-validate again after patching, just to be safe:
+            # re-validate again after patching, just to be safe but its optional:
             for k in ("train_file_path", "val_file_path", "test_file_path"):
                 p = d.get(k)
                 if p is None:
