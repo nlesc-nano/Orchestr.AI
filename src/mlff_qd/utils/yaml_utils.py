@@ -205,10 +205,20 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
             if p: paths.append(_resolve_path(yaml_dir, p))
 
     elif platform in {"nequip", "allegro"}:
-        sp = cfg.get("data", {}).get("split_dataset", {}).get("file_path")
+        d = cfg.get("data", {}) or {}
+
+        # explicit mode
+        for k in ("train_file_path", "val_file_path", "test_file_path"):
+            p = d.get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+        # split mode fallback
+        sp = d.get("split_dataset", {}).get("file_path")
         if sp: paths.append(_resolve_path(yaml_dir, sp))
+
+        # keep your existing extra keys if you still want them
         for k in ("test_file", "infer_file"):
-            p = cfg.get("data", {}).get(k)
+            p = d.get(k)
             if p: paths.append(_resolve_path(yaml_dir, p))
 
     elif platform == "mace":

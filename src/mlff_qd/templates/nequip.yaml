@@ -15,7 +15,7 @@ monitored_metric: val0_epoch/weighted_sum
 data:
   _target_: nequip.data.datamodule.ASEDataModule
   seed: 456             # dataset seed for reproducibility
-
+  
   split_dataset:
     file_path: fcu.xyz
     train: 0.8
@@ -35,6 +35,10 @@ data:
     batch_size: 5
     num_workers: 5
     shuffle: true
+    generator:
+      _target_: torch.Generator
+      manual_seed: ${data.seed}
+      
   val_dataloader:
     _target_: torch.utils.data.DataLoader
     batch_size: 10

@@ -126,38 +126,114 @@ def get_output_dir(engine_cfg, platform):
 
 def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None, write_temp=True):
     with open(yaml_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+
     data_path = xyz_path
+
     if not data_path:
         if platform in ["schnet", "painn", "fusion"]:
             data_path = config.get("data", {}).get("dataset_path", None)
+
         elif platform in ["nequip", "allegro"]:
-            data_path = config.get("data", {}).get("split_dataset", {}).get("file_path", None)
+            d = config.get("data", {}) or {}
+
+            # Check if any of the file paths (train, val, or test) is provided
+            if d.get("train_file_path") or d.get("val_file_path") or d.get("test_file_path"):
+                logging.info(f"[{platform}] Running in MODE A: Explicit files (train_file_path, val_file_path, test_file_path)")
+                
+                # Ensure that if one file is provided, all should be present
+                if not d.get("train_file_path") or not d.get("val_file_path") or not d.get("test_file_path"):
+                    raise ValueError(f"[{platform}] Missing one or more required file paths: train, val, test")
+
+                # Check if file paths are empty strings
+                for k in ("train_file_path", "val_file_path", "test_file_path"):
+                    p = d.get(k)
+                    if p == "":
+                        raise ValueError(f"[{platform}] File path '{k}' cannot be an empty string.")
+                                             
+                # MODE A: explicit files (any of the file paths is provided)
+                if d.get("train_file_path") and d.get("val_file_path"):
+                    # Validate all provided explicit files (test is optional)
+                    for k in ("train_file_path", "val_file_path", "test_file_path"):
+                        p = d.get(k)
+                        if p is None:
+                            continue
+                        if not os.path.exists(p):
+                            raise ValueError(f"[{platform}] Missing file: {p}")
+                        validate_input_file(p, platform)
+
+
+
+                    # Remove split_dataset to avoid ambiguity
+                    d.pop("split_dataset", None)
+                    config["data"] = d
+
+                    # Placeholder to keep legacy flow happy
+                    data_path = d["train_file_path"]
+
+            # If no valid train/val files, switch to MODE B: split_dataset logic
+            else:
+                logging.info(f"[{platform}] Running in MODE B: Using split_dataset for data split.")
+                data_path = d.get("split_dataset", {}).get("file_path", None)
+                # Handle split_dataset logic (MODE B)
+                if data_path:
+                    # Validate and process split_dataset file
+                    if not os.path.exists(data_path):
+                        raise ValueError(f"[{platform}] Missing file for split_dataset: {data_path}")
+                else:
+                    raise ValueError(f"[{platform}] Missing required file path or split_dataset section.")
+
         elif platform == "mace":
             data_path = config.get("train_file", None)
-            
+
+    # If user passed --input (xyz_path), it should override ONLY in split mode.
+    # In explicit mode, we do NOT override train/val/test with --input.
+    if platform in ["nequip", "allegro"] and xyz_path:
+        d = config.get("data", {}) or {}
+        explicit_mode = bool(d.get("train_file_path") and d.get("val_file_path"))
+        if not explicit_mode:
+            data_path = xyz_path
+
+    # Generic missing-path check
     if not data_path or not os.path.exists(data_path):
         raise ValueError(
             f"YAML file {yaml_path} is missing a valid data path for platform '{platform}'.\n"
             "Either add the correct dataset path to your YAML or provide --input."
         )
-           
-     # Input validation only, no conversion 
+
+    # Input validation only, no conversion
     data_path = validate_input_file(data_path, platform)
-    
-    # Patch original path back into config (no conversion)
+
+    # Patch path back into config
     if platform in ["schnet", "painn", "fusion"]:
         config.setdefault("data", {})["dataset_path"] = data_path
+
     elif platform in ["nequip", "allegro"]:
-        config.setdefault("data", {}).setdefault("split_dataset", {})["file_path"] = data_path
+        d = config.setdefault("data", {})
+
+        # If explicit mode exists, keep it and ensure split_dataset removed
+        if d.get("train_file_path") and d.get("val_file_path"):
+            d.pop("split_dataset", None)
+
+            # (Optional) re-validate again after patching, just to be safe:
+            for k in ("train_file_path", "val_file_path", "test_file_path"):
+                p = d.get(k)
+                if p is None:
+                    continue
+                validate_input_file(p, platform)
+
+        # Otherwise split mode
+        else:
+            d.setdefault("split_dataset", {})["file_path"] = data_path
+
     elif platform == "mace":
         config["train_file"] = data_path
-    
-    # Normalize engine-specific flags before writing the YAML
+
+    # Normalize engine-specific flags before writing YAML
     if platform in ["nequip", "allegro"]:
         apply_autoddp(config)
 
-    
+    # Write YAML out
     if write_temp:
         if not scratch_dir:
             scratch_dir = tempfile.gettempdir()
@@ -169,6 +245,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
         with open(yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f)
         return yaml_path
+
 
 def main():
     args = parse_args()
