@@ -32,6 +32,10 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate mlff_newx3
 export PYTHONUNBUFFERED=1
 
+echo "SLURM_TMPDIR=${SLURM_TMPDIR:-<unset>}"
+echo "TMPDIR=${TMPDIR:-<unset>}"
+echo "PWD(before)=$(pwd)"
+
 CDIR="$(pwd)"
 
 
@@ -42,16 +46,11 @@ CDIR="$(pwd)"
 #   - Ensure safe temp usage for SQLite, HDF5, matplotlib, etc.
 ###############################################
 
-# 2.1 Optional default SLURM tmpdir (commented)
-# SCRATCH_DIR=${TMPDIR:-/scratch/${SLURM_JOB_ID:-$$}}
-# mkdir -p "$SCRATCH_DIR"
-
-# 2.2 Safe scratch setup (custom)
-BASE_TMP=${TMPDIR:-/scratch}
-SCRATCH_DIR="$BASE_TMP/job_${SLURM_JOB_ID:-$$}"
+# 2.1 Safe scratch setup (robust)
+SCRATCH_DIR="${SLURM_TMPDIR:-${TMPDIR:-/tmp}/job_${SLURM_JOB_ID}}"
 mkdir -p "$SCRATCH_DIR"
 
-# 2.3 Export temp-related environment variables
+# 2.2 Export temp-related environment variables
 export TMPDIR="$SCRATCH_DIR"
 export SQLITE_TMPDIR="$SCRATCH_DIR"
 export HDF5_USE_FILE_LOCKING=FALSE
@@ -87,30 +86,7 @@ cp *.xyz "$SCRATCH_DIR" 2>/dev/null || true
 cd "$SCRATCH_DIR" || { echo "✘ Failed to cd to $SCRATCH_DIR"; exit 1; }
 mkdir -p results
 
-
-###############################################
-# 5. DATABASE LOGIC
-# Purpose:
-#   - Extract 'database_name' from YAML (if defined)
-#   - Default to 'Database.db' if not found
-###############################################
-DB_NAME="Database.db"
-DB_FROM_YAML=$(grep -E '^[[:space:]]*database_name:' "$CFG_BASENAME" | head -n1 \
-  | sed -E 's/\r$//' \
-  | sed -E 's/^[[:space:]]*database_name:[[:space:]]*//; s/[[:space:]]+#.*$//; s/^[[:space:]]*["'\''"]?//; s/["'\''"]?[[:space:]]*$//')
-if [ -n "$DB_FROM_YAML" ] && [ "$DB_FROM_YAML" != "null" ] && [ "$DB_FROM_YAML" != "~" ]; then
-  DB_NAME="$DB_FROM_YAML"
-  echo "→ Parsed database_name from YAML: $DB_NAME"
-else
-  echo "→ No valid database_name in YAML; using default: $DB_NAME"
-fi
-
-# Force logging folder to local scratch results
-sed -i "s|^\(\s*folder:\s*\).*|\1'./results'|g" "$CFG_BASENAME" 2>/dev/null || true
-echo "→ logging.folder set to './results'"
 echo "→ DB (if created) will be at: $SCRATCH_DIR/results/$DB_NAME"
-
-
 
 ###############################################
 # 6. GPU VISIBILITY CHECK (Sanity Info)
@@ -122,7 +98,7 @@ echo "SLURM_JOB_ID=$SLURM_JOB_ID"
 echo "SLURM_JOB_GPUS=$SLURM_JOB_GPUS"
 echo "SLURM_GPUS_ON_NODE=$SLURM_GPUS_ON_NODE"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-nvidia-smi 
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || echo "nvidia-smi not available" 
 
 
 ###############################################
@@ -132,7 +108,6 @@ nvidia-smi
 #   - Fail-fast if DDP configuration is invalid (handled in Python)
 ###############################################
 srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CFG_BASENAME" "${@:2}" || echo "Training failed, proceeding with copy"
-
 
 
 ###############################################
