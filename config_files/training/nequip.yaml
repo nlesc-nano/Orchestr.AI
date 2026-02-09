@@ -48,7 +48,13 @@ monitored_metric: val0_epoch/weighted_sum
 data:
   _target_: nequip.data.datamodule.ASEDataModule
   seed: 456             # dataset seed for reproducibility
-
+# Explicit dataset mode:
+# Use pre-split train/val/test files instead of split_dataset.
+# If any of these is set, all three are required and split_dataset is ignored.
+    # train_file_path: train.xyz
+    # val_file_path: val.xyz
+    # test_file_path: test.xyz
+    
   # here we take an ASE-readable file (in extxyz format) and split it into train:val:test = 80:10:10
   split_dataset:
     file_path: fcu.xyz
