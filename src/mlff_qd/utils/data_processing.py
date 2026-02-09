@@ -7,7 +7,8 @@ from ase import Atoms
 import schnetpack as spk
 import schnetpack.transform as trn
 import torch    
-     
+import ase, schnetpack
+
 def load_data(config):
     try:
         data = np.load(config['data']['dataset_path'])
@@ -37,28 +38,60 @@ def preprocess_data(data):
     return atoms_list, property_list
 
 def setup_logging_and_dataset(config, atoms_list, property_list):
-    folder = config['logging']['folder']
+    
+    
+    logging.info(f"[DB DEBUG] ase={ase.__version__} schnetpack={schnetpack.__version__}")
+
+    folder_cfg = config["logging"]["folder"] 
+
+    # resolve scratch dir exported by Slurm script
+    scratch_dir = os.environ.get("SCRATCH_DIR", os.getcwd())
+
+    # If YAML folder is relative, anchor it under SCRATCH_DIR
+    if os.path.isabs(folder_cfg):
+        folder = folder_cfg
+        logging.warning(f"[DB DEBUG] logging.folder is absolute: {folder}")
+    else:
+        folder = os.path.abspath(os.path.join(scratch_dir, folder_cfg))
+
+    # ensure output dirs exist (SQLite parent must exist)
     os.makedirs(folder, exist_ok=True)
     os.makedirs(os.path.join(folder, "lightning_logs"), exist_ok=True)
 
-    db_path = os.path.join(folder, config['general']['database_name'])
+    # build DB path 
+    db_name = config.get("general", {}).get("database_name", "Database.db")
+    db_path = os.path.join(folder, db_name)
+
+    # Debug info (keep while stabilizing)
+    logging.info(f"[DB DEBUG] cwd={os.getcwd()}")
+    logging.info(f"[DB DEBUG] SCRATCH_DIR={scratch_dir}")
+    logging.info(f"[DB DEBUG] logging.folder(cfg)={folder_cfg}")
+    logging.info(f"[DB DEBUG] logging.folder(resolved)={folder}")
+    logging.info(f"[DB DEBUG] db_path={db_path}")
+
+    # Remove old DB if exists (avoid partial/corrupt)
     if os.path.exists(db_path):
+        logging.warning(f"[DB DEBUG] Removing existing DB: {db_path}")
         os.remove(db_path)
 
-    property_units = {
-        'energy': config['model']['property_unit_dict']['energy'],
-        'forces': config['model']['property_unit_dict']['forces']
-    }
+    # MUST be set BEFORE sqlite is used internally
+    os.environ["SQLITE_TMPDIR"] = folder
+    os.environ["TMPDIR"] = folder
 
+    property_units = {
+        "energy": config["model"]["property_unit_dict"]["energy"],
+        "forces": config["model"]["property_unit_dict"]["forces"],
+    }
+   
     new_dataset = spk.data.ASEAtomsData.create(
         db_path,
-        distance_unit=config['model']['distance_unit'],
-        property_unit_dict=property_units
+        distance_unit=config["model"]["distance_unit"],
+        property_unit_dict=property_units,
     )
-
+    
     new_dataset.add_systems(property_list, atoms_list)
     logging.info(f"Dataset created at {db_path}")
-    
+
     return new_dataset, property_units
 
 def prepare_transformations(config, task_type):
