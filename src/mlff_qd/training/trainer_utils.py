@@ -15,15 +15,28 @@ def setup_task_and_trainer(config, nnpot, outputs, folder):
     optimizer_cls = get_optimizer_class(optimizer_name)
     scheduler_cls = get_scheduler_class(scheduler_name)
     
+    scheduler_args = {
+        "mode": "min",
+        "factor": config['training']['scheduler']['factor'],
+        "patience": config['training']['scheduler']['patience'],
+    }
+
+    # Only add verbose if present AND supported by the scheduler
+    v = config["training"]["scheduler"].get("verbose", None)
+    if v is not None:
+        import inspect
+        if "verbose" in inspect.signature(scheduler_cls.__init__).parameters:
+            scheduler_args["verbose"] = v
+        else:
+            logging.warning("[SCHED DEBUG] Ignoring scheduler verbose=%s (not supported by %s)", v, scheduler_cls.__name__)
+            
     task = spk.task.AtomisticTask(
         model=nnpot,
         outputs=outputs,
         optimizer_cls=optimizer_cls,
         optimizer_args={"lr": config['training']['optimizer']['lr']},
         scheduler_cls=scheduler_cls,
-        scheduler_args={"mode": "min", "factor": config['training']['scheduler']['factor'],
-                        "patience": config['training']['scheduler']['patience'],
-                        "verbose": config['training']['scheduler']['verbose']},
+        scheduler_args=scheduler_args,     
         scheduler_monitor=config['logging']['monitor']
     )
     
