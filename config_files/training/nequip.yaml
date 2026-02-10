@@ -123,7 +123,7 @@ trainer:
   # use any Lightning supported logger
   logger:
     - _target_: lightning.pytorch.loggers.TensorBoardLogger
-      save_dir: ./logs
+      save_dir: ./resultsx
       name: tutorial_log
       version: null
       default_hp_metric: false
@@ -140,7 +140,7 @@ trainer:
     # https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.callbacks.ModelCheckpoint.html#lightning.pytorch.callbacks.ModelCheckpoint
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
       monitor: ${monitored_metric}            # validation metric to monitor
-      dirpath: ${hydra:runtime.output_dir}    # use hydra output directory
+      dirpath: resultsx
       filename: best                          # `best.ckpt` is the checkpoint name
       save_last: true                         # `last.ckpt` will be saved
 
