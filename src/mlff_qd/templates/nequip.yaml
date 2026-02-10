@@ -35,9 +35,6 @@ data:
     batch_size: 5
     num_workers: 5
     shuffle: true
-    generator:
-      _target_: torch.Generator
-      manual_seed: ${data.seed}
       
   val_dataloader:
     _target_: torch.utils.data.DataLoader
