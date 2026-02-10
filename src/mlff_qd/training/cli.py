@@ -362,7 +362,8 @@ def main():
             best_model_dir=best_model_dir,
             explicit_data_paths=explicit_paths
         )
-        logging.info(f"Output standardized to {standardized_dir}")
+        logging.info(f"[paths] Result dir (engine output): {results_dir}")
+        logging.info(f"[paths] Standardized output dir: {standardized_dir}")
 
     except Exception as e:
         logging.error(f"Training or inference failed for platform {platform}: {str(e)}")
