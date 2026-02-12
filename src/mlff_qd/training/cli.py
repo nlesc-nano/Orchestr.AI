@@ -339,8 +339,8 @@ def main():
                 run_schnet_fine_tuning(MockArgs())
                 print(f"[CLI] Fine-tuning completed.")
             else:
-                run_schnet_training(engine_yaml)
-                run_schnet_inference(engine_yaml)
+                run_schnet_training(engine_yaml, engine=platform)
+                run_schnet_inference(engine_yaml, engine=platform)
 
         elif platform == "nequip":
             run_nequip_training(os.path.abspath(engine_yaml))

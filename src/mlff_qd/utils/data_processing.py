@@ -110,9 +110,9 @@ def prepare_transformations(config, task_type):
     
     return transformations
     
-def setup_data_module(config, db_path, transformations, property_units):
-    custom_data = spk.data.AtomsDataModule(
-        db_path,
+def setup_data_module(config, db_path, transformations, property_units, split_file=None):
+    dm_kwargs = dict(
+        datapath=db_path,
         batch_size=config['training']['batch_size'],
         distance_unit=config['model']['distance_unit'],
         property_units=property_units,
@@ -121,8 +121,14 @@ def setup_data_module(config, db_path, transformations, property_units):
         num_test=config['training']['num_test'],
         transforms=transformations,
         num_workers=config['training']['num_workers'],
-        pin_memory=config['training']['pin_memory']
+        pin_memory=config['training']['pin_memory'],
     )
+
+    # If split_file is None, SchNetPack uses default "split.npz"
+    if split_file:
+        dm_kwargs["split_file"] = split_file
+
+    custom_data = spk.data.AtomsDataModule(**dm_kwargs)
 
     custom_data.prepare_data()
     custom_data.setup()
