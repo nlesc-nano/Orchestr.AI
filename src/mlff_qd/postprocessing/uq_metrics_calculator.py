@@ -252,16 +252,20 @@ def verdict_short(v):
     return {'good': 'G', 'average': 'A', 'poor': 'P'}.get(v, '-')
 
 
-def pretty_table_full(row_names, col_names, table, verdicts):
-    col_w = max(8, max(len(c) for c in col_names))
-    header = "│".join([f"{'Metric':<{col_w}}"] + [f"{c:^{col_w+7}}" for c in col_names])
-    lines = [header, "─" * (col_w + (col_w+8) * len(col_names))]
-    for i, name in enumerate(row_names):
-        vals = [
-            f"{table[i][j]:10.4f} [{verdict_short(verdicts[i][j])}]"
-            for j in range(len(col_names))
-        ]
-        lines.append("│".join([f"{name:<{col_w}}"] + vals))
+def pretty_table_full(metric_groups, col_names, verdicts):
+    col_w = max(10, max(len(c) for c in col_names))
+    header = "│".join([f"{'Metric':<16}"] + [f"{c:^{col_w+7}}" for c in col_names])
+    lines = [header, "─" * (16 + (col_w+8) * len(col_names))]
+    
+    for group_name, row_names, table_data in metric_groups:
+        lines.append(f"  [{group_name}]")
+        for i, name in enumerate(row_names):
+            vals = [
+                f"{table_data[i][j]:10.4f} [{verdict_short(verdicts[name][j])}]"
+                for j in range(len(col_names))
+            ]
+            lines.append("│".join([f"{name:<16}"] + vals))
+        lines.append("─" * (16 + (col_w+8) * len(col_names)))
     return indent("\n".join(lines), "   ")
 
 # Thresholds and verdict logic (unchanged)
@@ -544,122 +548,114 @@ def run_uq_metrics(
         tNLL_calVAR_E = mean_student_t_nll(delta_e, np.zeros_like(delta_e), _safe_sigma(sigma_e_cal_var))
         tNLL_calISO_E = mean_student_t_nll(delta_e, np.zeros_like(delta_e), _safe_sigma(sigma_e_cal_iso))
 
-    # Define metrics and verdicts for table
-    row_names = ["NLL", "t-NLL", "RLL", "CRPS", "ENCE", "PICP95", "Sharpness", "CV", "KS_z", "Normal_p"]
+    # ------------ LOGGING TO FILE & TERMINAL PRINTING -------------------
+# ------------ DEFINE TABLE STRUCTURES -------------------
     col_names = ["RAW", "VAR", "ISO"]
+    
+    # Calculate Spearman metrics for the table
+    spearman_raw_F = spearman_corr(delta_a, sigma_a)
+    spearman_var_F = spearman_corr(delta_a, sigma_a_cal_var)
+    spearman_iso_F = spearman_corr(delta_a, sigma_a_cal_iso)
 
-    force_table = [
-        [m_raw_F["NLL_raw"],      m_var_F["NLL_calVAR"],      m_iso_F["NLL_calISO"]],
-        [tNLL_raw,                tNLL_calVAR,                tNLL_calISO],
-        [m_raw_F["RLL_raw"],      m_var_F["RLL_calVAR"],      m_iso_F["RLL_calISO"]],
-        [m_raw_F["CRPS_raw"],     m_var_F["CRPS_calVAR"],     m_iso_F["CRPS_calISO"]],
-        [m_raw_F["ENCE_raw"],     m_var_F["ENCE_calVAR"],     m_iso_F["ENCE_calISO"]],
-        [m_raw_F["PICP95_raw"],   m_var_F["PICP95_calVAR"],   m_iso_F["PICP95_calISO"]],
-        [m_raw_F["Sharpness_raw"],m_var_F["Sharpness_calVAR"],m_iso_F["Sharpness_calISO"]],
-        [m_raw_F["CV_raw"],       m_var_F["CV_calVAR"],       m_iso_F["CV_calISO"]],
-        [m_raw_F["KS_z_raw"],     m_var_F["KS_z_calVAR"],     m_iso_F["KS_z_calISO"]],
-        [m_raw_F["Normal_p_raw"], m_var_F["Normal_p_calVAR"], m_iso_F["Normal_p_calISO"]],
+    f_groups = [
+        ("Probabilistic", ["NLL", "t-NLL", "CRPS"], [
+            [m_raw_F["NLL_raw"], m_var_F["NLL_calVAR"], m_iso_F["NLL_calISO"]],
+            [tNLL_raw, tNLL_calVAR, tNLL_calISO],
+            [m_raw_F["CRPS_raw"], m_var_F["CRPS_calVAR"], m_iso_F["CRPS_calISO"]]
+        ]),
+        ("Calibration", ["ENCE", "PICP95"], [
+            [m_raw_F["ENCE_raw"], m_var_F["ENCE_calVAR"], m_iso_F["ENCE_calISO"]],
+            [m_raw_F["PICP95_raw"], m_var_F["PICP95_calVAR"], m_iso_F["PICP95_calISO"]]
+        ]),
+        ("Dispersion", ["Sharpness", "CV"], [
+            [m_raw_F["Sharpness_raw"], m_var_F["Sharpness_calVAR"], m_iso_F["Sharpness_calISO"]],
+            [m_raw_F["CV_raw"], m_var_F["CV_calVAR"], m_iso_F["CV_calISO"]]
+        ]),
+        ("Diagnostic", ["Spearman", "KS_z", "Normal_p"], [
+            [spearman_raw_F, spearman_var_F, spearman_iso_F],
+            [m_raw_F["KS_z_raw"], m_var_F["KS_z_calVAR"], m_iso_F["KS_z_calISO"]],
+            [m_raw_F["Normal_p_raw"], m_var_F["Normal_p_calVAR"], m_iso_F["Normal_p_calISO"]]
+        ])
     ]
-    if delta_e is not None:
-        energy_table = [
-            [m_raw_E["NLL_raw_E"],      m_var_E["NLL_calVAR_E"],      m_iso_E["NLL_calISO_E"]],
-            [tNLL_raw_E,                tNLL_calVAR_E,                tNLL_calISO_E],
-            [m_raw_E["RLL_raw_E"],      m_var_E["RLL_calVAR_E"],      m_iso_E["RLL_calISO_E"]],
-            [m_raw_E["CRPS_raw_E"],     m_var_E["CRPS_calVAR_E"],     m_iso_E["CRPS_calISO_E"]],
-            [m_raw_E["ENCE_raw_E"],     m_var_E["ENCE_calVAR_E"],     m_iso_E["ENCE_calISO_E"]],
-            [m_raw_E["PICP95_raw_E"],   m_var_E["PICP95_calVAR_E"],   m_iso_E["PICP95_calISO_E"]],
-            [m_raw_E["Sharpness_raw_E"],m_var_E["Sharpness_calVAR_E"],m_iso_E["Sharpness_calISO_E"]],
-            [m_raw_E["CV_raw_E"],       m_var_E["CV_calVAR_E"],       m_iso_E["CV_calISO_E"]],
-            [m_raw_E["KS_z_raw_E"],     m_var_E["KS_z_calVAR_E"],     m_iso_E["KS_z_calISO_E"]],
-            [m_raw_E["Normal_p_raw_E"], m_var_E["Normal_p_calVAR_E"], m_iso_E["Normal_p_calISO_E"]],
-        ]
 
-    # Qualitative verdicts for table
+    f_verdicts = {}
     context = {"NLL_base": mean_nll_base_c, "NLL_base_E": mean_nll_base_e}
-    force_verdicts = [
-        [qualitative_label(force_table[i][j], f"{row_names[i]}_{['raw','calVAR','calISO'][j]}", context)
-         for j in range(3)]
-        for i in range(len(row_names))
-    ]
+    for group_name, row_names, table_data in f_groups:
+        for i, name in enumerate(row_names):
+            f_verdicts[name] = [qualitative_label(table_data[i][j], f"{name}_{['raw','calVAR','calISO'][j]}", context) for j in range(3)]
+
     if delta_e is not None:
-        energy_verdicts = [
-            [qualitative_label(energy_table[i][j], f"{row_names[i]}_{['raw_E','calVAR_E','calISO_E'][j]}", context)
-             for j in range(3)]
-            for i in range(len(row_names))
+        spearman_raw_E = spearman_corr(delta_e, sigma_e)
+        spearman_var_E = spearman_corr(delta_e, sigma_e_cal_var)
+        spearman_iso_E = spearman_corr(delta_e, sigma_e_cal_iso)
+        
+        e_groups = [
+            ("Probabilistic", ["NLL", "t-NLL", "CRPS"], [
+                [m_raw_E["NLL_raw_E"], m_var_E["NLL_calVAR_E"], m_iso_E["NLL_calISO_E"]],
+                [tNLL_raw_E, tNLL_calVAR_E, tNLL_calISO_E],
+                [m_raw_E["CRPS_raw_E"], m_var_E["CRPS_calVAR_E"], m_iso_E["CRPS_calISO_E"]]
+            ]),
+            ("Calibration", ["ENCE", "PICP95"], [
+                [m_raw_E["ENCE_raw_E"], m_var_E["ENCE_calVAR_E"], m_iso_E["ENCE_calISO_E"]],
+                [m_raw_E["PICP95_raw_E"], m_var_E["PICP95_calVAR_E"], m_iso_E["PICP95_calISO_E"]]
+            ]),
+            ("Dispersion", ["Sharpness", "CV"], [
+                [m_raw_E["Sharpness_raw_E"], m_var_E["Sharpness_calVAR_E"], m_iso_E["Sharpness_calISO_E"]],
+                [m_raw_E["CV_raw_E"], m_var_E["CV_calVAR_E"], m_iso_E["CV_calISO_E"]]
+            ]),
+            ("Diagnostic", ["Spearman", "KS_z", "Normal_p"], [
+                [spearman_raw_E, spearman_var_E, spearman_iso_E],
+                [m_raw_E["KS_z_raw_E"], m_var_E["KS_z_calVAR_E"], m_iso_E["KS_z_calISO_E"]],
+                [m_raw_E["Normal_p_raw_E"], m_var_E["Normal_p_calVAR_E"], m_iso_E["Normal_p_calISO_E"]]
+            ])
         ]
+        e_verdicts = {}
+        for group_name, row_names, table_data in e_groups:
+            for i, name in enumerate(row_names):
+                e_verdicts[name] = [qualitative_label(table_data[i][j], f"{name}_{['raw_E','calVAR_E','calISO_E'][j]}", context) for j in range(3)]
 
-    # ------------ Best ENCE verdict -----------------------------------
-    best_F_idx = int(np.argmin([force_table[4][i] for i in range(3)]))  # ENCE row
-    best_E_idx = int(np.argmin([energy_table[4][i] for i in range(3)])) if delta_e is not None else 0
-    calib_labels = ["RAW", "VAR", "ISO"]
-
-    # ------------- Compose Output ------------------------------------
+    # ------------ LOGGING TO FILE & TERMINAL PRINTING -------------------
+    ence_F_vals = [m_raw_F["ENCE_raw"], m_var_F["ENCE_calVAR"], m_iso_F["ENCE_calISO"]]
+    best_F_idx = int(np.argmin(ence_F_vals))
+    
     banner = (
-        f"\n=== {split.upper()} | {tag} ===\n"
-        f"Best calibration for FORCES:   {calib_labels[best_F_idx]} (ENCE={force_table[3][best_F_idx]:.3f})\n"
+        f"\n=== UQ EVALUATION ({split.upper()}) ===\n"
+        f"★ Best Force Calibration: {col_names[best_F_idx]} (ENCE={ence_F_vals[best_F_idx]:.3f})\n"
+        f"{'─' * 60}"
     )
-    if delta_e is not None:
-        banner += f"Best calibration for ENERGIES: {calib_labels[best_E_idx]} (ENCE={energy_table[3][best_E_idx]:.3f})\n"
-    banner += "─" * 50
 
     print(banner)
-    print("Forces:")
-    print(pretty_table_full(row_names, col_names, force_table, force_verdicts))
+    print("FORCE UNCERTAINTY METRICS:\n" + pretty_table_full(f_groups, col_names, f_verdicts))
     if delta_e is not None:
-        print("\nEnergies:")
-        print(pretty_table_full(row_names, col_names, energy_table, energy_verdicts))
-    print("─" * 50)
+        print("\nENERGY UNCERTAINTY METRICS:\n" + pretty_table_full(e_groups, col_names, e_verdicts))
 
     _LOGGER.info(banner)
-    _LOGGER.info("\nForces:\n" + pretty_table_full(row_names, col_names, force_table, force_verdicts))
+    _LOGGER.info("\nFORCE UNCERTAINTY METRICS:\n" + pretty_table_full(f_groups, col_names, f_verdicts))
     if delta_e is not None:
-        _LOGGER.info("\nEnergies:\n" + pretty_table_full(row_names, col_names, energy_table, energy_verdicts))
-
-    # ------------ SUGGESTION SUMMARY -------------------------------
-    # Verdict for 'raw' (uncalibrated)
-    forces_raw_verdict = qualitative_label(m_raw_F['ENCE_raw'], "ENCE_raw")
-    if delta_e is not None:
-        energy_raw_verdict = qualitative_label(m_raw_E['ENCE_raw_E'], "ENCE_raw_E")
-    else:
-        energy_raw_verdict = "n/a"
-
-    # ------------ Best ENCE verdict -----------------------------------
-    best_F_idx = int(np.argmin([force_table[3][i] for i in range(3)]))  # ENCE row
-    best_F_label = calib_labels[best_F_idx]
-    best_F_val = force_table[3][best_F_idx]
-    if delta_e is not None:
-        best_E_idx = int(np.argmin([energy_table[3][i] for i in range(3)]))
-        best_E_label = calib_labels[best_E_idx]
-        best_E_val = energy_table[3][best_E_idx]
-    else:
-        best_E_label = None
-        best_E_val = None
+        _LOGGER.info("\nENERGY UNCERTAINTY METRICS:\n" + pretty_table_full(e_groups, col_names, e_verdicts))
 
     # ------------ SUGGESTION SUMMARY -------------------------------
     forces_raw_verdict = qualitative_label(m_raw_F['ENCE_raw'], "ENCE_raw")
-    if delta_e is not None:
-        energy_raw_verdict = qualitative_label(m_raw_E['ENCE_raw_E'], "ENCE_raw_E")
-    else:
-        energy_raw_verdict = "n/a"
 
-    lines = []
-    lines.append("=== UQ CALIBRATION SUGGESTION ===")
-
+    lines = ["=== UQ CALIBRATION SUGGESTION ==="]
     if forces_raw_verdict == "good":
-        lines.append("• Calibration is NOT needed for forces: uncalibrated uncertainties are already well calibrated (ENCE_raw = {:.3f})".format(m_raw_F['ENCE_raw']))
+        lines.append(f"• Calibration is NOT needed for forces: uncalibrated uncertainties are already well calibrated (ENCE_raw = {m_raw_F['ENCE_raw']:.3f})")
     else:
-        lines.append("• Best calibration for forces: {} (ENCE = {:.3f})".format(best_F_label, best_F_val))
+        lines.append(f"• Best calibration for forces: {col_names[best_F_idx]} (ENCE = {ence_F_vals[best_F_idx]:.3f})")
 
     if delta_e is not None:
+        ence_E_vals = [m_raw_E["ENCE_raw_E"], m_var_E["ENCE_calVAR_E"], m_iso_E["ENCE_calISO_E"]]
+        best_E_idx = int(np.argmin(ence_E_vals))
+        energy_raw_verdict = qualitative_label(m_raw_E['ENCE_raw_E'], "ENCE_raw_E")
+
         if energy_raw_verdict == "good":
-            lines.append("• Calibration is NOT needed for energies: uncalibrated uncertainties are already well calibrated (ENCE_raw_E = {:.3f})".format(m_raw_E['ENCE_raw_E']))
+            lines.append(f"• Calibration is NOT needed for energies: uncalibrated uncertainties are already well calibrated (ENCE_raw_E = {m_raw_E['ENCE_raw_E']:.3f})")
         else:
-            lines.append("• Best calibration for energies: {} (ENCE = {:.3f})".format(best_E_label, best_E_val))
+            lines.append(f"• Best calibration for energies: {col_names[best_E_idx]} (ENCE = {ence_E_vals[best_E_idx]:.3f})")
 
     suggestion_block = "\n".join(lines)
-    print(suggestion_block)
+    print("\n" + suggestion_block + "\n")
     _LOGGER.info("\n" + suggestion_block)
-
     # --------- MetricResult list, including all variants --------------
     metrics: list[MetricResult] = [
         MetricResult("NLL_base", mean_nll_base_c, "probabilistic"),

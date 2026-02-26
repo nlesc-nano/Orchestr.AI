@@ -22,14 +22,32 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.optimize import BFGSLineSearch
 from ase.vibrations import Vibrations
 
-# === Local module imports ===
-# Use the calculator from the calculator module
-from mlff_qd.postprocessing.calculator import MyTorchCalculator, ANGSTROM_TO_BOHR
-
 # --- Global Timing Variables ---
 last_call_time = None
 cumulative_time = 0.0
 
+def get_ase_calculator(model, config, device, neighbor_list):
+    """Returns the official ASE calculator for the chosen ML framework."""
+    framework = config.get("model_framework", "schnetpack").lower()
+    
+    if framework == "schnetpack":
+        from schnetpack.interfaces import SpkCalculator
+        return SpkCalculator(
+            model=model,
+            device=device,
+            energy="energy",
+            forces="forces",
+            neighbor_list=neighbor_list
+        )
+    elif framework == "mace":
+        # Note: MACE often initializes directly from the model path
+        from mace.calculators import MACECalculator
+        return MACECalculator(model=model, device=device, default_dtype="float32")
+    elif framework == "nequip":
+        from nequip.ase import NequIPCalculator
+        return NequIPCalculator.from_model(model, device=device)
+    else:
+        raise ValueError(f"Unknown framework: {framework}")
 
 def _reset_timers():
     """
@@ -146,8 +164,8 @@ def run_geo_opt(atoms, model_obj, device, neighbor_list, config):
 
     print("Setting up calculator for Geometry Optimization...")
     # Correct instantiation using the signature from calculator.py
-    calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    atoms.set_calculator(calc)
+    calc = get_ase_calculator(model, config, device, neighbor_list)
+    atoms.calc = calc
 
     print(f"Running Geometry Optimization (fmax={geo_opt_fmax}, steps={geo_opt_steps})...")
     # Use atoms directly, no need for Optimizable wrapper unless constraints change
@@ -282,7 +300,8 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
     # -----------------------------------------------------------------
     #  calculator + starting velocities
     # -----------------------------------------------------------------
-    atoms.calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
+    calc = get_ase_calculator(model, config, device, neighbor_list)
+    atoms.calc = calc
     MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
 
     # -----------------------------------------------------------------
@@ -360,8 +379,8 @@ def run_vibrational_analysis(atoms, model_obj, device, neighbor_list, config):
 
     print("Setting up calculator for Vibrational Analysis...")
     # Correct instantiation
-    calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    atoms.set_calculator(calc)
+    calc = get_ase_calculator(model, config, device, neighbor_list)
+    atoms.calc = calc
 
     print(f"Running tight Geometry Optimization for Vibrations (fmax={vib_opt_fmax}, steps={vib_opt_steps})...")
     optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02) # Smaller maxstep for tighter opt
