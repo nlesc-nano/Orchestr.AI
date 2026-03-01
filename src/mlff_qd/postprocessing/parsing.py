@@ -6,13 +6,14 @@ stacked XYZ files in a format compatible with the rest of the pipeline.
 """
 
 import numpy as np
+import re
 
 def parse_extxyz(file_path, label="dataset"):
     """
-    Extracts energies, forces, and positions from a custom plain XYZ file.
+    Extracts energies, forces, and positions from a custom plain or ASE extended XYZ file.
     Format expected:
     Line 1: n_atoms
-    Line 2: energy (float)
+    Line 2: energy (float) OR ASE properties string containing energy=...
     Line 3+: Symbol  x  y  z  fx  fy  fz
     """
     try:
@@ -25,6 +26,9 @@ def parse_extxyz(file_path, label="dataset"):
     energies, forces, positions = [], [], []
     i = 0
     
+    # Pre-compile the regex for maximum speed during the loop
+    energy_pattern = re.compile(r'energy=([+-]?\d+\.?\d*(?:[eE][+-]?\d+)?)', re.IGNORECASE)
+    
     while i < len(lines):
         line = lines[i].strip()
         if not line:
@@ -34,12 +38,17 @@ def parse_extxyz(file_path, label="dataset"):
         n_atoms = int(line)
         energy_line = lines[i+1].strip()
         
-        # 1. Parse Energy (robustly handle plain float or 'energy=...' formats)
+        # 1. Parse Energy (robustly handle plain float or 'energy=...' ASE formats)
         try:
+            # First try the fastest route: is the whole line just a float?
             energy = float(energy_line)
         except ValueError:
-            energy_str = [x for x in energy_line.split() if '=' not in x or 'energy' in x.lower()][-1].split('=')[-1]
-            energy = float(energy_str) if energy_str else np.nan
+            # If it fails, use the fast regex to hunt down "energy=X" in the ASE string
+            match = energy_pattern.search(energy_line)
+            if match:
+                energy = float(match.group(1))
+            else:
+                energy = np.nan
         
         energies.append(energy)
         

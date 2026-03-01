@@ -170,12 +170,35 @@ class EnsembleRunner:
             
         print(f"\n[EnsembleRunner] Inference for {len(frames)} frames across {self.n_models} models...")
         ens_E, ens_F, ens_L_frame, ens_L_atom = [], [], [], []
-        
+
         for m_idx in range(self.n_models):
-            model_path = os.path.join(self.ensemble_folder, f"best_model_{m_idx+1}")
+            # Try both with and without the underscore before the number
+            base_paths = [
+                os.path.join(self.ensemble_folder, f"best_model_{m_idx+1}"),
+                os.path.join(self.ensemble_folder, f"best_model{m_idx+1}")
+            ]
+            
+            # Auto-detect extension
+            model_path = None
+            for base_path in base_paths:
+                for ext in ["", ".pth", ".pt", ".nequip.pth"]:
+                    if os.path.exists(base_path + ext):
+                        model_path = base_path + ext
+                        break
+                if model_path:
+                    break
+
+            if model_path is None:
+                print(f"     Failed to find model {m_idx+1}: {base_model_path}(.pth/.pt)")
+                continue
+
             print(f"  -> Model {m_idx+1}/{self.n_models}: {model_path}")
             try:
-                model_obj = torch.load(model_path, map_location=self.device, weights_only=False)
+                # --- NEW LOGIC: Pass the path directly if NequIP ---
+                if self.config.get("model_framework", "schnetpack").lower() == "nequip":
+                    model_obj = model_path
+                else:
+                    model_obj = torch.load(model_path, map_location=self.device, weights_only=False)
             except Exception as e:
                 print(f"     Failed to load {model_path}: {e}")
                 continue
@@ -278,7 +301,11 @@ class EvaluationPipeline:
             print("Base model not found, skipping base evaluation.")
             return
 
-        base_model = _safe_load_model(base_path, device=self.device)
+        framework = self.config.get("model_framework", "schnetpack").lower()
+        if framework == "nequip":
+            base_model = base_path
+        else:
+            base_model = _safe_load_model(base_path, device=self.device)
         print(f"Loaded base model from {base_path}")
         
         pred_E, pred_F, _, _ = evaluate_model(
@@ -396,6 +423,11 @@ class EvaluationPipeline:
         sigma_E_pool_thin = sigma_E_pool[thin_idx].astype(float)
         F_train_thin = mean_L_frame[self.ds["train_idx"]].astype(float)
 
+        # Thin the forces (reshape to 3D, slice, then pass)
+        n_atoms_pool = len(pool_frames[0])
+        mu_F_pool_thin = mu_F_pool.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
+        sigma_F_pool_thin = sigma_F_pool.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
+
         # RDF filtering
         rdf_cache = "rdf_thresholds_cache.npz"
         if os.path.exists(rdf_cache):
@@ -424,6 +456,7 @@ class EvaluationPipeline:
 
         # Calibrations
         good_rows = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[self.ds["train_idx"]])
+        print(f"[Pool-AL] Extracted {good_rows.sum()} valid training frames for GP calibration.")
         alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_train_thin[good_rows], stats_ens.delta_E_frame[self.ds["train_idx"]][good_rows])
 
         calibrator = UQCalibrator()
@@ -437,7 +470,7 @@ class EvaluationPipeline:
             pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
             forces_train=self.ds["F_train_arr"], sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
             mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
-            mu_F_pool=mu_F_pool, sigma_F_pool=sigma_F_pool, rdf_thresholds=rdf_thresholds,
+            mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_thin, rdf_thresholds=rdf_thresholds,
             rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
             window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
             percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),

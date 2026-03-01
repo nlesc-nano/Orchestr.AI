@@ -33,8 +33,17 @@ def calibrate_alpha_reg_gcv(
 ) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
     """Calibrate a ridge (GP) model via GCV and compute predictive variances."""
     n, d = F_eval.shape
+    print(f"\n[GCV] Starting calibration. Matrix shape: {n} samples x {d} features")
 
-    U, s, _ = scipy.linalg.svd(F_eval, full_matrices=False, lapack_driver='gesvd')
+    try:
+        print("[GCV] Running SVD (Divide-and-Conquer)...")
+        # Removed memory-heavy lapack_driver='gesvd', letting SciPy use efficient defaults
+        U, s, _ = scipy.linalg.svd(F_eval, full_matrices=False)
+        print("[GCV] SVD complete.")
+    except MemoryError:
+        print("[GCV] ERROR: Ran out of memory during SVD!")
+        raise
+        
     UTy = U.T @ y
     s2 = s**2
 
@@ -46,9 +55,11 @@ def calibrate_alpha_reg_gcv(
         resid = y - y_hat
         return np.log((resid @ resid) / (n - df)**2)
 
+    print("[GCV] Optimizing ridge parameter...")
     res = scipy.optimize.minimize_scalar(gcv_obj, bounds=np.log(lambda_bounds), method='bounded')
     lam_opt = np.exp(res.x)
 
+    print("[GCV] Building covariance matrix and running Cholesky...")
     A = F_eval.T @ F_eval + lam_opt * np.eye(d)
 
     base_jitter = 1e-8 * np.trace(A) / d
@@ -62,6 +73,7 @@ def calibrate_alpha_reg_gcv(
     else:
         raise np.linalg.LinAlgError(f"A not PD even after jitter up to {jitter:.1e}")
 
+    print("[GCV] Computing latent variance terms...")
     G_eval = scipy.linalg.solve_triangular(L, F_eval.T, lower=True).T
     terms_lat = np.sum(G_eval**2, axis=1)
 
@@ -69,9 +81,9 @@ def calibrate_alpha_reg_gcv(
     y_hat = (a * UTy) @ U.T
     resid_mean = np.mean((y - y_hat)**2)
     alpha_sq = resid_mean / np.mean(terms_lat)
-
+    
+    print("[GCV] Calibration successful.")
     return alpha_sq, lam_opt, terms_lat, G_eval, L
-
 
 def d_optimal_full_order(X_cand: np.ndarray, X_train: np.ndarray, *, reg: float = 1e-6, verbose: bool = False):
     """Return *all* candidate indices in greedy D‑optimal order + γ for all."""

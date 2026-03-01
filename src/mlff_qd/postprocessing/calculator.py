@@ -249,64 +249,181 @@ class MaceCalculator(BaseCalculator):
 
         return energies_np, forces_list, latent_frame_list, latent_atom_list
 
-
 class NequipCalculator(BaseCalculator):
-    """Wrapper for NequIP / Allegro models."""
+    """Wrapper for NequIP / Allegro models using the official ASE calculator."""
+    def __init__(self, model_obj, device, nl_provider):
+        self.device = device
+        # model_obj is now the direct string path passed from evaluate.py!
+        self.model_path = model_obj 
+        self.calc = None
+
+    def prepare_batch(self, frames):
+        # Initialize the ASE calculator on the first batch
+        if self.calc is None:
+            from nequip.ase import NequIPCalculator
+            
+            # IDENTITY MAPPING: Extract species from the first frame and map them
+            # Exact logic matching run_nequip_sim.py (e.g., {'Cd': 'Cd', 'Se': 'Se'})
+            species = sorted(list(set(frames[0].get_chemical_symbols())))
+            chemical_map = {s: s for s in species}
+            
+            # Load directly from the file path! This perfectly preserves 
+            # the hidden r_max and TypeMapper metadata inside the TorchScript zip.
+            self.calc = NequIPCalculator.from_compiled_model(
+                compile_path=self.model_path,
+                chemical_species_to_atom_type_map=chemical_map,
+                device=str(self.device)
+            )
+                    
+        return frames
+
+    def forward(self, frames, n_atoms_list):
+        e_list, f_list, l_frame_list, l_atom_list = [], [], [], []
+        
+        for atoms in frames:
+            # 1. Secure Forward Pass via official ASE Calculator
+            atoms.calc = self.calc
+            
+            e = atoms.get_potential_energy()
+            f = atoms.get_forces()
+            
+            e_list.append(e)
+            f_list.append(f)
+            
+            # 2. Synthesize Latent Features for Active Learning
+            f_mags = np.linalg.norm(f, axis=1)
+            
+            # Create a histogram of force magnitudes (captures the dynamic state of the QD)
+            hist, _ = np.histogram(f_mags, bins=20, range=(0.0, 10.0))
+            
+            # Add basic statistical moments (mean force, max force, per-atom energy)
+            moments = np.array([f_mags.mean(), f_mags.std(), f_mags.max(), e / len(atoms)])
+            
+            # Combine into a single descriptive frame latent vector
+            frame_latent = np.concatenate([hist, moments]).astype(np.float64)
+            
+            # Atom-level latents (Force vector + Magnitude)
+            atom_latents = np.hstack([f, f_mags.reshape(-1, 1)]).astype(np.float64)
+            
+            l_frame_list.append(frame_latent)
+            l_atom_list.append(atom_latents)
+            
+        return np.array(e_list), f_list, l_frame_list, l_atom_list
+
+
+class NequipCalculator_extended(BaseCalculator):
+    """Wrapper for NequIP / Allegro models (supports v0.16.0+)."""
     def __init__(self, model, device, nl_provider):
         self.model = model
         self.device = device
         self.nl_provider = nl_provider
         self.model.to(self.device)
         self.model.eval()
+        self.type_mapper = None
+        self.r_max = float(self.nl_provider.cutoff)
 
         try:
             import cuequivariance_torch
             print("cuEquivariance detected! NequIP/Allegro ops will be hardware accelerated.")
         except ImportError:
-            print("cuEquivariance not found for NequIP.")
+            pass
 
     def prepare_batch(self, frames):
-        try:
-            from nequip.data import AtomicData
-            from torch_geometric.data import Batch
-        except ImportError:
-            raise ImportError("NequIP or torch_geometric is not installed.")
+        from nequip.data import from_ase, AtomicDataDict
+        import ase.neighborlist
+        
+        # 1. Initialize the TypeMapper on the first run
+        if self.type_mapper is None:
+            type_names = getattr(self.model, "type_names", None)
+            if type_names is None:
+                type_names = sorted(list(set(frames[0].get_chemical_symbols())))
+            try:
+                from nequip.data import TypeMapper
+                self.type_mapper = TypeMapper(type_names=type_names)
+            except ImportError:
+                self.type_mapper = type_names 
 
         data_list = []
         for atoms in frames:
-            # NequIP reads ASE directly, but needs to know the r_max (cutoff)
-            data = AtomicData.from_ase(atoms, r_max=self.nl_provider.cutoff)
-            data_list.append(data)
+            # 2. Extract ASE data
+            if isinstance(self.type_mapper, list):
+                data_dict = from_ase(atoms)
+                syms = atoms.get_chemical_symbols()
+                atom_types = [self.type_mapper.index(s) for s in syms]
+                data_dict[AtomicDataDict.ATOM_TYPE_KEY] = torch.tensor(atom_types, dtype=torch.long)
+            else:
+                try:
+                    data_dict = from_ase(atoms, type_mapper=self.type_mapper)
+                except TypeError:
+                    # Fallback if from_ase API changes
+                    data_dict = from_ase(atoms)
+                    syms = atoms.get_chemical_symbols()
+                    atom_types = [self.type_mapper.type_names.index(s) for s in syms]
+                    data_dict[AtomicDataDict.ATOM_TYPE_KEY] = torch.tensor(atom_types, dtype=torch.long)
 
-        # Batch them using standard torch_geometric logic
-        batch = Batch.from_data_list(data_list).to(self.device)
-        return batch
+            # 3. MANUALLY COMPUTE THE NEIGHBOR LIST GRAPH
+            # 'i' = sender atom, 'j' = receiver atom, 'S' = unit cell shift vector
+            i, j, S = ase.neighborlist.neighbor_list('ijS', atoms, self.r_max)
+            
+            # Inject the graph directly into the NequIP dictionary
+            data_dict[AtomicDataDict.EDGE_INDEX_KEY] = torch.stack([
+                torch.tensor(i, dtype=torch.long),
+                torch.tensor(j, dtype=torch.long)
+            ], dim=0)
+            
+            # The shift vector must be float32 to match the cell matrix multiplication
+            data_dict[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = torch.tensor(S, dtype=torch.float32)
+            
+            # Inject r_max just in case the model asserts it
+            r_max_key = getattr(AtomicDataDict, 'R_MAX_KEY', 'r_max')
+            data_dict[r_max_key] = torch.tensor([self.r_max], dtype=torch.float32)
+
+            # 4. Move tensors to GPU/CPU safely
+            for k, v in data_dict.items():
+                if isinstance(v, torch.Tensor):
+                    data_dict[k] = v.to(self.device)
+            data_list.append(data_dict)
+            
+        return data_list
 
     def forward(self, inputs, n_atoms_list):
-        try:
-            from nequip.data import AtomicDataDict
-        except ImportError:
-            raise ImportError("NequIP is not installed.")
+        from nequip.data import AtomicDataDict
 
         with torch.set_grad_enabled(True):
-            results = self.model(inputs)
-
-        # Extract using NequIP's strict dictionary keys
-        energies_np = results[AtomicDataDict.TOTAL_ENERGY_KEY].detach().cpu().numpy().astype(np.float64).flatten()
-        forces_cpu = results[AtomicDataDict.FORCE_KEY].detach().cpu()
-        forces_list = [f.numpy().astype(np.float64) for f in torch.split(forces_cpu, n_atoms_list, dim=0)]
-
-        # Extract Latents (NequIP calls this 'node_features')
-        latent_frame_list = [np.array([], dtype=np.float64)] * len(n_atoms_list)
-        latent_atom_list = [None] * len(n_atoms_list)
-        
-        if AtomicDataDict.NODE_FEATURES_KEY in results and results[AtomicDataDict.NODE_FEATURES_KEY] is not None:
-            latents_cpu = results[AtomicDataDict.NODE_FEATURES_KEY].detach().cpu()
-            latent_atom_list = [l.numpy() for l in torch.split(latents_cpu, n_atoms_list, dim=0)]
-            latent_frame_list = [np.sum(l, axis=0).astype(np.float64) for l in latent_atom_list]
-
-        return energies_np, forces_list, latent_frame_list, latent_atom_list
-
+            e_list, f_list, l_frame_list, l_atom_list = [], [], [], []
+            
+            for data_dict in inputs:
+                results = self.model(data_dict)
+                
+                # Extract Energy
+                e = results.get(AtomicDataDict.TOTAL_ENERGY_KEY, results.get('energy'))
+                if e is not None:
+                    e_list.append(e.detach().cpu().numpy().astype(np.float64).flatten()[0])
+                else:
+                    e_list.append(0.0)
+                
+                # Extract Forces
+                f = results.get(AtomicDataDict.FORCE_KEY, results.get('forces'))
+                if f is not None:
+                    f_list.append(f.detach().cpu().numpy().astype(np.float64))
+                else:
+                    num_atoms = data_dict['pos'].shape[0]
+                    f_list.append(np.zeros((num_atoms, 3), dtype=np.float64))
+                
+                # Extract Latents (Node Features)
+                l_key = getattr(AtomicDataDict, 'NODE_FEATURES_KEY', 'node_features')
+                l_atom = results.get(l_key, results.get('features'))
+                if l_atom is not None:
+                    l_np = l_atom.detach().cpu().numpy().astype(np.float64)
+                    l_atom_list.append(l_np)
+                    l_frame_list.append(l_np.mean(axis=0))
+                else:
+                    num_atoms = f_list[-1].shape[0]
+                    dummy = np.zeros((num_atoms, 1), dtype=np.float64)
+                    l_atom_list.append(dummy)
+                    l_frame_list.append(dummy.mean(axis=0))
+                    
+            return np.array(e_list), f_list, l_frame_list, l_atom_list
 
 # ==========================================
 # 3. THE INFERENCE ORCHESTRATOR
