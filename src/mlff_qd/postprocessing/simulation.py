@@ -31,13 +31,55 @@ def get_ase_calculator(model, config, device, neighbor_list):
     framework = config.get("model_framework", "schnetpack").lower()
 
     if framework == "schnetpack":
-        # THE EXACT ORIGINAL WORKING CODE
         from schnetpack.interfaces import SpkCalculator
-        return SpkCalculator(
-            model=model,
+        from ase.calculators.calculator import all_changes
+        import torch
+        
+        class LegacyOffsetSpkCalculator(SpkCalculator):
+            def __init__(self, model_obj, **kwargs):
+                self.mean_offset = 0.0
+                print("--- Attempting to surgically extract 'mean' offset ---")
+                try:
+                    # 1. Look for the mean offset in postprocessors
+                    if hasattr(model_obj, 'postprocessors'):
+                        for pp in model_obj.postprocessors:
+                            if hasattr(pp, 'mean'):
+                                mean_tensor = getattr(pp, 'mean')
+                                if isinstance(mean_tensor, torch.Tensor):
+                                    # Extract the scalar offset
+                                    self.mean_offset = mean_tensor.item()
+                                    print(f"Successfully extracted 'mean' offset: {self.mean_offset:.10f} (as FP64)")
+                                    break
+                        
+                        # 2. Disable internal postprocessors as done in the legacy code
+                        model_obj.postprocessors = torch.nn.ModuleList([])
+                        print("Successfully disabled model's internal postprocessors.")
+                except Exception as e:
+                    print(f"WARNING: Surgical 'mean' extraction failed: {e}")
+                
+                super().__init__(model=model_obj, **kwargs)
+
+            def calculate(self, atoms=None, properties=['energy', 'forces'], system_changes=all_changes):
+                # Run standard calculator forward pass
+                super().calculate(atoms, properties, system_changes)
+                
+                # 3. Apply the surgical offset fix on-the-fly
+                if 'energy' in self.results:
+                    total_offset = self.mean_offset * len(self.atoms)
+                    self.results['energy'] += total_offset
+                    
+                    # Also correct the logged ML energy if it exists
+                    if 'E_ml_avg' in self.results:
+                        self.results['E_ml_avg'] += total_offset
+
+        # Return our newly wrapped calculator
+        return LegacyOffsetSpkCalculator(
+            model_obj=model,
             device=device,
             energy="energy",
             forces="forces",
+            energy_units="eV",
+            forces_units="eV/Angstrom",
             neighbor_list=neighbor_list
         )
 

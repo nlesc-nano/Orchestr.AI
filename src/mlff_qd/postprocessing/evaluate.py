@@ -161,13 +161,17 @@ class EnsembleRunner:
         self.ensemble_folder = self.eval_cfg.get("ensemble_folder")
         self.n_models = self.eval_cfg.get("ensemble_size", 1)
         self.batch_size = self.eval_cfg.get("batch_size", 32)
-        
+
     def evaluate(self, frames, true_E=None, true_F=None, cache_file="ensemble_cache.npz"):
         if os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading cached predictions from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
-            return (data["ens_E"], data["ens_F"], data["ens_L_frame"], data["ens_L_atom"])
-            
+
+            # --- FIX: Safely load ens_L_atom only if it exists in the cache ---
+            ens_L_atom_cached = data["ens_L_atom"] if "ens_L_atom" in data else None
+            return (data["ens_E"], data["ens_F"], data["ens_L_frame"], ens_L_atom_cached)
+            # ------------------------------------------------------------------
+
         print(f"\n[EnsembleRunner] Inference for {len(frames)} frames across {self.n_models} models...")
         ens_E, ens_F, ens_L_frame, ens_L_atom = [], [], [], []
 
@@ -177,7 +181,7 @@ class EnsembleRunner:
                 os.path.join(self.ensemble_folder, f"best_model_{m_idx+1}"),
                 os.path.join(self.ensemble_folder, f"best_model{m_idx+1}")
             ]
-            
+
             # Auto-detect extension
             model_path = None
             for base_path in base_paths:
@@ -189,12 +193,11 @@ class EnsembleRunner:
                     break
 
             if model_path is None:
-                print(f"     Failed to find model {m_idx+1}: {base_model_path}(.pth/.pt)")
+                print(f"     Failed to find model {m_idx+1}: {base_paths[0]}(.pth/.pt)")
                 continue
 
             print(f"  -> Model {m_idx+1}/{self.n_models}: {model_path}")
             try:
-                # --- NEW LOGIC: Pass the path directly if NequIP ---
                 if self.config.get("model_framework", "schnetpack").lower() == "nequip":
                     model_obj = model_path
                 else:
@@ -202,7 +205,7 @@ class EnsembleRunner:
             except Exception as e:
                 print(f"     Failed to load {model_path}: {e}")
                 continue
-                
+
             preds_E, preds_F, preds_L_frame, preds_L_atom = evaluate_model(
                 frames=frames, true_energies=true_E, true_forces=true_F,
                 model_obj=model_obj, device=self.device, batch_size=self.batch_size,
@@ -212,20 +215,23 @@ class EnsembleRunner:
             ens_F.append(preds_F)
             ens_L_frame.append(preds_L_frame)
             ens_L_atom.append(preds_L_atom)
-            
+
         ens_E = np.array(ens_E)
         ens_F = np.array(ens_F, dtype=object)
         ens_L_frame = np.array(ens_L_frame)
+        # We still collect ens_L_atom for memory return, but we won't save it
         ens_L_atom = np.array(ens_L_atom, dtype=object)
-        
-        print(f"[EnsembleRunner] Saving compressed cache to {cache_file}...")
-        np.savez_compressed(
-            cache_file, 
-            ens_E=ens_E, ens_F=ens_F, 
-            ens_L_frame=ens_L_frame, ens_L_atom=ens_L_atom
-        )
-        return ens_E, ens_F, ens_L_frame, ens_L_atom
 
+        # --- FIX: Use uncompressed save and omit ens_L_atom ---
+        print(f"[EnsembleRunner] Saving uncompressed cache to {cache_file} (omitting atom latents)...")
+        np.savez(
+            cache_file,
+            ens_E=ens_E,
+            ens_F=ens_F,
+            ens_L_frame=ens_L_frame
+        )
+        # ------------------------------------------------------
+        return ens_E, ens_F, ens_L_frame, ens_L_atom
 
 def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):
     os.makedirs(out_dir, exist_ok=True)
@@ -446,11 +452,22 @@ class EvaluationPipeline:
         rdf_ok_mask = fast_filter_by_rdf_kdtree(pool_frames_thin, rdf_thresholds)
 
         # Energy Trace Logging
+        import scipy.spatial.distance
         df = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
         sm = df.rolling(50, center=True, min_periods=1).mean()
         bad_mask = np.zeros(len(mu_E_pool), dtype=bool)
+        
+        # Calculate baseline diameter
+        initial_pos = [pool_frames_thin[i].get_positions() for i in range(min(10, len(pool_frames_thin)))]
+        max_diam = np.median([scipy.spatial.distance.pdist(p).max() for p in initial_pos]) * 1.5
+
         for k, orig_i in enumerate(thin_idx):
-            if not rdf_ok_mask[k]: bad_mask[orig_i] = True
+            if not rdf_ok_mask[k]: 
+                bad_mask[orig_i] = True
+            else:
+                diam = scipy.spatial.distance.pdist(pool_frames_thin[k].get_positions()).max()
+                if diam > max_diam:
+                    bad_mask[orig_i] = True
             
         np.savez_compressed("pool_energy_trace.npz", steps=np.arange(len(mu_E_pool)), mu=sm["mu"].values, sigma=sm["sigma"].values, bad=bad_mask)
 

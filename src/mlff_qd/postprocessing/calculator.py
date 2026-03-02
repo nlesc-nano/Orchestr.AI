@@ -118,12 +118,31 @@ class BaseCalculator:
         """Runs inference and returns standard arrays: (energy, forces, latent_frame, latent_atom)"""
         raise NotImplementedError
 
-
 class SchnetpackCalculator(BaseCalculator):
     """Wrapper for SchNet and PaiNN models."""
     def __init__(self, model, device, nl_provider):
         self.model = model
         self.device = device
+        
+        # --- 1. Surgical Offset Fix for Batch Inference ---
+        self.mean_offset = 0.0
+        print("--- SchnetpackCalculator: Attempting to surgically extract 'mean' offset ---")
+        try:
+            if hasattr(self.model, 'postprocessors'):
+                for pp in self.model.postprocessors:
+                    if hasattr(pp, 'mean'):
+                        mean_tensor = getattr(pp, 'mean')
+                        if isinstance(mean_tensor, torch.Tensor):
+                            self.mean_offset = mean_tensor.item()
+                            print(f"Successfully extracted 'mean' offset: {self.mean_offset:.10f} (as FP64)")
+                            break
+                # Disable internal postprocessors to prevent double-counting or bugs
+                self.model.postprocessors = nn.ModuleList([])
+                print("Successfully disabled model's internal postprocessors.")
+        except Exception as e:
+            print(f"WARNING: Surgical 'mean' extraction failed: {e}")
+        # --------------------------------------------------
+
         self.model.to(self.device, dtype=torch.float32)
         self.model.eval()
 
@@ -167,6 +186,14 @@ class SchnetpackCalculator(BaseCalculator):
 
         # Extract predictions
         energies_np = results["energy"].detach().cpu().numpy().astype(np.float64).flatten()
+        
+        # --- 2. Apply Surgical Offset Fix to the Batch ---
+        if self.mean_offset != 0.0:
+            # Multiply the per-atom offset by the number of atoms in each frame
+            offsets = np.array(n_atoms_list, dtype=np.float64) * self.mean_offset
+            energies_np += offsets
+        # -------------------------------------------------
+
         forces_cpu = results["forces"].detach().cpu()
         forces_list = [f.numpy().astype(np.float64) for f in torch.split(forces_cpu, n_atoms_list, dim=0)]
 
@@ -471,22 +498,35 @@ class InferenceRunner:
                 all_latent_frame.extend(lat_frame)
                 all_latent_atom.extend(lat_atom)
 
-                # 4. Logging
+                # 4. Logging to File
                 if self.log_file:
                     for i in range(actual_size):
                         global_idx = batch_start + i
-                        true_e = true_energies[global_idx] if true_energies and global_idx < len(true_energies) else np.nan
+                        true_e = true_energies[global_idx] if true_energies is not None and global_idx < len(true_energies) else np.nan
                         pred_e = energies[i]
                         diff_e = pred_e - true_e
 
                         if not log_lines_buffer:
                             header = f"{'Frame':>6s} | {'True_E(eV)':>15s} | {'Pred_E(eV)':>15s} | {'Diff(eV)':>12s} | {'PrepTime(s)':>12s} | {'FwdTime(s)':>12s}\n"
                             log_lines_buffer.append(header)
-                        
+
                         log_lines_buffer.append(
                             f"{global_idx:6d} | {true_e:15.6f} | {pred_e:15.6f} | {diff_e:12.6f} | "
                             f"{prep_time/actual_size:12.6f} | {forward_time/actual_size:12.6f}\n"
                         )
+
+                # --- 5. Informative On-Screen Logging ---
+                if actual_size > 0:
+                    first_idx = batch_start
+                    true_e_first = true_energies[first_idx] if true_energies is not None and first_idx < len(true_energies) else np.nan
+                    pred_e_first = energies[0]
+                    diff_first = pred_e_first - true_e_first
+
+                    # Print stats for the first frame in this batch
+                    print(f"  [Batch {batches_processed+1}] Frame {first_idx:5d} | "
+                          f"Pred E: {pred_e_first:12.4f} eV | "
+                          f"True E: {true_e_first:12.4f} eV | Diff: {diff_first:10.4f} eV")
+                # ----------------------------------------
 
             except Exception as e:
                 print(f"Error processing batch {batches_processed}: {e}")
@@ -499,8 +539,6 @@ class InferenceRunner:
 
             cum_eval_time += (time.time() - batch_start_time)
             batches_processed += 1
-            if batches_processed % 10 == 0 or batches_processed == 1:
-                print(f"  Processed batch {batches_processed} (Avg total frame time: {cum_eval_time / len(all_energy_pred):.5f}s)")
 
         # Flush logs to disk
         if self.log_file and log_lines_buffer:

@@ -271,17 +271,81 @@ class _PoolActiveLearner:
         self.thr_Fmag = np.percentile(self.frame_max_force_train, self.percentile_F_low)
         self.train_Fmax_hard_cap = float(self.frame_max_force_train.max()) * float(self.hard_Fmax_train_mult)
 
-        # Apply RDF Filter
+        # Apply RDF Filter (Catches overlaps)
         self.rdf_ok_mask = fast_filter_by_rdf_kdtree(self.pool_frames, self.rdf_thresholds)
+
+        # ---> NEW: Apply Diameter Filter (Catches explosions) <---
+        # Calculate the median diameter of the first few frames (assumed stable)
+        initial_pos = [self.pool_frames[i].get_positions() for i in range(min(10, len(self.pool_frames)))]
+        initial_diameters = [scipy.spatial.distance.pdist(p).max() for p in initial_pos]
+        max_allowed_diameter = np.median(initial_diameters) * 1.5 # Allow 50% expansion
+        
+        for i, frame in enumerate(self.pool_frames):
+            if self.rdf_ok_mask[i]:
+                current_diameter = scipy.spatial.distance.pdist(frame.get_positions()).max()
+                if current_diameter > max_allowed_diameter:
+                    self.rdf_ok_mask[i] = False
+                    print(f"Frame {i} rejected: Cluster diameter ({current_diameter:.1f} A) exceeded limits.")
+        # ---------------------------------------------------------
+
         ok_idx = np.where(self.rdf_ok_mask)[0]
 
         # Calculate Adaptive Upper Caps from OK frames
         if len(ok_idx) > 0:
-            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, np.percentile(self.sigma_E_atom_pool[ok_idx], self.percentile_F_hi))
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, np.percentile(self.sigma_F_pool_max[ok_idx], self.percentile_F_hi))
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, np.percentile(self.sigma_F_pool_mean[ok_idx], self.percentile_F_hi))
-            self.thr_Fmag_hi_eff = max(self.thr_Fmag, np.percentile(self.frame_max_force_pool[ok_idx], self.percentile_F_hi))
-            self.allowed_offset_eff = max(0.0, np.percentile(self.mu_E_atom_pool[ok_idx], 5) - np.percentile(self.mu_E_atom_train, 95)) + 0.05
+            # ---> NEW: Define a "Calibration Subset" of strictly healthy frames <---
+            # Filter to only include frames whose predicted energy per atom is roughly 
+            # within the bounds of the training data. Distorting systems spike in energy.
+            E_train_min = self.mu_E_atom_train.min()
+            E_train_max = self.mu_E_atom_train.max()
+            allowed_buffer = 0.1  # Allow up to 100 meV/atom drift for calibration
+            
+            calib_mask = self.rdf_ok_mask & \
+                         (self.mu_E_atom_pool >= E_train_min - allowed_buffer) & \
+                         (self.mu_E_atom_pool <= E_train_max + allowed_buffer)
+            
+            calib_idx = np.where(calib_mask)[0]
+            
+            # If the trajectory blew up instantly, fallback to the first 10% of the trajectory
+            if len(calib_idx) < 20:
+                print(f"[AL] Warning: Few frames match training energy. Calibrating caps using early stable frames.")
+                calib_idx = ok_idx[:max(20, len(ok_idx)//10)]
+            else:
+                print(f"[AL] Calibrating adaptive caps using {len(calib_idx)} energy-stable inlier frames.")
+
+            # 1. Calculate the adaptive percentile from the CALIBRATION pool only
+            pool_E_hi = np.percentile(self.sigma_E_atom_pool[calib_idx], self.percentile_F_hi)
+            pool_F_hi = np.percentile(self.sigma_F_pool_max[calib_idx], self.percentile_F_hi)
+            pool_Fmean_hi = np.percentile(self.sigma_F_pool_mean[calib_idx], self.percentile_F_hi)
+            pool_Fmag_hi = np.percentile(self.frame_max_force_pool[calib_idx], self.percentile_F_hi)
+
+            # 2. Hard caps relative to the training data max uncertainty
+            # We must guarantee the maximum allowed ceiling is at least 5x the Floor (literature caps),
+            # otherwise a highly precise training set will pull the Ceiling below the Floor!
+            floor_E = getattr(self, 'hard_sigma_E_atom_min', 0.0)
+            floor_Fmax = getattr(self, 'hard_sigma_F_max_min', 0.0)
+            floor_Fmean = getattr(self, 'hard_sigma_F_mean_min', 0.0)
+
+            unc_mult = 15.0
+            max_allowed_E_hi = max(self.sigma_E_atom_train.max() * unc_mult, floor_E * 5.0)
+            max_allowed_F_hi = max(self.sigma_F_train_max.max() * unc_mult, floor_Fmax * 5.0)
+            max_allowed_Fmean_hi = max(self.sigma_F_train_mean.max() * unc_mult, floor_Fmean * 5.0)
+            max_allowed_Fmag_hi = max(self.frame_max_force_train.max() * 5.0, 20.0)
+
+            # 3. Final effective thresholds (bounded by the hard caps)
+            # The ceiling must be at least the pool percentile, but NEVER lower than 2x the Floor!
+            self.thr_sigma_E_hi_eff = min(max(pool_E_hi, floor_E * 2.0), max_allowed_E_hi)
+            self.thr_sigma_F_hi_eff = min(max(pool_F_hi, floor_Fmax * 2.0), max_allowed_F_hi)
+            self.thr_sigma_Fmean_hi_eff = min(max(pool_Fmean_hi, floor_Fmean * 2.0), max_allowed_Fmean_hi)
+            self.thr_Fmag_hi_eff = min(max(pool_Fmag_hi, self.thr_Fmag * 2.0), max_allowed_Fmag_hi)
+
+            # Ensure it never drops below the absolute low percentiles either
+            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, self.thr_sigma_E_hi_eff)
+            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, self.thr_sigma_F_hi_eff)
+            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, self.thr_sigma_Fmean_hi_eff)
+            self.thr_Fmag_hi_eff = max(self.thr_Fmag, self.thr_Fmag_hi_eff)
+
+            self.allowed_offset_eff = max(0.0, np.percentile(self.mu_E_atom_pool[calib_idx], 5) - np.percentile(self.mu_E_atom_train, 95)) + 0.05
+
         else:
             self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, 0.01)
             self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, 2.0 * self.sigma_F_train_max.max())
@@ -304,17 +368,44 @@ class _PoolActiveLearner:
             win = list(range(w0, min(w0 + self.window_size, n_pool)))
             win_end = win[-1] + 1
 
-            # Apply Filters
+            # --- Explicit Filtering with Counters ---
             win_good = [i for i in win if self.rdf_ok_mask[i]]
-            win_E = [i for i in win_good if self.mu_E_atom_pool[i] < self.thr_E_hi_atom]
-            win_CI = [i for i in win_E if (self.E_hi_pool_atom[i] >= (self.mu_E_atom_train.min() - self.allowed_offset_eff)) and
-                                          (self.E_lo_pool_atom[i] <= (self.mu_E_atom_train.max() + self.allowed_offset_eff))]
-            win_phys = [i for i in win_CI if self.sigma_E_atom_pool[i] < self.thr_sigma_E_hi_eff and
-                                             self.sigma_F_pool_max[i] < self.thr_sigma_F_hi_eff and
-                                             self.sigma_F_pool_mean[i] < self.thr_sigma_Fmean_hi_eff and
-                                             self.frame_max_force_pool[i] < self.thr_Fmag_hi_eff]
+            
+            win_E, win_CI, win_phys = [], [], []
+            drop_E_hi = drop_CI = drop_sE_hi = drop_sFmax_hi = drop_sFmean_hi = drop_Fmag_hi = 0
 
-            # Hard Triggers (Uncertainty minimums)
+            for i in win_good:
+                # 1. Energy Mean check
+                if self.mu_E_atom_pool[i] >= self.thr_E_hi_atom:
+                    drop_E_hi += 1
+                    continue
+                win_E.append(i)
+                
+                # 2. Confidence Interval overlap check
+                if not ((self.E_hi_pool_atom[i] >= (self.mu_E_atom_train.min() - self.allowed_offset_eff)) and
+                        (self.E_lo_pool_atom[i] <= (self.mu_E_atom_train.max() + self.allowed_offset_eff))):
+                    drop_CI += 1
+                    continue
+                win_CI.append(i)
+                
+                # 3. Physics / Uncertainty upper bounds (The "Ceiling")
+                if self.sigma_E_atom_pool[i] >= self.thr_sigma_E_hi_eff:
+                    drop_sE_hi += 1
+                    continue
+                if self.sigma_F_pool_max[i] >= self.thr_sigma_F_hi_eff:
+                    drop_sFmax_hi += 1
+                    continue
+                if self.sigma_F_pool_mean[i] >= self.thr_sigma_Fmean_hi_eff:
+                    drop_sFmean_hi += 1
+                    continue
+                if self.frame_max_force_pool[i] >= self.thr_Fmag_hi_eff:
+                    drop_Fmag_hi += 1
+                    continue
+                    
+                win_phys.append(i)
+            # ----------------------------------------
+
+            # Hard Triggers (Uncertainty minimums - The "Floor")
             high = [i for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and
                                           (self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min or
                                            self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min or
@@ -357,12 +448,14 @@ class _PoolActiveLearner:
 
             picks_abs = win_all[cand_idx_local[selected_local]].tolist() if selected_local else []
 
-            # --- NEW INFORMATIVE PRINT LOGGING ---
+            # --- NEW INFORMATIVE PRINT LOGGING WITH REJECTION REASONS ---
             print(f"  -> Window [{w0:4d} - {win_end:4d}] | "
-                  f"RDF_OK: {len(win_good):3d} | Phys_OK: {len(win_phys):3d} | "
-                  f"Uncertain: {len(high):3d} | Novel: {cand_mask.sum():3d} | "
-                  f"Selected: {len(selected_local):2d}")
-            # -------------------------------------
+                  f"GeomOK: {len(win_good):3d} | PhysOK: {len(win_phys):3d} | "
+                  f"Uncertain: {len(high):3d} | Novel: {cand_mask.sum():3d} | Sel: {len(selected_local):2d}")
+            if len(win_good) > len(win_phys):
+                print(f"       Drops: E_hi={drop_E_hi}, CI={drop_CI}, sE_hi={drop_sE_hi}, "
+                      f"sFmax_hi={drop_sFmax_hi}, sFmean_hi={drop_sFmean_hi}, Fmag_hi={drop_Fmag_hi}")
+            # ------------------------------------------------------------
 
             # Save Records
             for j_local, pidx in enumerate(win_all):
@@ -405,7 +498,24 @@ class _PoolActiveLearner:
     def _write_diagnostics(self):
         with open(f"{self.base}_per_frame_diagnostics.txt", "w") as fh:
             fh.write("# Pool Active Learning Diagnostics\n")
-            fh.write(f"{'idx':<8} {'window':>12} {'rdf_ok':>8} {'caps_ok':>8} {'force_inf':>10} {'γ_gate':>8} "
+            
+            # --- 1. Write Thresholds for the Plotting Script ---
+            fh.write(f"# thr_sigma_E_low        = {self.thr_sigma_E_low:.6f}\n")
+            fh.write(f"# thr_sigma_E_hi_eff     = {self.thr_sigma_E_hi_eff:.6f}\n")
+            fh.write(f"# thr_sigma_F            = {self.thr_sigma_F:.6f}\n")
+            fh.write(f"# thr_sigma_F_hi_eff     = {self.thr_sigma_F_hi_eff:.6f}\n")
+            fh.write(f"# thr_sigma_Fmean        = {self.thr_sigma_Fmean:.6f}\n")
+            fh.write(f"# thr_sigma_Fmean_hi_eff = {self.thr_sigma_Fmean_hi_eff:.6f}\n")
+            fh.write(f"# thr_Fmag               = {self.thr_Fmag:.6f}\n")
+            fh.write(f"# thr_Fmag_hi_eff        = {self.thr_Fmag_hi_eff:.6f}\n")
+            fh.write(f"# hard_sigma_E_atom_min  = {getattr(self, 'hard_sigma_E_atom_min', np.nan):.6f}\n")
+            fh.write(f"# hard_sigma_F_mean_min  = {getattr(self, 'hard_sigma_F_mean_min', np.nan):.6f}\n")
+            fh.write(f"# hard_sigma_F_max_min   = {getattr(self, 'hard_sigma_F_max_min', np.nan):.6f}\n")
+            fh.write(f"# train_Fmax_hard_cap    = {self.train_Fmax_hard_cap:.6f}\n")
+            fh.write("# ----------------------------------------\n\n")
+
+            # --- 2. Write Pool Diagnostics ---
+            fh.write(f"{'idx':<8} {'window':>12} {'geom_ok':>8} {'caps_ok':>8} {'force_inf':>10} {'γ_gate':>8} "
                      f"{'gamma0':>12} {'dM':>12} {'Dgain':>14} {'raw_score':>12} {'σE_atom':>12} "
                      f"{'σF_max':>12} {'σF_mean':>12} {'Fmax':>12} {'selected':>10} {'shortlist':>11}\n")
             
@@ -417,6 +527,13 @@ class _PoolActiveLearner:
                          f"{R['dgain_train']:>14.6f} {R['raw_score_window']:>12.6f} {R['sigma_E_atom']:>12.6f} "
                          f"{R['sigma_F_max']:>12.6f} {R['sigma_F_mean']:>12.6f} {R['Fmax']:>12.6f} "
                          f"{int(R['selected']):>10d} {int(pidx in shortlist_set):>11d}\n")
+
+            # --- 3. Write Train Data Block ---
+            fh.write("\n# TRAIN DATASET UNCERTAINTIES\n")
+            fh.write("# idx  sigma_E_atom  sigma_F_max  sigma_F_mean  Fmax\n")
+            for t_idx in range(self.forces_train.shape[0]):
+                fh.write(f"{t_idx:<6d} {self.sigma_E_atom_train[t_idx]:.6f} {self.sigma_F_train_max[t_idx]:.6f} "
+                         f"{self.sigma_F_train_mean[t_idx]:.6f} {self.frame_max_force_train[t_idx]:.6f}\n")
 
     def _print_summary(self):
         frac_geom = self.rdf_ok_mask.sum() / max(1, len(self.rdf_ok_mask))

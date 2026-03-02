@@ -111,10 +111,9 @@ def main():
             model_obj = model_path
             logging.info("NequIP model path passed to calculator successfully.")
         else:
-            # THE EXACT ORIGINAL WORKING SCHNETPACK LOAD
             best = torch.load(model_path, map_location=device, weights_only=False)
             best = best.to(device=device, dtype=torch.float32)
-
+            # Modify postprocessors FIRST
             if hasattr(best, "postprocessors"):
                 try:
                     from torch import nn
@@ -123,6 +122,10 @@ def main():
                 except Exception:
                     pass
 
+            if hasattr(best, "do_postprocessing"):
+                best.do_postprocessing = True
+
+            # THEN move the entire model (including the new postprocessors) to the device
             best.eval()
             model_obj = best
             logging.info("Model loaded and moved to device successfully.")
