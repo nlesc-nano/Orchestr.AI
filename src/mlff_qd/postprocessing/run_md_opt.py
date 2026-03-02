@@ -104,38 +104,33 @@ def main():
 
     try:
         logging.info(f"Loading ML model from {model_path}...")
+        framework = config.get("model_framework", "schnetpack").lower()
 
-        # --- FIXED: Added map_location=device ---
-        best = torch.load(model_path, map_location=device, weights_only=False)
-        best = best.to(device=device, dtype=torch.float32)
+        if framework == "nequip":
+            # Pass the path directly so NequIP ASE calc can extract metadata
+            model_obj = model_path
+            logging.info("NequIP model path passed to calculator successfully.")
+        else:
+            # THE EXACT ORIGINAL WORKING SCHNETPACK LOAD
+            best = torch.load(model_path, map_location=device, weights_only=False)
+            best = best.to(device=device, dtype=torch.float32)
 
-        # Future NOTE: if SchNetPack models carry postprocessors; filter out None safely (if present).
-        if hasattr(best, "postprocessors"):
-            try:
-                from torch import nn
-                filtered = [pp for pp in getattr(best, "postprocessors") if pp is not None]
-                setattr(best, "postprocessors", nn.ModuleList(filtered))
-            except Exception:
-                # If it's not iterable or not a ModuleList, just skip
-                pass
+            if hasattr(best, "postprocessors"):
+                try:
+                    from torch import nn
+                    filtered = [pp for pp in getattr(best, "postprocessors") if pp is not None]
+                    setattr(best, "postprocessors", nn.ModuleList(filtered))
+                except Exception:
+                    pass
 
-        best.eval()
-        model_obj = best
-        logging.info("Model loaded and moved to device successfully.")
-
-    except AttributeError as e:
-        # Defensive fallback in case the rare thread-local issue appears elsewhere
-        logging.warning(f"AttributeError while loading model ({e}). Retrying with simplest path...")
-        
-        # --- FIXED: Added map_location=device ---
-        best = torch.load(model_path, map_location=device)  
-        best = best.to(device=device, dtype=torch.float32)
+            best.eval()
+            model_obj = best
+            logging.info("Model loaded and moved to device successfully.")
 
     except Exception as e:
         logging.error(f"Error loading model {model_path}: {e}")
         logging.error(traceback.format_exc())
         sys.exit(1)
-
 
     # Set up the neighbor list based on configuration
     neighbor_list = setup_neighbor_list(config)

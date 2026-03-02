@@ -29,8 +29,9 @@ cumulative_time = 0.0
 def get_ase_calculator(model, config, device, neighbor_list):
     """Returns the official ASE calculator for the chosen ML framework."""
     framework = config.get("model_framework", "schnetpack").lower()
-    
+
     if framework == "schnetpack":
+        # THE EXACT ORIGINAL WORKING CODE
         from schnetpack.interfaces import SpkCalculator
         return SpkCalculator(
             model=model,
@@ -39,13 +40,26 @@ def get_ase_calculator(model, config, device, neighbor_list):
             forces="forces",
             neighbor_list=neighbor_list
         )
+
     elif framework == "mace":
-        # Note: MACE often initializes directly from the model path
         from mace.calculators import MACECalculator
-        return MACECalculator(model=model, device=device, default_dtype="float32")
+        return MACECalculator(model=model, device=str(device), default_dtype="float32")
+
     elif framework == "nequip":
         from nequip.ase import NequIPCalculator
-        return NequIPCalculator.from_model(model, device=device)
+        from ase.io import read
+        try:
+            atoms_temp = read(config.get("initial_xyz"))
+            species = sorted(list(set(atoms_temp.get_chemical_symbols())))
+            chemical_map = {s: s for s in species}
+        except Exception:
+            chemical_map = None
+
+        return NequIPCalculator.from_compiled_model(
+            compile_path=model,
+            device=str(device),
+            chemical_species_to_atom_type_map=chemical_map
+        )
     else:
         raise ValueError(f"Unknown framework: {framework}")
 
@@ -164,7 +178,7 @@ def run_geo_opt(atoms, model_obj, device, neighbor_list, config):
 
     print("Setting up calculator for Geometry Optimization...")
     # Correct instantiation using the signature from calculator.py
-    calc = get_ase_calculator(model, config, device, neighbor_list)
+    calc = get_ase_calculator(model_obj, config, device, neighbor_list)
     atoms.calc = calc
 
     print(f"Running Geometry Optimization (fmax={geo_opt_fmax}, steps={geo_opt_steps})...")
@@ -300,7 +314,7 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
     # -----------------------------------------------------------------
     #  calculator + starting velocities
     # -----------------------------------------------------------------
-    calc = get_ase_calculator(model, config, device, neighbor_list)
+    calc = get_ase_calculator(model_obj, config, device, neighbor_list)
     atoms.calc = calc
     MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
 
@@ -379,7 +393,7 @@ def run_vibrational_analysis(atoms, model_obj, device, neighbor_list, config):
 
     print("Setting up calculator for Vibrational Analysis...")
     # Correct instantiation
-    calc = get_ase_calculator(model, config, device, neighbor_list)
+    calc = get_ase_calculator(model_obj, config, device, neighbor_list)
     atoms.calc = calc
 
     print(f"Running tight Geometry Optimization for Vibrations (fmax={vib_opt_fmax}, steps={vib_opt_steps})...")

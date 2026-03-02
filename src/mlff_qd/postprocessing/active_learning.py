@@ -298,25 +298,28 @@ class _PoolActiveLearner:
 
     def _evaluate_windows(self):
         n_pool = len(self.pool_frames)
+        print(f"[AL] Evaluating {n_pool} pool frames in windows of size {self.window_size}...")
+
         for w0 in range(0, n_pool, self.window_size):
             win = list(range(w0, min(w0 + self.window_size, n_pool)))
-            
+            win_end = win[-1] + 1
+
             # Apply Filters
             win_good = [i for i in win if self.rdf_ok_mask[i]]
             win_E = [i for i in win_good if self.mu_E_atom_pool[i] < self.thr_E_hi_atom]
-            win_CI = [i for i in win_E if (self.E_hi_pool_atom[i] >= (self.mu_E_atom_train.min() - self.allowed_offset_eff)) and 
+            win_CI = [i for i in win_E if (self.E_hi_pool_atom[i] >= (self.mu_E_atom_train.min() - self.allowed_offset_eff)) and
                                           (self.E_lo_pool_atom[i] <= (self.mu_E_atom_train.max() + self.allowed_offset_eff))]
-            win_phys = [i for i in win_CI if self.sigma_E_atom_pool[i] < self.thr_sigma_E_hi_eff and 
-                                             self.sigma_F_pool_max[i] < self.thr_sigma_F_hi_eff and 
-                                             self.sigma_F_pool_mean[i] < self.thr_sigma_Fmean_hi_eff and 
+            win_phys = [i for i in win_CI if self.sigma_E_atom_pool[i] < self.thr_sigma_E_hi_eff and
+                                             self.sigma_F_pool_max[i] < self.thr_sigma_F_hi_eff and
+                                             self.sigma_F_pool_mean[i] < self.thr_sigma_Fmean_hi_eff and
                                              self.frame_max_force_pool[i] < self.thr_Fmag_hi_eff]
-            
-            # Hard Triggers
-            high = [i for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and 
-                                          (self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min or 
-                                           self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min or 
+
+            # Hard Triggers (Uncertainty minimums)
+            high = [i for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and
+                                          (self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min or
+                                           self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min or
                                            self.sigma_F_pool_max[i] >= self.hard_sigma_F_max_min)]
-            
+
             # Process Window Metrics
             win_all = np.array(win, dtype=int)
             sub_G_all = self.G_pool[win_all]
@@ -324,25 +327,25 @@ class _PoolActiveLearner:
             gamma_all = np.sqrt(quad_all)
             diff_all = sub_G_all - self.mu_Gtrain
             dM_all = np.sqrt(np.einsum("id,dk,ik->i", diff_all, self.Cov_inv, diff_all))
-            
+
             keep_gamma_mask = (gamma_all > self.gamma_thr)
             cand_mask = np.isin(win_all, high) & keep_gamma_mask
-            
+
             self.n_uncertain_total += len(high)
             self.n_gamma_gate_total += cand_mask.sum()
 
             cand_idx_local = np.where(cand_mask)[0]
             selected_local = []
-            
+
             # D-Optimal Selection
             if cand_idx_local.size > 0:
                 X_cand = sub_G_all[cand_idx_local]
                 order, gains, _ = d_optimal_full_order(X_cand, self.G_train)
-                
+
                 # Intra-batch diversity
                 dist_mat = np.linalg.norm(X_cand[:, None, :] - X_cand[None, :, :], axis=2)
                 remaining = list(range(X_cand.shape[0]))
-                
+
                 while len(selected_local) < self.min_k and remaining:
                     best_score, best_r = -np.inf, None
                     for r in remaining:
@@ -351,8 +354,15 @@ class _PoolActiveLearner:
                             best_score, best_r = score, r
                     selected_local.append(best_r)
                     remaining.remove(best_r)
-                    
+
             picks_abs = win_all[cand_idx_local[selected_local]].tolist() if selected_local else []
+
+            # --- NEW INFORMATIVE PRINT LOGGING ---
+            print(f"  -> Window [{w0:4d} - {win_end:4d}] | "
+                  f"RDF_OK: {len(win_good):3d} | Phys_OK: {len(win_phys):3d} | "
+                  f"Uncertain: {len(high):3d} | Novel: {cand_mask.sum():3d} | "
+                  f"Selected: {len(selected_local):2d}")
+            # -------------------------------------
 
             # Save Records
             for j_local, pidx in enumerate(win_all):
@@ -370,7 +380,7 @@ class _PoolActiveLearner:
                     "mu_E_atom": self.mu_E_atom_pool[pidx],
                     "selected": pidx in picks_abs
                 }
-            
+
             for r_sel in selected_local:
                 j_local = cand_idx_local[r_sel]
                 pidx = win_all[j_local]
