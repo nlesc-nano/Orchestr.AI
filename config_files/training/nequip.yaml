@@ -48,7 +48,13 @@ monitored_metric: val0_epoch/weighted_sum
 data:
   _target_: nequip.data.datamodule.ASEDataModule
   seed: 456             # dataset seed for reproducibility
-
+# Explicit dataset mode:
+# Use pre-split train/val/test files instead of split_dataset.
+# If any of these is set, all three are required and split_dataset is ignored.
+    # train_file_path: train.xyz
+    # val_file_path: val.xyz
+    # test_file_path: test.xyz
+    
   # here we take an ASE-readable file (in extxyz format) and split it into train:val:test = 80:10:10
   split_dataset:
     file_path: fcu.xyz
@@ -117,7 +123,7 @@ trainer:
   # use any Lightning supported logger
   logger:
     - _target_: lightning.pytorch.loggers.TensorBoardLogger
-      save_dir: ./logs
+      save_dir: ./resultsx
       name: tutorial_log
       version: null
       default_hp_metric: false
@@ -134,7 +140,7 @@ trainer:
     # https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.callbacks.ModelCheckpoint.html#lightning.pytorch.callbacks.ModelCheckpoint
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
       monitor: ${monitored_metric}            # validation metric to monitor
-      dirpath: ${hydra:runtime.output_dir}    # use hydra output directory
+      dirpath: resultsx
       filename: best                          # `best.ckpt` is the checkpoint name
       save_last: true                         # `last.ckpt` will be saved
 

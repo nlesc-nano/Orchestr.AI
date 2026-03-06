@@ -41,7 +41,7 @@ trainer:
   callbacks:
       
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
-      dirpath: ./results 
+      dirpath: ./resultsx 
       filename: best
       save_last: true
     
@@ -52,7 +52,7 @@ trainer:
       
   logger:
     - _target_: lightning.pytorch.loggers.TensorBoardLogger
-      save_dir: ./logs
+      save_dir: ./resultsx
       name: tutorial_log
       version: null
       default_hp_metric: false

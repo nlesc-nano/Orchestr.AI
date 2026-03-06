@@ -9,6 +9,7 @@ from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_lo
         prepare_transformations, setup_data_module, show_dataset_info )
 from mlff_qd.utils.model import setup_model
 from mlff_qd.utils.helpers import load_config
+from mlff_qd.utils.yaml_utils import validate_split_file
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -31,7 +32,7 @@ def print_model_summary(model, model_name="Model"):
     print(f"Total trainable parameters: {total_params:,}")
     print(f"{'=' * 50}\n")
     
-def run_schnet_training(config_path):
+def run_schnet_training(config_path, engine: str = "unknown"):
     #config = load_config(args.config)
     try:
         # Load config
@@ -59,8 +60,29 @@ def run_schnet_training(config_path):
     show_dataset_info(new_dataset)
     
     transformations = prepare_transformations(config,"train")
-    custom_data = setup_data_module(config, os.path.join(config['logging']['folder'], config['general']['database_name']), transformations, property_units)
     
+    
+    # split_file for SchNet/PaiNN engine-specific YAML
+    split_file = config.get("data", {}).get("split_file", None)
+    if split_file:
+        ds_path = config.get("data", {}).get("dataset_path", None)
+        
+        # Resolve relative path
+        if ds_path and not os.path.isabs(split_file):
+            split_file = os.path.join(os.path.dirname(os.path.abspath(ds_path)), split_file)
+
+        split_file = validate_split_file(split_file, engine)
+
+    logging.info("[MLFF_QD][%s] Training resolved split_file from config: %s", engine, split_file)
+    
+    custom_data = setup_data_module(
+        config,
+        os.path.join(config['logging']['folder'], config['general']['database_name']),
+        transformations,
+        property_units,
+        split_file=split_file, 
+    )
+
     nnpot, outputs = setup_model(config)
     print_model_summary(nnpot, model_name="NeuralNetworkPotential")
     

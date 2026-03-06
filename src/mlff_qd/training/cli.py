@@ -124,40 +124,128 @@ def get_output_dir(engine_cfg, platform):
             continue
     return "./results"
 
+EXPLICIT_KEYS = ("train_file_path", "val_file_path", "test_file_path")
+
+def _key_present(dct, key: str) -> bool:
+    # key exists in YAML even if value is null/empty
+    return isinstance(dct, dict) and (key in dct)
+
+def _missing_value(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
 def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None, write_temp=True):
     with open(yaml_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+
     data_path = xyz_path
+
     if not data_path:
         if platform in ["schnet", "painn", "fusion"]:
             data_path = config.get("data", {}).get("dataset_path", None)
+        
         elif platform in ["nequip", "allegro"]:
-            data_path = config.get("data", {}).get("split_dataset", {}).get("file_path", None)
+            d = config.get("data", {}) or {}
+
+            # MODE A intent: if user provided ANY explicit key (even null/empty), treat as explicit-mode attempt
+            explicit_intent = any(_key_present(d, k) for k in EXPLICIT_KEYS)
+
+            if explicit_intent:
+                logging.info(f"[{platform}] Running in MODE A: Explicit files (train_file_path, val_file_path, test_file_path)")
+
+                # Require all three keys
+                missing_keys = [k for k in EXPLICIT_KEYS if not _key_present(d, k)]
+                if missing_keys:
+                    raise ValueError(
+                        f"[{platform}] Explicit file mode detected, but missing keys: {', '.join(missing_keys)}. "
+                        f"Either provide all of {', '.join(EXPLICIT_KEYS)} OR remove them and use data.split_dataset."
+                    )
+
+                # Require non-empty values
+                bad_vals = [k for k in EXPLICIT_KEYS if _missing_value(d.get(k))]
+                if bad_vals:
+                    raise ValueError(
+                        f"[{platform}] Explicit file mode detected, but these are null/empty: {', '.join(bad_vals)}. "
+                        f"Either set valid paths for all three OR remove those keys and use data.split_dataset instead."
+                    )
+
+                # Validate files exist + extension
+                for k in EXPLICIT_KEYS:
+                    p = d[k]
+                    if not os.path.exists(p):
+                        raise ValueError(f"[{platform}] Missing file: {p}")
+                    validate_input_file(p, platform)
+
+                # Remove split_dataset to avoid ambiguity
+                d.pop("split_dataset", None)
+                config["data"] = d
+
+                # Placeholder for the legacy flow checks below
+                data_path = d["train_file_path"]
+
+            else:
+                logging.info(f"[{platform}] Running in MODE B: Using split_dataset for data split.")
+                data_path = (d.get("split_dataset") or {}).get("file_path", None)
+
+                if not data_path:
+                    raise ValueError(
+                        f"[{platform}] Missing split_dataset.file_path (and no explicit train/val/test keys provided)."
+                    )
+                if not os.path.exists(data_path):
+                    raise ValueError(f"[{platform}] Missing file for split_dataset: {data_path}")
+
+        
         elif platform == "mace":
             data_path = config.get("train_file", None)
-            
+
+    # If user passed --input (xyz_path), it should override ONLY in split mode.
+    # In explicit mode, we do NOT override train/val/test with --input.
+    if platform in ["nequip", "allegro"] and xyz_path:
+        d = config.get("data", {}) or {}
+        explicit_mode = any(k in d for k in ("train_file_path", "val_file_path", "test_file_path"))
+
+        if not explicit_mode:
+            data_path = xyz_path
+
+    # Generic missing-path check
     if not data_path or not os.path.exists(data_path):
         raise ValueError(
             f"YAML file {yaml_path} is missing a valid data path for platform '{platform}'.\n"
             "Either add the correct dataset path to your YAML or provide --input."
         )
-           
-     # Input validation only, no conversion 
+
+    # Input validation only, no conversion
     data_path = validate_input_file(data_path, platform)
-    
-    # Patch original path back into config (no conversion)
+
+    # Patch path back into config
     if platform in ["schnet", "painn", "fusion"]:
         config.setdefault("data", {})["dataset_path"] = data_path
+
     elif platform in ["nequip", "allegro"]:
-        config.setdefault("data", {}).setdefault("split_dataset", {})["file_path"] = data_path
+        d = config.setdefault("data", {})
+
+        # If explicit mode exists, keep it and ensure split_dataset removed
+        if d.get("train_file_path") and d.get("val_file_path"):
+            d.pop("split_dataset", None)
+
+            # re-validate again after patching, just to be safe but its optional:
+            for k in ("train_file_path", "val_file_path", "test_file_path"):
+                p = d.get(k)
+                if p is None:
+                    continue
+                validate_input_file(p, platform)
+
+        # Otherwise split mode
+        else:
+            d.setdefault("split_dataset", {})["file_path"] = data_path
+
     elif platform == "mace":
         config["train_file"] = data_path
-    
-    # Normalize engine-specific flags before writing the YAML
+
+    # Normalize engine-specific flags before writing YAML
     if platform in ["nequip", "allegro"]:
         apply_autoddp(config)
 
-    
+    # Write YAML out
     if write_temp:
         if not scratch_dir:
             scratch_dir = tempfile.gettempdir()
@@ -169,6 +257,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
         with open(yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f)
         return yaml_path
+
 
 def main():
     args = parse_args()
@@ -250,8 +339,8 @@ def main():
                 run_schnet_fine_tuning(MockArgs())
                 print(f"[CLI] Fine-tuning completed.")
             else:
-                run_schnet_training(engine_yaml)
-                run_schnet_inference(engine_yaml)
+                run_schnet_training(engine_yaml, engine=platform)
+                run_schnet_inference(engine_yaml, engine=platform)
 
         elif platform == "nequip":
             run_nequip_training(os.path.abspath(engine_yaml))
@@ -273,7 +362,8 @@ def main():
             best_model_dir=best_model_dir,
             explicit_data_paths=explicit_paths
         )
-        logging.info(f"Output standardized to {standardized_dir}")
+        logging.info(f"[paths] Result dir (engine output): {results_dir}")
+        logging.info(f"[paths] Standardized output dir: {standardized_dir}")
 
     except Exception as e:
         logging.error(f"Training or inference failed for platform {platform}: {str(e)}")

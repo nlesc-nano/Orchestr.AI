@@ -150,6 +150,11 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     # Prefer explicit dataset files referenced in the YAML; fallback to engine-based scan
     if explicit_data_paths:
         move_specific_prepared_data(explicit_data_paths, dest_dir)
+        
+        # Special-case: SchNet/PaiNN often produce a prepared split.npz (and related .npz files)
+        if platform in ("schnet", "painn"):
+            move_prepared_data(platform, source_dir, results_dir, dest_dir)
+            
     else:
         move_prepared_data(platform, source_dir, results_dir, dest_dir)
 

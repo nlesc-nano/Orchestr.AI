@@ -7,7 +7,14 @@ chemical_species: ${model_type_names}
 
 data:
   _target_: nequip.data.datamodule.ASEDataModule
-  seed: 456             
+  seed: 456   
+# Explicit dataset mode:
+# Use pre-split train/val/test files instead of split_dataset.
+# If any of these is set, all three are required and split_dataset is ignored.
+    # train_file_path: train.xyz
+    # val_file_path: val.xyz
+    # test_file_path: test.xyz
+    
   split_dataset:
     file_path:  #./consolidated_dataset_1000_CdSe_new.xyz
     train: 0.8
@@ -41,7 +48,7 @@ trainer:
   callbacks:
       
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
-      dirpath: ./results 
+      dirpath: ./resultsx
       filename: best
       save_last: true
     
@@ -52,7 +59,7 @@ trainer:
       
   logger:
     - _target_: lightning.pytorch.loggers.TensorBoardLogger
-      save_dir: ./logs
+      save_dir: ./resultsx
       name: tutorial_log
       version: null
       default_hp_metric: false

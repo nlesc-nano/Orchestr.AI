@@ -6,6 +6,7 @@ general:
 # Data handling settings
 data:
     dataset_path: 
+    split_file: 
     use_last_n: 100  # current testing
 # Model architecture settings
 model:

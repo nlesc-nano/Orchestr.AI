@@ -2,6 +2,7 @@ import yaml
 import os
 import logging
 from copy import deepcopy
+import numpy as np
 
 KEY_MAPPINGS = {
     "schnet": {
@@ -199,16 +200,30 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
     if platform in {"schnet", "painn", "fusion"}:
         dp = cfg.get("data", {}).get("dataset_path")
         if dp: paths.append(_resolve_path(yaml_dir, dp))
-
+        
+        # include optional split_file (engine-specific schnet/painn)
+        sf = cfg.get("data", {}).get("split_file")
+        if sf: paths.append(_resolve_path(yaml_dir, sf))
+    
         for k in ("val_dataset_path", "test_dataset_path"):
             p = cfg.get("data", {}).get(k)
             if p: paths.append(_resolve_path(yaml_dir, p))
 
     elif platform in {"nequip", "allegro"}:
-        sp = cfg.get("data", {}).get("split_dataset", {}).get("file_path")
+        d = cfg.get("data", {}) or {}
+
+        # explicit mode
+        for k in ("train_file_path", "val_file_path", "test_file_path"):
+            p = d.get(k)
+            if p: paths.append(_resolve_path(yaml_dir, p))
+
+        # split mode fallback
+        sp = d.get("split_dataset", {}).get("file_path")
         if sp: paths.append(_resolve_path(yaml_dir, sp))
+
+        # keep existing extra keys
         for k in ("test_file", "infer_file"):
-            p = cfg.get("data", {}).get(k)
+            p = d.get(k)
             if p: paths.append(_resolve_path(yaml_dir, p))
 
     elif platform == "mace":
@@ -751,6 +766,28 @@ def handle_mace_finetuning(engine_cfg, user_cfg):
         engine_cfg["E0s"] = "average"
 
     return engine_cfg
+  
+def validate_split_file(split_file: str, engine: str = "unknown") -> str:
+    logging.info("[MLFF_QD][%s] Validating split_file: %s", engine, split_file)
+
+    if not split_file.endswith(".npz"):
+        raise ValueError(
+            f"[MLFF_QD][{engine}] split_file must be a .npz file, but got: {split_file}"
+        )
+
+    if not os.path.exists(split_file):
+        raise FileNotFoundError(
+            f"[MLFF_QD][{engine}] split_file does not exist: {split_file}"
+        )
+
+    try:
+        np.load(split_file)
+    except Exception as e:
+        raise ValueError(
+            f"[MLFF_QD][{engine}] split_file exists but is not a valid NPZ file: {split_file}"
+        ) from e
+
+    return os.path.abspath(split_file)
 
 def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # Load configs
@@ -787,7 +824,12 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
     # Always patch in the correct data file after mapping
     for p in KEY_MAPPINGS[platform]["data.input_xyz_file"]:
         set_nested(engine_cfg, p.split("."), input_xyz_file)
-
+    
+    # NEW: unified YAML -> do NOT carry split_file into generated schnet/painn YAML
+    if platform in ["schnet", "painn"]:
+        if isinstance(engine_cfg.get("data"), dict):
+            engine_cfg["data"].pop("split_file", None)
+            
     # Patch split sizes
     if platform in ["nequip", "allegro"]:
         set_nested(engine_cfg, ["data", "split_dataset", "train"], smart_round(train_size))

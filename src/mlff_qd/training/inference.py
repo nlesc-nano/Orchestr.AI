@@ -18,6 +18,7 @@ from mlff_qd.utils.data_processing import ( preprocess_data, setup_logging_and_d
         prepare_transformations, setup_data_module, show_dataset_info )
 from mlff_qd.utils.model import setup_model
 from mlff_qd.utils.helpers import load_config, parse_args
+from mlff_qd.utils.yaml_utils import validate_split_file 
 
 def convert_units(value, from_unit, to_unit):
     """Convert energy or force values between different unit systems."""
@@ -170,7 +171,7 @@ def run_inference(loader, dataset_type, best_model, device, property_units, new_
         print("MLFF not yet converged. Continuing training...")
 
 @timer
-def run_schnet_inference(config_file=None):
+def run_schnet_inference(config_file, engine: str = "unknown"):
     if config_file is None:
         args = parse_args()  
         config_file = args.config  # Get the config file path
@@ -186,14 +187,26 @@ def run_schnet_inference(config_file=None):
     }
     # Prepare transformations and data module   
     transformations = prepare_transformations(config,"infer")
-           
+    
+    
+    
+    split_file = config.get("data", {}).get("split_file", None)
+    if split_file:
+        ds_path = config.get("data", {}).get("dataset_path", None)
+        if ds_path and not os.path.isabs(split_file):
+            split_file = os.path.join(os.path.dirname(os.path.abspath(ds_path)), split_file)
+        split_file = validate_split_file(split_file, engine)
+
+    logging.info("[MLFF_QD][%s] Inference resolved split_file: %s", engine, split_file)
+
     custom_data = setup_data_module(
         config,
         db_path,
         transformations,
-        property_units
+        property_units,
+        split_file=split_file,   
     )
-    
+        
     new_dataset = ASEAtomsData(db_path)
     # Show dataset information
     show_dataset_info(new_dataset)
