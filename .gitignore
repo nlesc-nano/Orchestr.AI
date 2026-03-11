@@ -16,3 +16,4 @@ src/mlff_qd/utils/__pycache__/*
 mlff_qd.egg-info/*
 
 src/mlff_qd/postprocessing/test/*/neighbor_cache/*
+*.patch

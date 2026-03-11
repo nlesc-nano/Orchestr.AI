@@ -30,6 +30,9 @@
 
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate mlff_newx3
+
+# Fix GLIBCXX mismatch: prefer conda's libstdc++
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONUNBUFFERED=1
 
 echo "SLURM_TMPDIR=${SLURM_TMPDIR:-<unset>}"
@@ -37,7 +40,6 @@ echo "TMPDIR=${TMPDIR:-<unset>}"
 echo "PWD(before)=$(pwd)"
 
 CDIR="$(pwd)"
-
 
 ###############################################
 # 2. SCRATCH DIRECTORY SETUP
@@ -89,7 +91,7 @@ mkdir -p results
 echo "→ DB (if created) will be at: $SCRATCH_DIR/results/$DB_NAME"
 
 ###############################################
-# 6. GPU VISIBILITY CHECK (Sanity Info)
+# 5. GPU VISIBILITY CHECK (Sanity Info)
 # Purpose:
 #   - Verify GPU allocation before training
 #   - Ensure CUDA_VISIBLE_DEVICES matches SLURM allocation
@@ -98,7 +100,24 @@ echo "SLURM_JOB_ID=$SLURM_JOB_ID"
 echo "SLURM_JOB_GPUS=$SLURM_JOB_GPUS"
 echo "SLURM_GPUS_ON_NODE=$SLURM_GPUS_ON_NODE"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || echo "nvidia-smi not available" 
+
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || echo "nvidia-smi not available"
+
+
+###############################################
+# FIX: PyTorch 2.6 + e3nn constants.pt load
+###############################################
+cat > "$SCRATCH_DIR/sitecustomize.py" << 'PY'
+try:
+    import torch
+    from torch.serialization import add_safe_globals
+    add_safe_globals([slice])
+except Exception:
+    pass
+PY
+export PYTHONPATH="$SCRATCH_DIR:${PYTHONPATH}"
+
+echo "SCRATCH_DIR=$SCRATCH_DIR"; ls -ld "$SCRATCH_DIR" "$SCRATCH_DIR/results" || true
 
 
 ###############################################
@@ -107,8 +126,8 @@ command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || echo "nvidia-smi not avai
 #   - Execute mlff_qd.training with given config
 #   - Fail-fast if DDP configuration is invalid (handled in Python)
 ###############################################
-srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CFG_BASENAME" "${@:2}" || echo "Training failed, proceeding with copy"
 
+srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CFG_BASENAME" "${@:2}" || echo "Training failed, proceeding with copy"
 
 ###############################################
 # 8. COPY RESULTS BACK
@@ -120,20 +139,37 @@ srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CFG_BASENAME" 
 JOB_OUT="$CDIR/$SLURM_JOB_ID"
 mkdir -p "$JOB_OUT"
 
-# Prefer standardized bundle (copy the directory, not its contents)
+# Always copy the config used
+cp -f "$SCRATCH_DIR/$CFG_BASENAME" "$JOB_OUT/" 2>/dev/null || true
+
+# ------------------------------------------------------------------
+# 1) HIGHEST PRIORITY: standardized bundle
+# ------------------------------------------------------------------
 if [ -d "$SCRATCH_DIR/standardized" ]; then
+    echo "✔ Found standardized outputs – copying and exiting"
     cp -r "$SCRATCH_DIR/standardized" "$JOB_OUT/"
-    cp -f "$SCRATCH_DIR/$CFG_BASENAME" "$JOB_OUT/" 2>/dev/null || true
+    exit 0
 fi
 
-# Always copy results dirs (DB, logs) for convenience
-[ -d "$SCRATCH_DIR/results" ] && cp -r "$SCRATCH_DIR/results" "$JOB_OUT/"
-
-# Benchmarks if present
+# ------------------------------------------------------------------
+# 2) NEXT PRIORITY: benchmark results
+# ------------------------------------------------------------------
 if [ -d "$SCRATCH_DIR/benchmark_results" ]; then
+    echo "✔ Found benchmark results – copying and exiting"
     cp -r "$SCRATCH_DIR/benchmark_results" "$JOB_OUT/"
-    [ -f "$SCRATCH_DIR/benchmark_summary.csv" ] && cp "$SCRATCH_DIR/benchmark_summary.csv" "$JOB_OUT/"
+    [ -f "$SCRATCH_DIR/benchmark_summary.csv" ] && \
+        cp "$SCRATCH_DIR/benchmark_summary.csv" "$JOB_OUT/"
+    exit 0
 fi
+
+# ------------------------------------------------------------------
+# 3) FALLBACK: raw outputs (NO standardization)
+# ------------------------------------------------------------------
+echo "⚠ No standardized or benchmark outputs – copying raw results"
+echo "Copying ALL scratch contents back to $JOB_OUT"
+
+# Copy everything in scratch to job output
+cp -a "$SCRATCH_DIR/." "$JOB_OUT/"
 
 ###############################################
 # 9. CLEANUP
