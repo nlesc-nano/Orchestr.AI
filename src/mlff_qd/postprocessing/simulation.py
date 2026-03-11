@@ -22,14 +22,88 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.optimize import BFGSLineSearch
 from ase.vibrations import Vibrations
 
-# === Local module imports ===
-# Use the calculator from the calculator module
-from mlff_qd.postprocessing.calculator import MyTorchCalculator, ANGSTROM_TO_BOHR
-
 # --- Global Timing Variables ---
 last_call_time = None
 cumulative_time = 0.0
 
+def get_ase_calculator(model, config, device, neighbor_list):
+    """Returns the official ASE calculator for the chosen ML framework."""
+    framework = config.get("model_framework", "schnetpack").lower()
+
+    if framework == "schnetpack":
+        from schnetpack.interfaces import SpkCalculator
+        from ase.calculators.calculator import all_changes
+        import torch
+        
+        class LegacyOffsetSpkCalculator(SpkCalculator):
+            def __init__(self, model_obj, **kwargs):
+                self.mean_offset = 0.0
+                print("--- Attempting to surgically extract 'mean' offset ---")
+                try:
+                    # 1. Look for the mean offset in postprocessors
+                    if hasattr(model_obj, 'postprocessors'):
+                        for pp in model_obj.postprocessors:
+                            if hasattr(pp, 'mean'):
+                                mean_tensor = getattr(pp, 'mean')
+                                if isinstance(mean_tensor, torch.Tensor):
+                                    # Extract the scalar offset
+                                    self.mean_offset = mean_tensor.item()
+                                    print(f"Successfully extracted 'mean' offset: {self.mean_offset:.10f} (as FP64)")
+                                    break
+                        
+                        # 2. Disable internal postprocessors as done in the legacy code
+                        model_obj.postprocessors = torch.nn.ModuleList([])
+                        print("Successfully disabled model's internal postprocessors.")
+                except Exception as e:
+                    print(f"WARNING: Surgical 'mean' extraction failed: {e}")
+                
+                super().__init__(model=model_obj, **kwargs)
+
+            def calculate(self, atoms=None, properties=['energy', 'forces'], system_changes=all_changes):
+                # Run standard calculator forward pass
+                super().calculate(atoms, properties, system_changes)
+                
+                # 3. Apply the surgical offset fix on-the-fly
+                if 'energy' in self.results:
+                    total_offset = self.mean_offset * len(self.atoms)
+                    self.results['energy'] += total_offset
+                    
+                    # Also correct the logged ML energy if it exists
+                    if 'E_ml_avg' in self.results:
+                        self.results['E_ml_avg'] += total_offset
+
+        # Return our newly wrapped calculator
+        return LegacyOffsetSpkCalculator(
+            model_obj=model,
+            device=device,
+            energy="energy",
+            forces="forces",
+            energy_units="eV",
+            forces_units="eV/Angstrom",
+            neighbor_list=neighbor_list
+        )
+
+    elif framework == "mace":
+        from mace.calculators import MACECalculator
+        return MACECalculator(model=model, device=str(device), default_dtype="float32")
+
+    elif framework == "nequip":
+        from nequip.ase import NequIPCalculator
+        from ase.io import read
+        try:
+            atoms_temp = read(config.get("initial_xyz"))
+            species = sorted(list(set(atoms_temp.get_chemical_symbols())))
+            chemical_map = {s: s for s in species}
+        except Exception:
+            chemical_map = None
+
+        return NequIPCalculator.from_compiled_model(
+            compile_path=model,
+            device=str(device),
+            chemical_species_to_atom_type_map=chemical_map
+        )
+    else:
+        raise ValueError(f"Unknown framework: {framework}")
 
 def _reset_timers():
     """
@@ -146,8 +220,8 @@ def run_geo_opt(atoms, model_obj, device, neighbor_list, config):
 
     print("Setting up calculator for Geometry Optimization...")
     # Correct instantiation using the signature from calculator.py
-    calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    atoms.set_calculator(calc)
+    calc = get_ase_calculator(model_obj, config, device, neighbor_list)
+    atoms.calc = calc
 
     print(f"Running Geometry Optimization (fmax={geo_opt_fmax}, steps={geo_opt_steps})...")
     # Use atoms directly, no need for Optimizable wrapper unless constraints change
@@ -282,7 +356,8 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
     # -----------------------------------------------------------------
     #  calculator + starting velocities
     # -----------------------------------------------------------------
-    atoms.calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
+    calc = get_ase_calculator(model_obj, config, device, neighbor_list)
+    atoms.calc = calc
     MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
 
     # -----------------------------------------------------------------
@@ -360,8 +435,8 @@ def run_vibrational_analysis(atoms, model_obj, device, neighbor_list, config):
 
     print("Setting up calculator for Vibrational Analysis...")
     # Correct instantiation
-    calc = MyTorchCalculator(model_obj, device, neighbor_list, config)
-    atoms.set_calculator(calc)
+    calc = get_ase_calculator(model_obj, config, device, neighbor_list)
+    atoms.calc = calc
 
     print(f"Running tight Geometry Optimization for Vibrations (fmax={vib_opt_fmax}, steps={vib_opt_steps})...")
     optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02) # Smaller maxstep for tighter opt

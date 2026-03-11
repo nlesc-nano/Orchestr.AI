@@ -14,7 +14,7 @@ import traceback
 import torch
 from ase.io import read
 
-from mlff_qd.postprocessing.calculator import setup_neighbor_list, assign_charges
+from mlff_qd.postprocessing.calculator import setup_neighbor_list
 from mlff_qd.postprocessing.simulation import run_md, run_geo_opt, run_vibrational_analysis
 from mlff_qd.postprocessing.evaluate import run_eval
 from mlff_qd.utils.helpers import load_config
@@ -49,7 +49,6 @@ def main():
     - Load configuration from "config.yaml"
     - Read the initial structure from file
     - Load and set up the ML model and neighbor list
-    - Optionally assign initial charges to atoms
     - Execute the task specified by 'run_type': MD, GEO_OPT, VIB, or EVAL
     """
     logging.info("--- Starting MLFF Simulation/Evaluation ---")
@@ -99,54 +98,42 @@ def main():
         logging.error(f"Error reading {initial_xyz}: {e}")
         sys.exit(1)
 
-    # Optionally assign initial charges if electrostatics are enabled
-    if config.get("include_electrostatic", True):
-        charges_dict = config.get("atomic_charges")
-        if charges_dict:
-            try:
-                charges = assign_charges(atoms, charges_dict)
-                atoms.set_initial_charges(charges)
-                logging.info("Assigned initial charges.")
-            except Exception as e:
-                logging.error(f"Error assigning charges: {e}")
-                sys.exit(1)
-    
     # Set up the ML model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
+
     try:
         logging.info(f"Loading ML model from {model_path}...")
+        framework = config.get("model_framework", "schnetpack").lower()
 
-        best = torch.load(model_path, weights_only=False)
-        best = best.to(device=device, dtype=torch.float32)
+        if framework == "nequip":
+            # Pass the path directly so NequIP ASE calc can extract metadata
+            model_obj = model_path
+            logging.info("NequIP model path passed to calculator successfully.")
+        else:
+            best = torch.load(model_path, map_location=device, weights_only=False)
+            best = best.to(device=device, dtype=torch.float32)
+            # Modify postprocessors FIRST
+            if hasattr(best, "postprocessors"):
+                try:
+                    from torch import nn
+                    filtered = [pp for pp in getattr(best, "postprocessors") if pp is not None]
+                    setattr(best, "postprocessors", nn.ModuleList(filtered))
+                except Exception:
+                    pass
 
-        # Future NOTE: if SchNetPack models carry postprocessors; filter out None safely (if present).
-        if hasattr(best, "postprocessors"):
-            try:
-                from torch import nn
-                filtered = [pp for pp in getattr(best, "postprocessors") if pp is not None]
-                setattr(best, "postprocessors", nn.ModuleList(filtered))
-            except Exception:
-                # If it's not iterable or not a ModuleList, just skip
-                pass
+            if hasattr(best, "do_postprocessing"):
+                best.do_postprocessing = True
 
-        best.eval()
-        model_obj = best
-        logging.info("Model loaded and moved to device successfully.")
+            # THEN move the entire model (including the new postprocessors) to the device
+            best.eval()
+            model_obj = best
+            logging.info("Model loaded and moved to device successfully.")
 
-    except AttributeError as e:
-        # Defensive fallback in case the rare thread-local issue appears elsewhere
-        logging.warning(f"AttributeError while loading model ({e}). Retrying with simplest path...")
-        best = torch.load(model_path)  # no kwargs at all
-        best = best.to(device=device, dtype=torch.float32)
-        best.eval()
-        model_obj = best
-        logging.info("Model loaded (fallback) and moved to device successfully.")
     except Exception as e:
         logging.error(f"Error loading model {model_path}: {e}")
         logging.error(traceback.format_exc())
         sys.exit(1)
-
 
     # Set up the neighbor list based on configuration
     neighbor_list = setup_neighbor_list(config)
