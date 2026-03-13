@@ -12,6 +12,8 @@ from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict
 from itertools import combinations
+from scipy.spatial import cKDTree
+from scipy.sparse.csgraph import connected_components
 
 def debug_plot_rdfs(reference_frames, rdf_thresholds, r_max=6.0, dr=0.02, outprefix="rdf_DEBUG"):
     """Saves RDF plots for all active species pairs."""
@@ -179,4 +181,131 @@ def plot_rdf_comparison(pair, rdf_ref, rdf_all, rdf_kept, rdf_thresholds, r_max=
     fig.tight_layout()
     fig.savefig(f"{outprefix}_{pair[0]}{pair[1]}.png", dpi=200)
     plt.close(fig)
+
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.sparse.csgraph import connected_components
+
+def fast_filter_connectivity_and_arms(frames, ok_mask, local_radius=None, margin=0.8, arm_tol=0.5, calib_frames=20, verbose=True):
+    """
+    Reject unphysical geometries where the cluster has fractured or formed 1D chains.
+    Uses Graph Connectivity for detachments and Volumetric Spatial Density for arms.
+    """
+    n_frames = len(frames)
+
+    if verbose:
+        print("\n[AL] --- Calibrating Connectivity & Local Density (Arm) Filter ---")
+
+    initial_nn_max = []
+    initial_same_species_max = []
+
+    # --- PASS 1: Calibrate Shell Boundaries ---
+    for i in range(min(calib_frames, n_frames)):
+        pos = frames[i].get_positions()
+        syms = frames[i].get_chemical_symbols()
+        if len(pos) < 2: continue
+
+        tree = cKDTree(pos)
+
+        # 1. First Shell (Bonded Pairs) -> Nearest Neighbor
+        distances, indices = tree.query(pos, k=50) # Query enough neighbors to find the 2nd shell
+        initial_nn_max.append(distances[:, 1].max())
+
+        # 2. Second Shell (Non-Bonded Pairs) -> Nearest SAME-SPECIES Neighbor
+        if local_radius is None:
+            frame_max_same_species = 0.0
+            for atom_idx, atom_sym in enumerate(syms):
+                # Look through neighbors to find the first one with the identical chemical symbol
+                for j in range(1, 50):
+                    neighbor_idx = indices[atom_idx, j]
+                    if syms[neighbor_idx] == atom_sym:
+                        dist = distances[atom_idx, j]
+                        if dist > frame_max_same_species:
+                            frame_max_same_species = dist
+                        break
+            initial_same_species_max.append(frame_max_same_species)
+
+    if not initial_nn_max:
+        return ok_mask
+
+    # Define the first-shell boundary (Detachment limit)
+    base_of_first_peak = np.percentile(initial_nn_max, 99)
+    max_allowed_bond = base_of_first_peak + margin
+
+    # Define the second-shell boundary (Local Radius) based on non-bonded pairs
+    if local_radius is None:
+        base_of_nonbonded_peak = np.percentile(initial_same_species_max, 99)
+        local_radius = base_of_nonbonded_peak + margin
+
+    # --- PASS 2: Calibrate Baseline Volumetric Density ---
+    initial_env_min = []
+    for i in range(min(calib_frames, n_frames)):
+        pos = frames[i].get_positions()
+        if len(pos) < 2: continue
+
+        tree = cKDTree(pos)
+        # Count total atoms inside the discovered 2nd-shell sphere
+        neighbor_counts = [len(n) for n in tree.query_ball_point(pos, r=local_radius)]
+        initial_env_min.append(min(neighbor_counts))
+
+    baseline_min_neighbors = int(np.median(initial_env_min))
+
+    # --- SMART ARM TOLERANCE ---
+    # Ensure arm_tol is a float so it triggers the percentage logic
+    arm_tol_val = float(arm_tol)
+    if arm_tol_val < 1.0:
+        # If passed as a fraction (e.g., 0.5), require that percentage of the baseline
+        min_allowed_neighbors = max(1, int(baseline_min_neighbors * arm_tol_val))
+    else:
+        # If passed as an integer > 1 (e.g., 2.0), subtract it directly
+        min_allowed_neighbors = max(1, baseline_min_neighbors - int(arm_tol_val))
+
+    if verbose:
+        print(f"[AL] 1. Connectivity  | Cutoff: {max_allowed_bond:.2f} Å (Bonded peak base {base_of_first_peak:.2f} Å + {margin} Å)")
+        if initial_same_species_max:
+            print(f"[AL] 2. Local Density | Radius: {local_radius:.2f} Å (Non-bonded peak base {base_of_nonbonded_peak:.2f} Å + {margin} Å)")
+        else:
+            print(f"[AL] 2. Local Density | Radius: {local_radius:.2f} Å (Provided manually)")
+        print(f"[AL] 3. Arm Threshold | Baseline corner has ~{baseline_min_neighbors} atoms within {local_radius:.2f} Å.")
+        print(f"[AL]                  | Rejecting frames if any atom has < {min_allowed_neighbors} atoms in this radius (tol={arm_tol_val}).")
+
+    # --- PASS 3: Apply Filters ---
+    n_rejected_fracture = 0
+    n_rejected_arm = 0
+
+    for i, frame in enumerate(frames):
+        if ok_mask[i]:
+            pos = frame.get_positions()
+            tree = cKDTree(pos)
+
+            # Check 1: Graph Connectivity
+            adj_matrix = tree.sparse_distance_matrix(tree, max_allowed_bond)
+            n_components, labels = connected_components(csgraph=adj_matrix, directed=False)
+
+            if n_components > 1:
+                ok_mask[i] = False
+                n_rejected_fracture += 1
+                if verbose:
+                    unique, counts = np.unique(labels, return_counts=True)
+                    # Convert numpy int64 to standard Python ints for clean printing!
+                    detached_sizes = [int(c) for c in sorted(counts)[:-1]]
+                    print(f"Frame {i:4d} rejected: Cluster fractured! ({n_components} pieces. Chunk sizes: {detached_sizes})")
+                continue
+
+            # Check 2: Volumetric Local Density
+            neighbor_counts = [len(n) for n in tree.query_ball_point(pos, r=local_radius)]
+            min_atom_neighbors = min(neighbor_counts)
+
+            if min_atom_neighbors < min_allowed_neighbors:
+                ok_mask[i] = False
+                n_rejected_arm += 1
+                if verbose:
+                    print(f"Frame {i:4d} rejected: Unphysical 'arm' detected! "
+                          f"(Min neighbors in {local_radius:.2f} Å is {min_atom_neighbors}, required {min_allowed_neighbors})")
+
+    if verbose:
+        print(f"[Connectivity/Arm] Cohesion sanity: {ok_mask.sum()}/{n_frames} frames OK. "
+              f"Rejected {n_rejected_fracture} (fractured), {n_rejected_arm} (arms).")
+
+    return ok_mask
 

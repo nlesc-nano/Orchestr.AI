@@ -34,41 +34,70 @@ def get_ase_calculator(model, config, device, neighbor_list):
         from schnetpack.interfaces import SpkCalculator
         from ase.calculators.calculator import all_changes
         import torch
-        
+
         class LegacyOffsetSpkCalculator(SpkCalculator):
             def __init__(self, model_obj, **kwargs):
                 self.mean_offset = 0.0
-                print("--- Attempting to surgically extract 'mean' offset ---")
+                self.atomref = None
+                print("--- Attempting to surgically extract 'mean' and 'atomref' offsets ---")
                 try:
-                    # 1. Look for the mean offset in postprocessors
                     if hasattr(model_obj, 'postprocessors'):
                         for pp in model_obj.postprocessors:
-                            if hasattr(pp, 'mean'):
-                                mean_tensor = getattr(pp, 'mean')
-                                if isinstance(mean_tensor, torch.Tensor):
-                                    # Extract the scalar offset
-                                    self.mean_offset = mean_tensor.item()
-                                    print(f"Successfully extracted 'mean' offset: {self.mean_offset:.10f} (as FP64)")
-                                    break
-                        
-                        # 2. Disable internal postprocessors as done in the legacy code
+                            
+                            # 1. Aggressively extract mean
+                            extracted_mean = 0.0
+                            if hasattr(pp, 'state_dict') and 'mean' in pp.state_dict():
+                                extracted_mean = pp.state_dict()['mean'].item()
+                            elif hasattr(pp, 'mean') and isinstance(getattr(pp, 'mean'), torch.Tensor):
+                                extracted_mean = getattr(pp, 'mean').item()
+                            
+                            # 2. Flag and process the mean
+                            if abs(extracted_mean) > 1e-8:
+                                self.mean_offset = extracted_mean
+                                print(f"\n⚠️  FLAG: Non-zero dataset mean offset detected: {self.mean_offset:.6f} eV/atom")
+                                print("    -> The model was trained with 'remove_mean: true'.")
+                                print("    -> For optimal transferability, consider training future")
+                                print("       models with 'remove_mean: false'.\n")
+                            else:
+                                self.mean_offset = 0.0
+                                print("\n✅ FLAG: Mean offset is 0.0 (Trained with 'remove_mean: false').")
+                                print("    -> Model relies purely on isolated atomic energies.\n")
+                                
+                            # 3. Extract atomic references
+                            for ref_name in ['atomref', 'z_offsets']:
+                                if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
+                                    ref_val = getattr(pp, ref_name)
+                                    if isinstance(ref_val, torch.Tensor):
+                                        self.atomref = ref_val.detach().cpu().numpy().astype(np.float64).flatten()
+                                    elif hasattr(ref_val, 'weight'):
+                                        self.atomref = ref_val.weight.detach().cpu().numpy().astype(np.float64).flatten()
+                                    print(f"Successfully extracted '{ref_name}' (isolated atomic energies).")
+                                    
+                        # Disable internal postprocessors 
                         model_obj.postprocessors = torch.nn.ModuleList([])
                         print("Successfully disabled model's internal postprocessors.")
                 except Exception as e:
-                    print(f"WARNING: Surgical 'mean' extraction failed: {e}")
+                     print(f"WARNING: Surgical extraction failed: {e}")
                 
                 super().__init__(model=model_obj, **kwargs)
 
             def calculate(self, atoms=None, properties=['energy', 'forces'], system_changes=all_changes):
-                # Run standard calculator forward pass
                 super().calculate(atoms, properties, system_changes)
                 
-                # 3. Apply the surgical offset fix on-the-fly
+                # Apply the surgical offset fix on-the-fly in float64
                 if 'energy' in self.results:
-                    total_offset = self.mean_offset * len(self.atoms)
+                    total_offset = 0.0
+                    
+                    if self.atomref is not None:
+                        Z = self.atoms.numbers
+                        valid_Z = np.clip(Z, 0, len(self.atomref) - 1)
+                        total_offset += np.sum(self.atomref[valid_Z])
+                        
+                    if self.mean_offset != 0.0:
+                        total_offset += self.mean_offset * len(self.atoms)
+                        
                     self.results['energy'] += total_offset
                     
-                    # Also correct the logged ML energy if it exists
                     if 'E_ml_avg' in self.results:
                         self.results['E_ml_avg'] += total_offset
 
@@ -85,7 +114,27 @@ def get_ase_calculator(model, config, device, neighbor_list):
 
     elif framework == "mace":
         from mace.calculators import MACECalculator
-        return MACECalculator(model=model, device=str(device), default_dtype="float32")
+        from mace.tools import utils
+        import torch
+
+        # 1. Robustly extract and fix z_table for compiled models
+        # The official calculator expects a z_table object, not a Tensor.
+        z_table = None
+        for attr_name in ["z_table", "atomic_numbers"]:
+            if hasattr(model, attr_name):
+                val = getattr(model, attr_name)
+                # If it's a Tensor, convert it to the AtomicNumberTable MACE expects
+                if isinstance(val, torch.Tensor):
+                    z_table = utils.get_atomic_number_table_from_zs(val.detach().cpu().numpy().astype(int).tolist())
+                    # Overwrite the attribute on the model so the ASE calculator finds it
+                    model.z_table = z_table
+                else:
+                    z_table = val
+                break
+
+        # 2. Return the official calculator using the correct plural 'models' keyword
+        # We pass the model inside a list as MACE expects for ensembles or single models.
+        return MACECalculator(models=[model], device=str(device), default_dtype="float32")
 
     elif framework == "nequip":
         from nequip.ase import NequIPCalculator
