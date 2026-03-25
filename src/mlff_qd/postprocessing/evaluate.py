@@ -10,6 +10,8 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+import torch.serialization
+torch.serialization.add_safe_globals([slice])
 import matplotlib.pyplot as plt
 from ase.io import read, write
 from sklearn.isotonic import IsotonicRegression
@@ -165,36 +167,34 @@ class EnsembleRunner:
             print(f"\n[EnsembleRunner] Loading cached predictions from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
 
-            # --- FIX: Safely load ens_L_atom only if it exists in the cache ---
+            # --- Safely load ens_L_atom only if it exists in the cache ---
             ens_L_atom_cached = data["ens_L_atom"] if "ens_L_atom" in data else None
             return (data["ens_E"], data["ens_F"], data["ens_L_frame"], ens_L_atom_cached)
-            # ------------------------------------------------------------------
 
-        print(f"\n[EnsembleRunner] Inference for {len(frames)} frames across {self.n_models} models...")
+        print(f"\n[EnsembleRunner] Inference for {len(frames)} frames. Scanning for models...")
         ens_E, ens_F, ens_L_frame, ens_L_atom = [], [], [], []
 
-        for m_idx in range(self.n_models):
-            # Try both with and without the underscore before the number
-            base_paths = [
-                os.path.join(self.ensemble_folder, f"best_model_{m_idx+1}"),
-                os.path.join(self.ensemble_folder, f"best_model{m_idx+1}")
-            ]
+        # --- 1. Dynamically scan for models based on extensions ---
+        valid_extensions = (".pth", ".pt", ".nequip.pth", ".model")
+        found_models = []
+        
+        if os.path.exists(self.ensemble_folder):
+            for filename in sorted(os.listdir(self.ensemble_folder)):
+                if filename.endswith(valid_extensions):
+                    found_models.append(os.path.join(self.ensemble_folder, filename))
+        else:
+            print(f"[EnsembleRunner] ERROR: Ensemble folder '{self.ensemble_folder}' does not exist.")
+            
+        # Limit to the requested ensemble size
+        model_paths_to_run = found_models[:self.n_models]
+        
+        if not model_paths_to_run:
+             print(f"[EnsembleRunner] WARNING: No models found in {self.ensemble_folder} with extensions {valid_extensions}")
 
-            # Auto-detect extension
-            model_path = None
-            for base_path in base_paths:
-                for ext in ["", ".pth", ".pt", ".nequip.pth"]:
-                    if os.path.exists(base_path + ext):
-                        model_path = base_path + ext
-                        break
-                if model_path:
-                    break
-
-            if model_path is None:
-                print(f"     Failed to find model {m_idx+1}: {base_paths[0]}(.pth/.pt)")
-                continue
-
-            print(f"  -> Model {m_idx+1}/{self.n_models}: {model_path}")
+        # --- 2. Load and evaluate the found models ---
+        for m_idx, model_path in enumerate(model_paths_to_run):
+            print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+            
             try:
                 if self.config.get("model_framework", "schnetpack").lower() == "nequip":
                     model_obj = model_path
@@ -214,13 +214,15 @@ class EnsembleRunner:
             ens_L_frame.append(preds_L_frame)
             ens_L_atom.append(preds_L_atom)
 
+        # If no models were successfully evaluated, return empty lists to trigger the ValueError upstream
+        if not ens_E:
+            return np.array([]), np.array([]), np.array([]), np.array([])
+
         ens_E = np.array(ens_E)
         ens_F = np.array(ens_F, dtype=object)
         ens_L_frame = np.array(ens_L_frame)
-        # We still collect ens_L_atom for memory return, but we won't save it
         ens_L_atom = np.array(ens_L_atom, dtype=object)
 
-        # --- FIX: Use uncompressed save and omit ens_L_atom ---
         print(f"[EnsembleRunner] Saving uncompressed cache to {cache_file} (omitting atom latents)...")
         np.savez(
             cache_file,
@@ -228,7 +230,6 @@ class EnsembleRunner:
             ens_F=ens_F,
             ens_L_frame=ens_L_frame
         )
-        # ------------------------------------------------------
         return ens_E, ens_F, ens_L_frame, ens_L_atom
 
 def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):

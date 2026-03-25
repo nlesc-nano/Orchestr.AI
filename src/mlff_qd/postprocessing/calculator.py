@@ -124,24 +124,50 @@ class SchnetpackCalculator(BaseCalculator):
         self.model = model
         self.device = device
         
-        # --- 1. Surgical Offset Fix for Batch Inference ---
+        # --- Surgical Offset Fix for Batch Inference ---
         self.mean_offset = 0.0
-        print("--- SchnetpackCalculator: Attempting to surgically extract 'mean' offset ---")
+        self.atomref = None
+        print("--- SchnetpackCalculator: Attempting to surgically extract offsets ---")
         try:
             if hasattr(self.model, 'postprocessors'):
                 for pp in self.model.postprocessors:
-                    if hasattr(pp, 'mean'):
-                        mean_tensor = getattr(pp, 'mean')
-                        if isinstance(mean_tensor, torch.Tensor):
-                            self.mean_offset = mean_tensor.item()
-                            print(f"Successfully extracted 'mean' offset: {self.mean_offset:.10f} (as FP64)")
-                            break
-                # Disable internal postprocessors to prevent double-counting or bugs
-                self.model.postprocessors = nn.ModuleList([])
+                    
+                    # 1. Aggressively extract mean
+                    extracted_mean = 0.0
+                    if hasattr(pp, 'state_dict') and 'mean' in pp.state_dict():
+                        extracted_mean = pp.state_dict()['mean'].item()
+                    elif hasattr(pp, 'mean') and isinstance(getattr(pp, 'mean'), torch.Tensor):
+                        extracted_mean = getattr(pp, 'mean').item()
+                    
+                    # 2. Flag and process the mean
+                    if abs(extracted_mean) > 1e-8:
+                        self.mean_offset = extracted_mean
+                        print(f"\n⚠️  FLAG: Non-zero dataset mean offset detected: {self.mean_offset:.6f} eV/atom")
+                        print("    -> The model was trained with 'remove_mean: true'.")
+                        print("    -> For optimal transferability to larger sizes, consider training future")
+                        print("       models with 'remove_mean: false' (relying only on isolated energies).\n")
+                    else:
+                        self.mean_offset = 0.0
+                        print("\n✅ FLAG: Mean offset is 0.0 (Trained with 'remove_mean: false').")
+                        print("    -> Model relies purely on isolated atomic energies. Excellent for transferability!\n")
+
+                    # 3. Extract isolated atomic energies (atomref / z_offsets)
+                    for ref_name in ['atomref', 'z_offsets']:
+                        if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
+                            ref_val = getattr(pp, ref_name)
+                            if isinstance(ref_val, torch.Tensor):
+                                self.atomref = ref_val.detach().cpu().numpy().astype(np.float64).flatten()
+                            elif hasattr(ref_val, 'weight'): 
+                                self.atomref = ref_val.weight.detach().cpu().numpy().astype(np.float64).flatten()
+                            print(f"Successfully extracted '{ref_name}' (isolated atomic energies).")
+
+                # Disable internal postprocessors to prevent FP32 precision loss or bugs
+                self.model.postprocessors = torch.nn.ModuleList([])
                 print("Successfully disabled model's internal postprocessors.")
         except Exception as e:
-            print(f"WARNING: Surgical 'mean' extraction failed: {e}")
-        # --------------------------------------------------
+            print(f"WARNING: Surgical offset extraction failed: {e}")
+            
+        self.nl_provider = nl_provider
 
         self.model.to(self.device, dtype=torch.float32)
         self.model.eval()
@@ -188,8 +214,32 @@ class SchnetpackCalculator(BaseCalculator):
         energies_np = results["energy"].detach().cpu().numpy().astype(np.float64).flatten()
         
         # --- 2. Apply Surgical Offset Fix to the Batch ---
+        # A. Apply isolated atomic energies if present
+        if self.atomref is not None:
+            # Find the atomic numbers key in the inputs batch
+            Z_key = None
+            if hasattr(Properties, 'Z') and Properties.Z in inputs:
+                Z_key = Properties.Z
+            elif '_atomic_numbers' in inputs:
+                Z_key = '_atomic_numbers'
+            elif 'atomic_numbers' in inputs:
+                Z_key = 'atomic_numbers'
+                
+            if Z_key:
+                Z = inputs[Z_key].detach().cpu().numpy().astype(np.int64)
+                # Map atomic numbers to their energies
+                valid_Z = np.clip(Z, 0, len(self.atomref) - 1)
+                E0s = self.atomref[valid_Z]
+                
+                # Split the flattened array of E0s by frame and sum them up
+                splits = np.cumsum(n_atoms_list)[:-1]
+                e0_per_frame = [np.sum(e0) for e0 in np.split(E0s, splits)]
+                energies_np += np.array(e0_per_frame)
+            else:
+                print("WARNING: Could not find atomic numbers in inputs to apply atomref!")
+
+        # B. Apply mean offset if present
         if self.mean_offset != 0.0:
-            # Multiply the per-atom offset by the number of atoms in each frame
             offsets = np.array(n_atoms_list, dtype=np.float64) * self.mean_offset
             energies_np += offsets
         # -------------------------------------------------
@@ -217,55 +267,79 @@ class MaceCalculator(BaseCalculator):
         self.model.to(self.device)
         self.model.eval()
         
+        # --- Robust z_table extraction ---
+        from mace.tools import utils
+        self.z_table = None
+        
+        # Check both possible attribute names in compiled models
+        raw_z = None
+        if hasattr(self.model, "z_table"):
+            raw_z = self.model.z_table
+        elif hasattr(self.model, "atomic_numbers"):
+            raw_z = self.model.atomic_numbers
+            
+        if raw_z is not None:
+            # If it's a Tensor, convert it to an AtomicNumberTable object
+            if isinstance(raw_z, torch.Tensor):
+                z_list = raw_z.detach().cpu().numpy().astype(int).tolist()
+                self.z_table = utils.get_atomic_number_table_from_zs(z_list)
+                # Important: Also update the model object itself
+                self.model.z_table = self.z_table
+                print(f"MACE: Converted model tensor to AtomicNumberTable: {z_list}")
+            else:
+                self.z_table = raw_z
+        
         # --- cuEquivariance Detection ---
         try:
             import cuequivariance_torch
             self.use_cueq = True
-            print("cuEquivariance detected! MACE tensor ops will run blazingly fast.")
+            print("MACE: cuEquivariance detected and enabled.")
             if hasattr(self.model, "enable_cueq"):
                 self.model.enable_cueq = True 
         except ImportError:
             self.use_cueq = False
-            print("cuEquivariance not found. MACE will use standard PyTorch ops.")
+            print("MACE: cuEquivariance not found. Using standard PyTorch ops.")
 
     def prepare_batch(self, frames):
         try:
             from mace.data.utils import config_from_atoms
             from mace.data.atomic_data import AtomicData
             from mace.tools.torch_geometric.dataloader import Collater
+            from mace.tools import utils
         except ImportError:
-            raise ImportError("MACE is not installed. Please run: pip install mace-torch")
+            raise ImportError("MACE is not installed.")
+
+        # Fallback if z_table is still missing
+        if self.z_table is None:
+            print("Warning: z_table not found in model. Inferring from batch frames.")
+            z_all = []
+            for atoms in frames:
+                z_all.extend(atoms.get_atomic_numbers())
+            self.z_table = utils.get_atomic_number_table_from_zs(z_all)
 
         data_list = []
         for atoms in frames:
-            # 1. Convert ASE to MACE configuration
             config = config_from_atoms(atoms)
-            
-            # 2. Build AtomicData using the model's exact atomic numbers (z_table)
             data = AtomicData.from_config(
                 config, 
-                z_table=self.model.z_table, 
+                z_table=self.z_table, 
                 cutoff=self.nl_provider.cutoff
             )
             data_list.append(data)
 
-        # 3. Collate into a single batch
-        collater = Collater(follow_batch=[])
+        # Collate using empty list for exclude_keys to satisfy newer versions
+        collater = Collater(follow_batch=[], exclude_keys=[])
         batch = collater(data_list).to(self.device)
-        
         return batch
 
     def forward(self, inputs, n_atoms_list):
         with torch.set_grad_enabled(True):
-            # MACE usually expects a dictionary representation of the batch
             results = self.model(inputs.to_dict())
 
-        # Extract MACE specific keys
         energies_np = results["energy"].detach().cpu().numpy().astype(np.float64).flatten()
         forces_cpu = results["forces"].detach().cpu()
         forces_list = [f.numpy().astype(np.float64) for f in torch.split(forces_cpu, n_atoms_list, dim=0)]
 
-        # Extract Latents (MACE calls this 'node_feats')
         latent_frame_list = [np.array([], dtype=np.float64)] * len(n_atoms_list)
         latent_atom_list = [None] * len(n_atoms_list)
         
@@ -275,6 +349,7 @@ class MaceCalculator(BaseCalculator):
             latent_frame_list = [np.sum(l, axis=0).astype(np.float64) for l in latent_atom_list]
 
         return energies_np, forces_list, latent_frame_list, latent_atom_list
+
 
 class NequipCalculator(BaseCalculator):
     """Wrapper for NequIP / Allegro models using the official ASE calculator."""

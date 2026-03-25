@@ -12,6 +12,8 @@ import sys
 import logging
 import traceback
 import torch
+import torch.serialization
+torch.serialization.add_safe_globals([slice])
 from ase.io import read
 
 from mlff_qd.postprocessing.calculator import setup_neighbor_list

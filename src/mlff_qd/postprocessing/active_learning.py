@@ -19,8 +19,8 @@ from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from itertools import combinations
-from typing import List, Optional, Tuple
-from mlff_qd.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree
+from typing import Tuple, List, Optional
+from mlff_qd.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
 
 # =============================================================================
 # 1. MATH & LATENT SPACE UTILITIES
@@ -270,21 +270,22 @@ class _PoolActiveLearner:
 
         # Apply RDF Filter (Catches overlaps)
         self.rdf_ok_mask = fast_filter_by_rdf_kdtree(self.pool_frames, self.rdf_thresholds)
+    
+        # ---> NEW: Apply Fully Automated Connectivity & Arm Filter <---
+        # Fetch configurations (with safe fallbacks)
+        margin = getattr(self, 'detachment_margin', 0.8)
+        arm_tol = float(getattr(self, 'arm_tolerance', 0.5))
 
-        # ---> NEW: Apply Diameter Filter (Catches explosions) <---
-        # Calculate the median diameter of the first few frames (assumed stable)
-        initial_pos = [self.pool_frames[i].get_positions() for i in range(min(10, len(self.pool_frames)))]
-        initial_diameters = [scipy.spatial.distance.pdist(p).max() for p in initial_pos]
-        max_allowed_diameter = np.median(initial_diameters) * 1.5 # Allow 50% expansion
-        
-        for i, frame in enumerate(self.pool_frames):
-            if self.rdf_ok_mask[i]:
-                current_diameter = scipy.spatial.distance.pdist(frame.get_positions()).max()
-                if current_diameter > max_allowed_diameter:
-                    self.rdf_ok_mask[i] = False
-                    print(f"Frame {i} rejected: Cluster diameter ({current_diameter:.1f} A) exceeded limits.")
+        # Update the mask using our dedicated geometric function
+        self.rdf_ok_mask = fast_filter_connectivity_and_arms(
+            frames=self.pool_frames, 
+            ok_mask=self.rdf_ok_mask, 
+            margin=margin, 
+            arm_tol=arm_tol,
+            verbose=True
+        )
+
         # ---------------------------------------------------------
-
         ok_idx = np.where(self.rdf_ok_mask)[0]
 
         # Calculate Adaptive Upper Caps from OK frames
@@ -533,9 +534,28 @@ class _PoolActiveLearner:
                          f"{self.sigma_F_train_mean[t_idx]:.6f} {self.frame_max_force_train[t_idx]:.6f}\n")
 
     def _print_summary(self):
-        frac_geom = self.rdf_ok_mask.sum() / max(1, len(self.rdf_ok_mask))
-        print(f"\n[AL] Summary:\n    Geom OK fraction: {frac_geom:.3f}\n    Hard triggers passed: {self.n_uncertain_total}\n"
-              f"    Shortlisted frames: {len(self.final_pool_indices)}\n")
+        n_total = len(self.rdf_ok_mask)
+        n_ok = self.rdf_ok_mask.sum()
+        frac_geom = n_ok / max(1, n_total)
+        
+        print(f"\n[AL] Summary:")
+        print(f"    Geom OK fraction: {frac_geom:.3f} ({n_ok}/{n_total} frames)")
+        print(f"    Hard triggers passed: {self.n_uncertain_total}")
+        print(f"    Shortlisted frames: {len(self.final_pool_indices)}")
+
+        # --- NEW: ACTIVE LEARNING STRATEGY WARNING ---
+        print("\n" + "="*60)
+        print("AL STRATEGY ADVISORY:")
+        if frac_geom < 0.40:
+            print(f"WARNING: Only {frac_geom*100:.1f}% of your trajectory is physically stable.")
+            print("To maximize Active Learning value, it is highly recommended to:")
+            print(f" 1. Identify the frame 'n' where the simulation first fractures.")
+            print(f" 2. Re-run a shorter MD trajectory up to the time of frame 'n'.")
+            print(f" 3. Increase the sampling frequency to still collect 5000 frames.")
+            print("This creates a denser grid of 'on-the-edge' frames for DFT labeling.")
+        else:
+            print(f"Trajectory Stability: {frac_geom*100:.1f}%. The pool is healthy for selection.")
+        print("="*60 + "\n")
 
 # --- Wrapper to maintain evaluate.py compatibility ---
 def adaptive_learning_mig_pool_windowed(*args, **kwargs):
