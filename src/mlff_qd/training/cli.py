@@ -227,6 +227,14 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
         if not explicit_mode:
             data_path = xyz_path
 
+    # Fallback: If the YAML specifies a .db that doesn't exist, try to find an .xyz or .npz to convert
+    if data_path and data_path.endswith(".db") and not os.path.exists(data_path):
+        for ext in [".xyz", ".npz"]:
+            fb = data_path[:-3] + ext
+            if os.path.exists(fb):
+                data_path = fb
+                break
+
     # Generic missing-path check
     if not data_path or not os.path.exists(data_path):
         raise ValueError(
@@ -316,7 +324,15 @@ def main():
                 input_path = user_yaml_dict.get("common", {}).get("data", {}).get("input_xyz_file")
             else:
                 input_path = user_yaml_dict.get("data", {}).get("dataset_path") or user_yaml_dict.get("data", {}).get("datapath")
-    
+        
+        # Fallback: If the YAML specifies a .db that doesn't exist, try to find an .xyz or .npz to convert
+        if input_path and input_path.endswith(".db") and not os.path.exists(input_path):
+            for ext in [".xyz", ".npz"]:
+                fb = input_path[:-3] + ext
+                if os.path.exists(fb):
+                    logging.info(f"[{platform}] {input_path} not found, falling back to {fb}")
+                    input_path = fb
+                    break
 
         if input_path and not input_path.endswith(".db") and os.path.exists(input_path):
             logging.info(f"[{platform}] Converting {input_path} to SchNetPack DB...")

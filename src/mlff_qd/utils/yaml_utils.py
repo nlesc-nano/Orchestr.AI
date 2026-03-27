@@ -805,6 +805,15 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         input_xyz_file = user_cfg["input_xyz_file"]
     if input_xyz:
         input_xyz_file = input_xyz
+
+    # Fallback: If unified YAML specifies a .db that doesn't exist, try to find an .xyz or .npz
+    if input_xyz_file and input_xyz_file.endswith(".db") and not os.path.exists(input_xyz_file):
+        for ext in [".xyz", ".npz"]:
+            fb = input_xyz_file[:-3] + ext
+            if os.path.exists(fb):
+                input_xyz_file = fb
+                break
+
     if not input_xyz_file or not os.path.exists(input_xyz_file):
         raise ValueError(f"Input XYZ file not found: {input_xyz_file}")
 
