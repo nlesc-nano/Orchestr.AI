@@ -152,7 +152,7 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
         move_specific_prepared_data(explicit_data_paths, dest_dir)
         
         # Special-case: SchNet/PaiNN often produce a prepared split.npz (and related .npz files)
-        if platform in ("schnet", "painn"):
+        if platform in ("schnet", "painn", "so3net", "field_schnet"):
             move_prepared_data(platform, source_dir, results_dir, dest_dir)
             
     else:
@@ -161,7 +161,7 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     if not results_dir:
         results_dir = os.path.join(source_dir, "results")
 
-    if platform in ("schnet", "painn", "fusion"):
+    if platform in ("schnet", "painn", "fusion", "so3net", "field_schnet"):
         # Generalized: Move best model(s) by user-supplied or default pattern
         
         if best_model_dir:
