@@ -6,6 +6,8 @@ It integrates multiple ML engines under a single interface:
 
 ✅ **SchNet**
 ✅ **PaiNN**
+✅ **SO3net**
+✅ **FieldSchNet**
 ✅ **NequIP**
 ✅ **Allegro**
 ✅ **MACE**

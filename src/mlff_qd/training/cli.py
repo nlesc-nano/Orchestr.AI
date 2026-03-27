@@ -23,7 +23,7 @@ except ImportError:
     run_schnet_fine_tuning = None
 
 def run_benchmark(args, scratch_dir):
-    engines = ['schnet', 'painn', 'fusion', 'nequip', 'allegro', 'mace']
+    engines = ['schnet', 'painn', 'fusion', 'nequip', 'allegro', 'mace', 'so3net', 'field_schnet']
     benchmark_results_dir = './benchmark_results'
     os.makedirs(benchmark_results_dir, exist_ok=True)
     
@@ -45,11 +45,11 @@ def run_benchmark(args, scratch_dir):
         # Generate engine YAML
         engine_yaml_path = os.path.join(scratch_dir, f'engine_{engine}.yaml')
         
-        engine_input = db_path if engine in ['schnet', 'painn'] and db_path else args.input
+        engine_input = db_path if engine in ['schnet', 'painn', 'so3net', 'field_schnet'] and db_path else args.input
         engine_cfg = extract_engine_yaml(args.config, engine, input_xyz=engine_input)
 
         # Patch unique output_dir and DB for schnet/painn/fusion to fix CSV/PKL issues
-        if engine in ['schnet', 'painn', 'fusion']:
+        if engine in ['schnet', 'painn', 'fusion', 'so3net', 'field_schnet']:
             unique_dir = f"./results_{engine}"
             if 'logging' in engine_cfg:
                 engine_cfg['logging']['folder'] = unique_dir
@@ -66,7 +66,7 @@ def run_benchmark(args, scratch_dir):
 
 
         # Run training + inference
-        if engine in ['schnet', 'painn']:
+        if engine in ['schnet', 'painn', 'so3net', 'field_schnet']:
             run_schnetpack_training(engine_yaml_path)
         elif engine == 'fusion':
             run_schnet_training(engine_yaml_path)
@@ -123,6 +123,8 @@ def get_output_dir(engine_cfg, platform):
         "allegro":  [["trainer", "logger", 0, "save_dir"], ["output_dir"]],
         "schnet":   [["run", "work_dir"], ["logging", "folder"], ["output_dir"]],
         "painn":    [["run", "work_dir"], ["logging", "folder"], ["output_dir"]],
+        "so3net":   [["run", "work_dir"], ["logging", "folder"], ["output_dir"]],
+        "field_schnet": [["run", "work_dir"], ["logging", "folder"], ["output_dir"]],
         "fusion":   [["logging", "folder"], ["output_dir"]],
         "mace":     [["output_dir"]],
     }
@@ -159,7 +161,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     data_path = xyz_path
 
     if not data_path:
-        if platform in ["schnet", "painn", "fusion"]:
+        if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
             data_path = config.get("data", {}).get("dataset_path", None) or config.get("data", {}).get("datapath", None)
         
         elif platform in ["nequip", "allegro"]:
@@ -236,7 +238,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
     data_path = validate_input_file(data_path, platform)
 
     # Patch path back into config
-    if platform in ["schnet", "painn", "fusion"]:
+    if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
         if "datapath" in config.get("data", {}):
             config["data"]["datapath"] = data_path
         else:
@@ -286,7 +288,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     config = load_config(args.config)
     platform = (args.engine or config.get("platform", "")).lower()
-    all_platforms = ["nequip", "allegro", "mace", "schnet", "painn", "fusion"]
+    all_platforms = ["nequip", "allegro", "mace", "schnet", "painn", "fusion", "so3net", "field_schnet"]
     if platform not in all_platforms:
         raise ValueError(f"Unknown platform/engine: {platform}. Supported platforms are {all_platforms}")
 
@@ -307,7 +309,7 @@ def main():
     is_unified = "common" in user_yaml_dict
 
     # Convert dataset to SchNetPack .db format if needed
-    if platform in ["schnet", "painn"]:
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
         input_path = args.input
         if not input_path:
             if is_unified:
@@ -361,7 +363,7 @@ def main():
     # Fine-tuning 
     try:
         is_finetuning = user_yaml_dict.get("common", {}).get("fine_tuning", {}).get("enabled", False)
-        if platform in ["schnet", "painn", "fusion"]:
+        if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
         
             if is_finetuning:
                 print(f"[CLI] Fine-tuning mode detected for {platform}.")
@@ -376,7 +378,7 @@ def main():
                 run_schnet_fine_tuning(MockArgs())
                 print(f"[CLI] Fine-tuning completed.")
             else:
-                if platform in ["schnet", "painn"]:
+                if platform in ["schnet", "painn", "so3net", "field_schnet"]:
                     run_schnetpack_training(engine_yaml)
                 else:
                     run_schnet_training(engine_yaml, engine=platform)
@@ -390,7 +392,7 @@ def main():
             run_nequip_training(os.path.abspath(engine_yaml))
 
         results_dir = get_output_dir(engine_cfg, platform)
-        if platform in ["schnet", "painn"] and "callbacks" in engine_cfg:
+        if platform in ["schnet", "painn", "so3net", "field_schnet"] and "callbacks" in engine_cfg:
             best_model_dir = engine_cfg.get("callbacks", {}).get("model_checkpoint", {}).get("model_path", None)
             print(f"[paths] Found best_model_dir from callbacks.model_checkpoint.model_path: {best_model_dir}")
         else:

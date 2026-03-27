@@ -7,7 +7,7 @@
 # - n_rbf: For schnet, painn, fusion → RBF basis functions. For nequip/allegro → mapped to bessel basis.
 # ==============================================================================
 
-platform: fusion  # [schnet, painn, fusion, nequip, allegro, mace]
+platform: fusion  # [schnet, painn, so3net, field_schnet, fusion, nequip, allegro, mace]
 
 common:
   data:

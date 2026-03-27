@@ -155,7 +155,7 @@ OPTIMIZER_TARGETS = {
     "SGD": "torch.optim.SGD",
 }
 
-NPZ_ENGINES = {"schnet", "painn", "fusion"}
+NPZ_ENGINES = {"schnet", "painn", "fusion", "so3net", "field_schnet"}
 XYZ_ENGINES = {"nequip", "allegro", "mace"}
 
 def expected_extension(platform: str) -> str:
@@ -165,7 +165,7 @@ def validate_input_file(path: str, platform: str) -> str:
     if not path or not os.path.exists(path):
         raise ValueError(f"Input data file not found: {path}")
     
-    if platform in ["schnet", "painn"]:
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
         if not str(path).lower().endswith((".npz", ".xyz", ".db")):
             raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected .npz, .xyz, or .db.")
     else:
@@ -194,7 +194,7 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
     platform = (platform or "").lower()
     paths = []
 
-    if platform in {"schnet", "painn", "fusion"}:
+    if platform in {"schnet", "painn", "fusion", "so3net", "field_schnet"}:
         dp = cfg.get("data", {}).get("dataset_path") or cfg.get("data", {}).get("datapath")
         if dp: paths.append(_resolve_path(yaml_dir, dp))
         
@@ -239,11 +239,11 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
     return final
 
 # Patch painn/fusion mapping to schnet (they use the same template)
-for plat in ["painn", "fusion"]:
+for plat in ["painn", "fusion", "so3net", "field_schnet"]:
     KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
 def get_early_stopping_monitor(platform):
-    if platform in ["schnet", "painn", "fusion"]:
+    if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
         return "val_loss"
     elif platform in ["nequip", "allegro"]:
         return "val0_epoch/weighted_sum"
@@ -285,16 +285,14 @@ def apply_early_stopping(user_cfg, engine_cfg, platform, key_mappings):
             engine_cfg.pop("patience", None)
         else:
             remove_early_stopping_callbacks(engine_cfg)
-            if platform in ["schnet", "painn", "fusion"]:
+            if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
                 if "training" in engine_cfg:
                     engine_cfg["training"].pop("early_stopping", None)
     elif enabled is True:
         if platform == "mace":
             patience = es_cfg.get("patience", 30)
             engine_cfg["patience"] = patience
-        elif platform in ["schnet", "painn", "fusion"]:
-            update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform)
-        elif platform in ["nequip", "allegro"]:
+        elif platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
             update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform)
 
 def preprocess_optimizer(user_cfg):
@@ -824,7 +822,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         set_nested(engine_cfg, p.split("."), input_xyz_file)
     
     # NEW: unified YAML -> do NOT carry split_file into generated schnet/painn YAML
-    if platform in ["schnet", "painn"]:
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
         if isinstance(engine_cfg.get("data"), dict):
             engine_cfg["data"].pop("split_file", None)
             
@@ -833,13 +831,13 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         set_nested(engine_cfg, ["data", "split_dataset", "train"], smart_round(train_size))
         set_nested(engine_cfg, ["data", "split_dataset", "val"], smart_round(val_size))
         set_nested(engine_cfg, ["data", "split_dataset", "test"], smart_round(test_size))
-    elif platform in ["schnet", "painn", "fusion"]:
+    elif platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
         set_nested(engine_cfg, ["data", "num_train"], smart_round(train_size))
         set_nested(engine_cfg, ["data", "num_val"], smart_round(val_size))
         set_nested(engine_cfg, ["data", "num_test"], smart_round(test_size))
 
     # Handle atomrefs
-    if platform in ["schnet", "painn"]:
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
         atomrefs_avail = user_cfg.get("data", {}).get("atomrefs_available", True)
         for tf in engine_cfg.get("data", {}).get("transforms", []):
             if tf.get("_target_") == "schnetpack.transform.RemoveOffsets":
