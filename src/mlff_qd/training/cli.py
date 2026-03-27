@@ -409,20 +409,17 @@ def main():
 
         results_dir = get_output_dir(engine_cfg, platform)
         if platform in ["schnet", "painn", "so3net", "field_schnet"]:
+            results_dir = scratch_dir 
+            
             # Extract raw model path string
-            best_model_dir = engine_cfg.get("callbacks", {}).get("model_checkpoint", {}).get("model_path", "best_model")
+            best_model_name = engine_cfg.get("callbacks", {}).get("model_checkpoint", {}).get("model_path", "best_model")
             
             # Manually resolve common Hydra interpolations
-            if best_model_dir == "${globals.model_path}":
-                best_model_dir = engine_cfg.get("globals", {}).get("model_path", "best_model")
+            if best_model_name == "${globals.model_path}":
+                best_model_name = engine_cfg.get("globals", {}).get("model_path", "best_model")
             
-            # Ensure it is prefixed with the working directory if it's relative
-            work_dir = engine_cfg.get("run", {}).get("work_dir", ".")
-            if work_dir == "${hydra:runtime.cwd}":
-                work_dir = "."
-                
-            if best_model_dir and not os.path.isabs(best_model_dir):
-                best_model_dir = os.path.normpath(os.path.join(work_dir, best_model_dir))
+            # The best model is saved directly in the scratch directory
+            best_model_dir = os.path.normpath(os.path.join(scratch_dir, os.path.basename(best_model_name)))
                 
             logging.info(f"[paths] Resolved SchNetPack best_model_dir: {best_model_dir}")
         else:
