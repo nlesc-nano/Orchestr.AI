@@ -12,6 +12,8 @@ platform: fusion  # [schnet, painn, fusion, nequip, allegro, mace]
 common:
   data:
     input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz   # Path to your XYZ file
+    atomrefs_available: true   # atomrefs_available: false  # Set to true if your dataset includes atom reference energies/forces for offset correction. If false, the code will skip adding offsets.
+    # If your dataset does not include atomrefs, you can set this to false. The
 
   model:
     mp_layers: 3       # Number of message-passing layers in the neural network.

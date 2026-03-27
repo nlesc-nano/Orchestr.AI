@@ -13,6 +13,7 @@ from mlff_qd.utils.nequip_wrapper import run_nequip_training
 from mlff_qd.utils.mace_wrapper import run_mace_training
 from mlff_qd.training.training import run_schnet_training
 from mlff_qd.training.inference import run_schnet_inference
+from mlff_qd.utils.schnetpack_wrapper import run_schnetpack_training
 from mlff_qd.utils.standardize_output import standardize_output
 from mlff_qd.utils.yaml_utils import get_dataset_paths_from_yaml
 from mlff_qd.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
@@ -27,18 +28,33 @@ def run_benchmark(args, scratch_dir):
     os.makedirs(benchmark_results_dir, exist_ok=True)
     
     results = []
+    
+    # Pre-resolve the input file for conversion if needed
+    from mlff_qd.utils.helpers import load_config
+    tmp_cfg = load_config(args.config)
+    resolved_input = args.input or tmp_cfg.get("common", {}).get("data", {}).get("input_xyz_file")
+    
+    db_path = None
+    if resolved_input and os.path.exists(resolved_input):
+        from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
+        db_path = convert_to_schnetpack_db(resolved_input, scratch_dir)
+
     for engine in engines:
         print(f"Benchmarking {engine}...")
         
         # Generate engine YAML
         engine_yaml_path = os.path.join(scratch_dir, f'engine_{engine}.yaml')
-        engine_cfg = extract_engine_yaml(args.config, engine, input_xyz=args.input)
         
+        engine_input = db_path if engine in ['schnet', 'painn'] and db_path else args.input
+        engine_cfg = extract_engine_yaml(args.config, engine, input_xyz=engine_input)
+
         # Patch unique output_dir and DB for schnet/painn/fusion to fix CSV/PKL issues
         if engine in ['schnet', 'painn', 'fusion']:
             unique_dir = f"./results_{engine}"
             if 'logging' in engine_cfg:
                 engine_cfg['logging']['folder'] = unique_dir
+            if 'run' in engine_cfg:
+                engine_cfg['run']['work_dir'] = unique_dir
             if 'testing' in engine_cfg:
                 engine_cfg['testing']['trained_model_path'] = unique_dir
             if 'general' in engine_cfg and 'database_name' in engine_cfg['general']:
@@ -47,9 +63,12 @@ def run_benchmark(args, scratch_dir):
 
         with open(engine_yaml_path, 'w', encoding='utf-8') as f:
             yaml.dump(engine_cfg, f)
-        
+
+
         # Run training + inference
-        if engine in ['schnet', 'painn', 'fusion']:
+        if engine in ['schnet', 'painn']:
+            run_schnetpack_training(engine_yaml_path)
+        elif engine == 'fusion':
             run_schnet_training(engine_yaml_path)
             run_schnet_inference(engine_yaml_path)
         elif engine in ['nequip', 'allegro']:
@@ -102,8 +121,8 @@ def get_output_dir(engine_cfg, platform):
     key_paths = {
         "nequip":   [["trainer", "logger", 0, "save_dir"], ["output_dir"]],
         "allegro":  [["trainer", "logger", 0, "save_dir"], ["output_dir"]],
-        "schnet":   [["logging", "folder"], ["output_dir"]],
-        "painn":    [["logging", "folder"], ["output_dir"]],
+        "schnet":   [["run", "work_dir"], ["logging", "folder"], ["output_dir"]],
+        "painn":    [["run", "work_dir"], ["logging", "folder"], ["output_dir"]],
         "fusion":   [["logging", "folder"], ["output_dir"]],
         "mace":     [["output_dir"]],
     }
@@ -141,7 +160,7 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
 
     if not data_path:
         if platform in ["schnet", "painn", "fusion"]:
-            data_path = config.get("data", {}).get("dataset_path", None)
+            data_path = config.get("data", {}).get("dataset_path", None) or config.get("data", {}).get("datapath", None)
         
         elif platform in ["nequip", "allegro"]:
             d = config.get("data", {}) or {}
@@ -218,7 +237,10 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
 
     # Patch path back into config
     if platform in ["schnet", "painn", "fusion"]:
-        config.setdefault("data", {})["dataset_path"] = data_path
+        if "datapath" in config.get("data", {}):
+            config["data"]["datapath"] = data_path
+        else:
+            config.setdefault("data", {})["dataset_path"] = data_path
 
     elif platform in ["nequip", "allegro"]:
         d = config.setdefault("data", {})
@@ -284,6 +306,21 @@ def main():
         user_yaml_dict = yaml.safe_load(f)
     is_unified = "common" in user_yaml_dict
 
+    # Convert dataset to SchNetPack .db format if needed
+    if platform in ["schnet", "painn"]:
+        input_path = args.input
+        if not input_path:
+            if is_unified:
+                input_path = user_yaml_dict.get("common", {}).get("data", {}).get("input_xyz_file")
+            else:
+                input_path = user_yaml_dict.get("data", {}).get("dataset_path") or user_yaml_dict.get("data", {}).get("datapath")
+    
+
+        if input_path and not input_path.endswith(".db") and os.path.exists(input_path):
+            logging.info(f"[{platform}] Converting {input_path} to SchNetPack DB...")
+            from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
+            args.input = convert_to_schnetpack_db(input_path, scratch_dir)
+
     # Always generate engine YAML for unified YAMLs, and optionally for legacy (with --only-generate)
     if is_unified or args.only_generate:
         engine_yaml = os.path.join(scratch_dir, f"engine_{platform}.yaml")
@@ -339,8 +376,11 @@ def main():
                 run_schnet_fine_tuning(MockArgs())
                 print(f"[CLI] Fine-tuning completed.")
             else:
-                run_schnet_training(engine_yaml, engine=platform)
-                run_schnet_inference(engine_yaml, engine=platform)
+                if platform in ["schnet", "painn"]:
+                    run_schnetpack_training(engine_yaml)
+                else:
+                    run_schnet_training(engine_yaml, engine=platform)
+                    run_schnet_inference(engine_yaml, engine=platform)
 
         elif platform == "nequip":
             run_nequip_training(os.path.abspath(engine_yaml))
@@ -350,8 +390,13 @@ def main():
             run_nequip_training(os.path.abspath(engine_yaml))
 
         results_dir = get_output_dir(engine_cfg, platform)
-        best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
+        if platform in ["schnet", "painn"] and "callbacks" in engine_cfg:
+            best_model_dir = engine_cfg.get("callbacks", {}).get("model_checkpoint", {}).get("model_path", None)
+            print(f"[paths] Found best_model_dir from callbacks.model_checkpoint.model_path: {best_model_dir}")
+        else:
+            best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
         standardized_dir = os.path.join(scratch_dir, "standardized")
+
         explicit_paths = get_dataset_paths_from_yaml(platform, engine_yaml)
         standardize_output(
             platform,
