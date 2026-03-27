@@ -594,7 +594,7 @@ def _int_or_len_devices(x):
 def apply_autoddp(engine_cfg: dict):
     """Ensure DDP keys match effective device count.
     - devices <= 1 → remove trainer.strategy/num_nodes
-    - devices >= 2 → set trainer.strategy='ddp' and default trainer.num_nodes=1
+    - devices >= 2 → set trainer.strategy={"_target_": "nequip.train.SimpleDDPStrategy"} and default trainer.num_nodes=1
     """
     trainer = engine_cfg.setdefault("trainer", {})
     devs_raw = trainer.get("devices", 1)
@@ -609,7 +609,7 @@ def apply_autoddp(engine_cfg: dict):
         trainer.pop("strategy", None)
         trainer.pop("num_nodes", None)
     else:
-        trainer.setdefault("strategy", "ddp")
+        trainer.setdefault("strategy", {"_target_": "nequip.train.SimpleDDPStrategy"})
         trainer.setdefault("num_nodes", 1)
 
 def apply_mace_distributed_from_devices(user_cfg: dict, engine_cfg: dict):
