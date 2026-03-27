@@ -408,9 +408,23 @@ def main():
             run_nequip_training(os.path.abspath(engine_yaml))
 
         results_dir = get_output_dir(engine_cfg, platform)
-        if platform in ["schnet", "painn", "so3net", "field_schnet"] and "callbacks" in engine_cfg:
-            best_model_dir = engine_cfg.get("callbacks", {}).get("model_checkpoint", {}).get("model_path", None)
-            print(f"[paths] Found best_model_dir from callbacks.model_checkpoint.model_path: {best_model_dir}")
+        if platform in ["schnet", "painn", "so3net", "field_schnet"]:
+            # Extract raw model path string
+            best_model_dir = engine_cfg.get("callbacks", {}).get("model_checkpoint", {}).get("model_path", "best_model")
+            
+            # Manually resolve common Hydra interpolations
+            if best_model_dir == "${globals.model_path}":
+                best_model_dir = engine_cfg.get("globals", {}).get("model_path", "best_model")
+            
+            # Ensure it is prefixed with the working directory if it's relative
+            work_dir = engine_cfg.get("run", {}).get("work_dir", ".")
+            if work_dir == "${hydra:runtime.cwd}":
+                work_dir = "."
+                
+            if best_model_dir and not os.path.isabs(best_model_dir):
+                best_model_dir = os.path.normpath(os.path.join(work_dir, best_model_dir))
+                
+            logging.info(f"[paths] Resolved SchNetPack best_model_dir: {best_model_dir}")
         else:
             best_model_dir = engine_cfg.get("logging", {}).get("checkpoint_dir", None)
         standardized_dir = os.path.join(scratch_dir, "standardized")
