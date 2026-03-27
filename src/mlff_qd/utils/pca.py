@@ -15,6 +15,10 @@ def detect_outliers(features, contamination: float, labels, title: str, filename
     IsolationForest-based outlier detection. Returns a boolean mask of inliers.
     Also renders the outlier plot using existing plot_outliers(...).
     """
+    if contamination == 0:
+        logger.info("[Filter] contamination=0, keeping all frames as inliers")
+        return slice(None)
+    
     clf = IsolationForest(contamination=contamination, random_state=random_state)
     y_pred = clf.fit_predict(features)          # -1 outlier, +1 inlier
     
