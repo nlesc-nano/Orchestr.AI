@@ -105,10 +105,10 @@ def get_ase_calculator(model, config, device, neighbor_list):
         return LegacyOffsetSpkCalculator(
             model_obj=model,
             device=device,
-            energy="energy",
-            forces="forces",
-            energy_units="eV",
-            forces_units="eV/Angstrom",
+            energy_key="energy",
+            force_key="forces",
+            energy_unit="eV",
+            position_unit="Angstrom",
             neighbor_list=neighbor_list
         )
 
