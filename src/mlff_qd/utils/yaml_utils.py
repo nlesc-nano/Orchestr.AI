@@ -242,6 +242,8 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
 for plat in ["painn", "fusion", "so3net", "field_schnet"]:
     KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
+KEY_MAPPINGS["so3net"]["model.l_max"] = ["model.representation.lmax"]
+
 def get_early_stopping_monitor(platform):
     if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
         return "val_loss"
