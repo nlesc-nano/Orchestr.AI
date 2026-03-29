@@ -164,21 +164,44 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     if platform in ("schnet", "painn", "fusion", "so3net", "field_schnet"):
         # Generalized: Move best model(s) by user-supplied or default pattern
         
+        ckpt_path_name = "checkpoints"
+        tb_path_name = "tensorboard"
+
         if best_model_dir:
             logging.info(f"Using best model dir from YAML: {best_model_dir}")
             move_if_exists(os.path.join(results_dir, best_model_dir), standardized_dirs["best_model"])
         else:
             move_best_model(results_dir, standardized_dirs["best_model"])  # fallback
 
-        
-        schnet_ckpts = os.path.join(results_dir, "checkpoints")
+        if config_yaml_path and os.path.exists(config_yaml_path):
+            import yaml
+            try:
+                with open(config_yaml_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                
+                ckpt_dir = cfg.get("callbacks", {}).get("model_checkpoint", {}).get("dirpath")
+                if ckpt_dir:
+                    ckpt_path_name = ckpt_dir
+                    
+                logger_cfg = cfg.get("logger", {})
+                if isinstance(logger_cfg, dict):
+                    # Loop through available loggers (tensorboard, csv, wandb) to find save_dir
+                    for _, l_val in logger_cfg.items():
+                        if isinstance(l_val, dict) and "save_dir" in l_val:
+                            tb_path_name = l_val["save_dir"]
+                            break
+            except Exception as e:
+                logging.warning(f"Could not parse YAML for dynamic paths: {e}")
+
+        # 1. Move checkpoints folder
+        schnet_ckpts = os.path.normpath(os.path.join(results_dir, ckpt_path_name))
         if os.path.exists(schnet_ckpts):
             for item in os.listdir(schnet_ckpts):
                 if "best" not in item.lower():
                     move_if_exists(os.path.join(schnet_ckpts, item), standardized_dirs["checkpoints"])
                     
-        # 2. Move tensorboard logs to lightning_logs
-        schnet_tb = os.path.join(results_dir, "tensorboard")
+        # 2. Move logger folder to lightning_logs
+        schnet_tb = os.path.normpath(os.path.join(results_dir, tb_path_name))
         if os.path.exists(schnet_tb):
             for item in os.listdir(schnet_tb):
                 move_if_exists(os.path.join(schnet_tb, item), standardized_dirs["lightning_logs"])
