@@ -37,7 +37,8 @@ def run_benchmark(args, scratch_dir):
     db_path = None
     if resolved_input and os.path.exists(resolved_input):
         from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
-        atomrefs_dict = tmp_cfg.get("common", {}).get("data", {}).get("atomrefs", None)
+        data_cfg = tmp_cfg.get("common", {}).get("data", {})
+        atomrefs_dict = data_cfg.get("atomrefs", None) if data_cfg.get("atomrefs_available", True) else None
         db_path = convert_to_schnetpack_db(resolved_input, scratch_dir, atomrefs_dict=atomrefs_dict)
 
     for engine in engines:
@@ -341,9 +342,11 @@ def main():
 
             # Extract atomrefs for conversion
             if is_unified:
-                atomrefs_dict = user_yaml_dict.get("common", {}).get("data", {}).get("atomrefs", None)
+                data_cfg = user_yaml_dict.get("common", {}).get("data", {})
             else:
-                atomrefs_dict = user_yaml_dict.get("data", {}).get("atomrefs", None)
+                data_cfg = user_yaml_dict.get("data", {})
+                
+            atomrefs_dict = data_cfg.get("atomrefs", None) if data_cfg.get("atomrefs_available", True) else None
                 
             args.input = convert_to_schnetpack_db(input_path, scratch_dir, atomrefs_dict=atomrefs_dict)
 
