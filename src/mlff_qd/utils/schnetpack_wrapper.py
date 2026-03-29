@@ -3,7 +3,7 @@ import subprocess
 import logging
 import numpy as np
 
-def convert_to_schnetpack_db(input_path: str, scratch_dir: str) -> str:
+def convert_to_schnetpack_db(input_path: str, scratch_dir: str, atomrefs_dict: dict = None) -> str:
     """
     Converts an .npz or .xyz dataset to SchNetPack .db format.
     """
@@ -17,14 +17,23 @@ def convert_to_schnetpack_db(input_path: str, scratch_dir: str) -> str:
 
     from schnetpack.data import ASEAtomsData
     from ase import Atoms
+    from ase.data import atomic_numbers
 
-    # Hardcoded atomrefs based on user configuration
-    my_atomrefs = {
-        "energy": [0.0] * 100
-    }
-    my_atomrefs["energy"][17] = -405.77437669156273614  # Cl
-    my_atomrefs["energy"][52] = -219.49156681006164149  # Te
-    my_atomrefs["energy"][80] = -1118.3844369317112069  # Hg
+    # Dynamically map atomrefs if provided by user
+    my_atomrefs = None
+    if atomrefs_dict:
+        # Create an array large enough to hold all elements up to Oganesson (118)
+        energy_refs = [0.0] * 119
+        for key, val in atomrefs_dict.items():
+            # If the user provides a symbol like 'Cl', look up its atomic number
+            if isinstance(key, str) and key in atomic_numbers:
+                z = atomic_numbers[key]
+            else:
+                z = int(key)
+            energy_refs[z] = float(val)
+        
+        my_atomrefs = {"energy": energy_refs}
+        logging.info(f"[SchNetPack Wrapper] Built atomrefs for {len(atomrefs_dict)} elements.")
 
     ds = ASEAtomsData.create(
         datapath=db_path,

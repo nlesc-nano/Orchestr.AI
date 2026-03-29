@@ -37,7 +37,8 @@ def run_benchmark(args, scratch_dir):
     db_path = None
     if resolved_input and os.path.exists(resolved_input):
         from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
-        db_path = convert_to_schnetpack_db(resolved_input, scratch_dir)
+        atomrefs_dict = tmp_cfg.get("common", {}).get("data", {}).get("atomrefs", None)
+        db_path = convert_to_schnetpack_db(resolved_input, scratch_dir, atomrefs_dict=atomrefs_dict)
 
     for engine in engines:
         print(f"Benchmarking {engine}...")
@@ -337,7 +338,14 @@ def main():
         if input_path and not input_path.endswith(".db") and os.path.exists(input_path):
             logging.info(f"[{platform}] Converting {input_path} to SchNetPack DB...")
             from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
-            args.input = convert_to_schnetpack_db(input_path, scratch_dir)
+
+            # Extract atomrefs for conversion
+            if is_unified:
+                atomrefs_dict = user_yaml_dict.get("common", {}).get("data", {}).get("atomrefs", None)
+            else:
+                atomrefs_dict = user_yaml_dict.get("data", {}).get("atomrefs", None)
+                
+            args.input = convert_to_schnetpack_db(input_path, scratch_dir, atomrefs_dict=atomrefs_dict)
 
     # Always generate engine YAML for unified YAMLs, and optionally for legacy (with --only-generate)
     if is_unified or args.only_generate:
