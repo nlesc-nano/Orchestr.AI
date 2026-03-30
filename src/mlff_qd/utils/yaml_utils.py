@@ -43,7 +43,7 @@ KEY_MAPPINGS = {
     "painn": {},  
     "fusion": {},
     "nequip": {
-        "model.cutoff": ["training_module.model.r_max"],
+        "model.cutoff": ["cutoff_radius"],
         "model.mp_layers": ["training_module.model.num_layers"],
         "model.features": ["training_module.model.num_features"],  
         "model.n_rbf": ["training_module.model.num_bessels"],
@@ -87,7 +87,7 @@ KEY_MAPPINGS = {
     },
     
     "allegro": {
-        "model.cutoff": ["cutoff_radius", "training_module.model.r_max"],
+        "model.cutoff": ["cutoff_radius"],
         "model.mp_layers": ["training_module.model.num_layers"],
         "model.features": ["num_scalar_features", "training_module.model.num_scalar_features"], 
         "model.n_rbf": ["training_module.model.radial_chemical_embed.num_bessels"],
