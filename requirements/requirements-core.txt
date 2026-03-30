@@ -1,0 +1,7 @@
+torch==2.10.0
+ase==3.26.0
+pandas
+scikit-learn
+wandb
+schnetpack
+dscribe

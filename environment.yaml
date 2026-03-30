@@ -1,4 +1,4 @@
-name: mlff
+name: mlff_legacy
 channels:
   - defaults
   - conda-forge
@@ -11,6 +11,7 @@ dependencies:
   - scikit-learn
   - wandb
   - pip:
+      - torch==2.10.0
       - schnetpack
       - dscribe
       - nequip==0.16.0
