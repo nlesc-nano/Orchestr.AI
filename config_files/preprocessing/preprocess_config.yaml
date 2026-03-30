@@ -19,7 +19,8 @@ dataset:
    subset_counts:
      MD: 4036  # Structures obtained from Molecular Dynamics (MD) simulation 
    contamination: 0.05 # Fraction of outliers removed by Isolation Forest 
-   
+   n_sets: 2 # Number of random subsets to create (for training/validation splits)
+   seed: 0 # seed for n_sets allocation (for reproducibility)
 # ───────────────────────────────────────────────
 # Optional SOAP descriptor settings
 # (You can safely remove this section to let MLFF-QD
