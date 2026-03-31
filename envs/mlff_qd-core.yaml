@@ -1,0 +1,15 @@
+name: mlff-core
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.12
+  - pip
+  - ase=3.26.0  
+  - pandas
+  - scikit-learn
+  - wandb
+  - pip:
+      - schnetpack
+      - dscribe

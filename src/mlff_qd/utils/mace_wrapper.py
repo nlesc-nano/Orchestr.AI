@@ -1,5 +1,4 @@
 import sys
-from mace.cli.run_train import main as mace_train_main
 import yaml
 import logging
 import tempfile
@@ -17,6 +16,9 @@ def run_mace_training(config_path):
         from mlff_qd.utils.yaml_utils import validate_mace_launch_policy
         validate_mace_launch_policy(config)
         
+        # Lazy import: only required when actually running MACE
+        from mace.cli.run_train import main as mace_train_main
+
         temp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w", encoding="utf-8")
         yaml.dump(config, temp, allow_unicode=True)
         temp.flush()
@@ -31,6 +33,7 @@ def run_mace_training(config_path):
         finally:
             sys.argv = old_argv
             os.unlink(temp_path)
+
     except Exception as e:
         logging.error(f"MACE training failed with config {config_path}: {str(e)}")
         raise

@@ -6,14 +6,21 @@ from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
 from mlff_qd.utils.io import ( parse_stacked_xyz, save_stacked_xyz,
                               save_to_npz )
-from mlff_qd.utils.plots import ( plot_energy_and_forces,
-                                 plot_pca )
+# from mlff_qd.utils.plots import ( plot_energy_and_forces,
+#                                  plot_pca )
+from mlff_qd.utils.plots import (
+    plot_energy_and_forces,
+    plot_pca,
+    plot_umap,
+    plot_tsne,
+)
 from mlff_qd.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
 from mlff_qd.utils.pca import detect_outliers
 from mlff_qd.utils.cluster import select_kmeans_medoids
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
+from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 
 import logging
 logger = logging.getLogger(__name__)
@@ -32,6 +39,7 @@ def consolidate_dataset(cfg: Dict):
     n_sets   = ds.get("n_sets", 1)
     bf       = ds.get("bootstrap_factor", 1)
     cont     = ds.get("contamination", 0.05)
+    seed     = ds.get("seed", 0)
 
     logger.info(f"[Consolidate] parsing {infile}…")
     # 2) Parse stacked XYZ
@@ -62,6 +70,8 @@ def consolidate_dataset(cfg: Dict):
     raw_feats = np.hstack((global_feats, local_feats))
     feats     = StandardScaler().fit_transform(raw_feats)
 
+    logger.info(f"[StandardScaler] Done, feature shape: {feats.shape}")
+    
     # 8) Outlier detection via IsolationForest
     inliers_mask = detect_outliers(
         feats,
@@ -69,7 +79,7 @@ def consolidate_dataset(cfg: Dict):
         labels=labels_full,
         title=f"Outlier Detection (cont={cont})",
         filename=f"{prefix}_outliers_if.png",
-        random_state=0,
+        random_state=seed,
     )
 
     # 9) Keep only inliers
@@ -83,42 +93,78 @@ def consolidate_dataset(cfg: Dict):
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
         feats,
-        labels,
         title="Inliers PCA",
-        filename=f"{prefix}_inliers_pca.png"
+        filename=f"{prefix}_inliers_pca.png",
+        random_state=seed,
     )
 
     # 10) Save full inliers file
-    save_stacked_xyz("inliers_full_dataset.xyz", E, P, F, atoms)
+    save_stacked_xyz(f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms)
 
     # Precompute 1D atomic_numbers for NPZ
     atomic_numbers_1d = np.array([_ase_atomic_numbers[sym] for sym in atoms],
                                  dtype=np.int32)
 
-    # 11) K-means medoid selection for each target size
-    for tgt in sizes:
-        nsel = min(len(feats), tgt)
-        sel_idxs = select_kmeans_medoids(feats, nsel, random_state=0)
 
-        logger.info(f"[KMeans] selected {len(sel_idxs)} representatives for size {tgt}")
+    # 11) K-means medoid selection for each target size, repeated n_sets times with different seeds
+    for set_id in range(n_sets):
+        set_seed = seed + set_id
+        logger.info(f"[Select] set_id={set_id}/{n_sets-1}, seed={set_seed}")
 
-        # Save XYZ and energy/force plots
-        xyz_fn = f"{prefix}_{tgt}.xyz"
-        save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
-        plot_energy_and_forces(E[sel_idxs], F[sel_idxs],
-                               filename=f"{prefix}_EF_sel_{tgt}.png")
-        
-        # Center lattice & write centered file + preview PNG
-        centered_xyz = f"{prefix}_{tgt}_centered.xyz"
-        centered_png = f"{prefix}_{tgt}_centered.png"
-        process_xyz(xyz_fn, centered_xyz, centered_png)
-        
-        # Save NPZ with all four arrays: z, R, E, Fs
-        npz_fn = f"{prefix}_{tgt}.npz"
-        save_to_npz(
-            filename=      npz_fn,
-            atomic_numbers=atomic_numbers_1d,
-            positions=     P[sel_idxs],
-            energies=      E[sel_idxs],
-            forces=        F[sel_idxs]
-        )
+        for tgt in sizes:
+            nsel = min(len(feats), tgt)
+
+            sel_idxs = select_kmeans_medoids(feats, nsel, random_state=set_seed)
+            logger.info(f"[KMeans] set={set_id} selected {len(sel_idxs)} reps for size {tgt}")
+
+            # Coverage plots: full inlier space + selected subset overlay
+            plot_pca(
+                feats,
+                title=f"PCA Coverage: selected {nsel} from {len(feats)} inliers",
+                filename=f"{prefix}_set{set_id}_{tgt}_coverage_pca.png",
+                selected_idx=sel_idxs,
+                random_state=set_seed,
+            )
+
+            try:
+                plot_umap(
+                    feats,
+                    title=f"UMAP Coverage: selected {nsel} from {len(feats)} inliers",
+                    filename=f"{prefix}_set{set_id}_{tgt}_coverage_umap.png",
+                    selected_idx=sel_idxs,
+                    random_state=set_seed,
+                )
+            except Exception as e:
+                logger.warning(f"[UMAP] Skipped due to error: {e}")
+
+            plot_tsne(
+                feats,
+                title=f"t-SNE Coverage: selected {nsel} from {len(feats)} inliers",
+                filename=f"{prefix}_set{set_id}_{tgt}_coverage_tsne.png",
+                selected_idx=sel_idxs,
+                random_state=set_seed,
+            )
+
+            # ---- output names include set_id ----
+            xyz_fn = f"{prefix}_set{set_id}_{tgt}.xyz"
+            save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
+
+            plot_energy_and_forces(
+                E[sel_idxs], F[sel_idxs],
+                filename=f"{prefix}_set{set_id}_EF_sel_{tgt}.png"
+            )
+
+            preprocess_data_for_platform(xyz_fn, 'mace')
+
+            centered_xyz = f"{prefix}_set{set_id}_{tgt}_centered.xyz"
+            centered_png = f"{prefix}_set{set_id}_{tgt}_centered.png"
+            process_xyz(xyz_fn, centered_xyz, centered_png)
+
+            npz_fn = f"{prefix}_set{set_id}_{tgt}.npz"
+            save_to_npz(
+                filename=npz_fn,
+                atomic_numbers=atomic_numbers_1d,
+                positions=P[sel_idxs],
+                energies=E[sel_idxs],
+                forces=F[sel_idxs],
+            )

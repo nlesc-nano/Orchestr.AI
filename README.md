@@ -1,40 +1,142 @@
 # MLFF_QD  
-### Unified Platform for Machine-Learning Force Fields for Quantum Dots 🚀
+## Unified Platform for Machine-Learning Force Fields for Quantum Dots 🚀
 
 **MLFF_QD** is a unified, modular, and engine‑agnostic framework for training state‑of‑the‑art machine learning force fields (MLFFs) for **quantum dots (QDs)**.  
 It integrates multiple ML engines under a single interface:
 
 ✅ **SchNet**
 ✅ **PaiNN**
+✅ **SO3net**
+✅ **FieldSchNet**
 ✅ **NequIP**
 ✅ **Allegro**
 ✅ **MACE**
 
-### 1. Installation
+## 1. Installation
 For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
-Details will be provided in the following sections.
+MLFF_QD supports **three installation modes** depending on your system and preference:
 
-#### Installation of the mlff_qd package ⚙️
-To install the `mlff_qd` platform, clone the repository and set up the environment as follows:
 
-#### 1.1 Clone the repository
+| Mode | Tool | Recommended For |
+| --- | --- | --- |
+| Conda | `conda` | Simple users |
+| Micromamba | `micromamba` | Faster HPC setup |
+| Micromamba + UV | `micromamba + uv` | Fastest recommended setup |
+| Legacy | Conda manual | Compatibility |
+
+### Clone the repository
+
 ```bash
 git clone https://github.com/nlesc-nano/MLFF_QD.git
 cd MLFF_QD
 ```
-#### 1.2 Set up the Conda environment 🛠️
-To set up the conda environment, use the provided `environment.yaml` file. Once activated, install the `mace-torch` package as recommended.
+
+
+### Choose installation method
+
+
+<details>
+<summary><strong>Show installation options</strong></summary>
+
+Add `PRINT_VERSIONS=0` before the command to skip version checks and speed up installation.
+
+#### Option A — Conda
+```bash
+PRINT_VERSIONS=0 bash scripts/setup_envs.sh
+source scripts/mlff_qd_env.sh
+```
+
+#### Option B — Micromamba
+```bash
+PRINT_VERSIONS=0 bash scripts/setup_envs_micromamba.sh
+source scripts/mlff_qd_env.sh
+```
+
+#### Option C — Micromamba + UV
+```bash
+PRINT_VERSIONS=0 bash scripts/setup_envs_micromamba_uv.sh
+source scripts/mlff_qd_env.sh
+```
+
+#### Option D — Legacy (manual setup)
 
 ```bash
 conda env create -f environment.yaml
 conda activate mlff
 pip install mace-torch==0.3.14
-```
-#### 1.3 Install the mlff_qd package
-Finally, install the package in editable mode:
-```bash
 pip install -e .
+source scripts/mlff_qd_single_env.sh
 ```
+
+
+
+### Installation notes
+
+#### Example of internal dispatch
+
+```text
+Running in env prefix: mlffqd-core
+[MLFF_QD] Dispatch: engine 'nequip' → env 'mlffqd-nequip'
+Running in env prefix: mlffqd-nequip
+```
+
+<strong>What this setup does</strong>
+
+- Creates three environments:
+  - core → SchNet, PaiNN, SO3net, FieldSchNet
+  - nequip → NequIP, Allegro
+  - mace → MACE
+- Installs mlff_qd in all environments
+- Enables automatic environment dispatch
+
+
+<strong>Custom environment names</strong>
+
+Modify these scripts:
+- setup_envs.sh
+- setup_envs_micromamba.sh
+- setup_envs_micromamba_uv.sh
+
+Environment variables for custom names:
+- MLFFQD_CORE_CONDA_ENV
+- MLFFQD_NEQUIP_CONDA_ENV
+- MLFFQD_MACE_CONDA_ENV
+
+Example:
+```bash
+export MLFFQD_CORE_CONDA_ENV=mycore
+export MLFFQD_NEQUIP_CONDA_ENV=mynequip
+export MLFFQD_MACE_CONDA_ENV=mymace
+```
+
+</details>
+
+
+### Running on SLURM (HPC)
+
+<details>
+<summary><strong>Click to expand SLURM usage</strong></summary>
+
+#### Multi-environment mode (recommended)
+
+```bash
+sbatch run_training.sh input.yaml --engine nequip --train-after-generate
+```
+
+Flow:
+```text
+core → dispatch → engine-specific env → training
+```
+
+#### Summary
+
+| Mode | Dispatch | Recommended |
+| --- | --- | --- |
+| Multi-env | Yes | Yes |
+| Single-env | No | Legacy |
+
+</details>
+
 ------
 ## Getting started
 The current version of the platform is developed for being run in a cluster. Thus, in this repository one can find the necessary code, a bash script example for submitting jobs in a slurm queue system and an input file example.

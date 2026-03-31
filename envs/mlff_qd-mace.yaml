@@ -1,0 +1,16 @@
+name: mlffqd-mace
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+
+  - pip:
+      - mace-torch
+
+      - cuequivariance
+      - cuequivariance-torch
+      - cuequivariance-ops-torch-cu12

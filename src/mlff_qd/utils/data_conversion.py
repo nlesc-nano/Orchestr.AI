@@ -191,7 +191,7 @@ def convert_to_mace_xyz(xyz_file, out_file):
     with open(out_file, 'w', encoding='utf-8') as outfile:
         for i in range(n_frames):
             outfile.write(f"{n_atoms}\n")
-            lattice = lattice_list[i] if lattice_list[i] else '1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0'
+            lattice = lattice_list[i] if lattice_list[i] else '0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0'
             pbc = pbc_list[i] if pbc_list[i] else 'F F F'
             stress = format_stress_for_xyz(stress_list[i]) if stress_list[i] else None
             header = (

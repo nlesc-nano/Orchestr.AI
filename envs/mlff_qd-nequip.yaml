@@ -1,0 +1,20 @@
+name: mlffqd-nequip
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+
+  - pip:
+      - nequip
+      - nequip-allegro
+
+      - tensorboard
+      - tensorboardX
+
+      - openequivariance
+      - cuequivariance-torch
+      - cuequivariance-ops-torch-cu12

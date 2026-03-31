@@ -1,0 +1,5 @@
+torch==2.10.0
+mace-torch
+cuequivariance
+cuequivariance-torch
+cuequivariance-ops-torch-cu12

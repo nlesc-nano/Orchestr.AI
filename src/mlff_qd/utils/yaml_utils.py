@@ -6,39 +6,31 @@ import numpy as np
 
 KEY_MAPPINGS = {
     "schnet": {
-        "model.cutoff": ["model.cutoff"],
-        "model.mp_layers": ["model.n_interactions"],
-        "model.features": ["model.n_atom_basis"],
-        "model.n_rbf": ["model.n_rbf"],
-        "training.seed": ["general.seed"],
-        "training.batch_size": ["training.batch_size"],
-        "training.epochs": ["training.max_epochs"],
-        "training.learning_rate": ["training.optimizer.lr"],
-        "training.optimizer": ["training.optimizer.type"],
-        "training.scheduler.type": ["training.scheduler.type"],
-        "training.scheduler.factor": ["training.scheduler.factor"],
-        "training.scheduler.patience": ["training.scheduler.patience"],
-        "training.num_workers": ["training.num_workers"],
-        "training.pin_memory": ["training.pin_memory"],
-        "training.log_every_n_steps": ["training.log_every_n_steps"],
-        "training.accelerator": ["training.accelerator"],
-        "training.devices": ["training.devices"],
-        "training.train_size": ["training.num_train"],
-        "training.val_size": ["training.num_val"],
-        "training.test_size": ["training.num_test"],
-        "training.early_stopping": ["training.early_stopping"],  # EarlyStopping 
-        "training.early_stopping.patience": ["training.early_stopping.patience"],
-        "training.early_stopping.min_delta": ["training.early_stopping.min_delta"],
-        "training.early_stopping.monitor": ["training.early_stopping.monitor"],
-        "output.output_dir": ["logging.folder", "testing.trained_model_path"],
-        "loss.energy_weight": ["outputs.energy.loss_weight"],
-        "loss.forces_weight": ["outputs.forces.loss_weight"],
-        "data.input_xyz_file": ["data.dataset_path"],
-        "fine_tuning.pretrained_model": ["fine_tuning.pretrained_checkpoint"],
-        "fine_tuning.learning_rate": ["fine_tuning.lr"],
-        "fine_tuning.early_stopping_patience": ["fine_tuning.early_stopping_patience"],
-        "fine_tuning.freeze_backbone": ["fine_tuning.freeze_all_representation"],
-
+        "model.cutoff": ["globals.cutoff"],
+        "model.mp_layers": ["model.representation.n_interactions"],
+        "model.features": ["model.representation.n_atom_basis"],
+        "model.n_rbf": ["model.representation.radial_basis.n_rbf"],
+        "training.seed": ["seed"],
+        "training.batch_size": ["data.batch_size"],
+        "training.epochs": ["trainer.max_epochs"],
+        "training.learning_rate": ["globals.lr"],
+        "training.optimizer": ["task.optimizer_cls"],
+        "training.scheduler.type": ["task.scheduler_cls"],
+        "training.scheduler.factor": ["task.scheduler_args.factor"],
+        "training.scheduler.patience": ["task.scheduler_args.patience"],
+        "training.num_workers": ["data.num_workers", "data.num_val_workers", "data.num_test_workers"],
+        "training.accelerator": ["trainer.accelerator"],
+        "training.devices": ["trainer.devices"],
+        "training.train_size": ["data.num_train"],
+        "training.val_size": ["data.num_val"],
+        "training.test_size": ["data.num_test"],
+        "training.early_stopping.patience": ["callbacks.early_stopping.patience"],
+        "training.early_stopping.min_delta": ["callbacks.early_stopping.min_delta"],
+        "training.early_stopping.monitor": ["callbacks.early_stopping.monitor"],
+        "output.output_dir": ["run.work_dir"],
+        "loss.energy_weight": ["task.outputs[0].loss_weight"],
+        "loss.forces_weight": ["task.outputs[1].loss_weight"],
+        "data.input_xyz_file": ["data.datapath"],
     },
     "painn": {},  
     "fusion": {},
@@ -163,7 +155,7 @@ OPTIMIZER_TARGETS = {
     "SGD": "torch.optim.SGD",
 }
 
-NPZ_ENGINES = {"schnet", "painn", "fusion"}
+NPZ_ENGINES = {"schnet", "painn", "fusion", "so3net", "field_schnet"}
 XYZ_ENGINES = {"nequip", "allegro", "mace"}
 
 def expected_extension(platform: str) -> str:
@@ -172,9 +164,14 @@ def expected_extension(platform: str) -> str:
 def validate_input_file(path: str, platform: str) -> str:
     if not path or not os.path.exists(path):
         raise ValueError(f"Input data file not found: {path}")
-    need = expected_extension(platform)
-    if not str(path).lower().endswith(need):
-        raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected '{need}'.")
+    
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
+        if not str(path).lower().endswith((".npz", ".xyz", ".db")):
+            raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected .npz, .xyz, or .db.")
+    else:
+        need = expected_extension(platform)
+        if not str(path).lower().endswith(need):
+            raise ValueError(f"[{platform}] Invalid input extension for {path!r}. Expected '{need}'.")
     return path
 
 def _resolve_path(base_dir, p):
@@ -197,8 +194,8 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
     platform = (platform or "").lower()
     paths = []
 
-    if platform in {"schnet", "painn", "fusion"}:
-        dp = cfg.get("data", {}).get("dataset_path")
+    if platform in {"schnet", "painn", "fusion", "so3net", "field_schnet"}:
+        dp = cfg.get("data", {}).get("dataset_path") or cfg.get("data", {}).get("datapath")
         if dp: paths.append(_resolve_path(yaml_dir, dp))
         
         # include optional split_file (engine-specific schnet/painn)
@@ -242,11 +239,13 @@ def get_dataset_paths_from_yaml(platform, config_yaml_path):
     return final
 
 # Patch painn/fusion mapping to schnet (they use the same template)
-for plat in ["painn", "fusion"]:
+for plat in ["painn", "fusion", "so3net", "field_schnet"]:
     KEY_MAPPINGS[plat] = deepcopy(KEY_MAPPINGS["schnet"])
 
+KEY_MAPPINGS["so3net"]["model.l_max"] = ["model.representation.lmax"]
+
 def get_early_stopping_monitor(platform):
-    if platform in ["schnet", "painn", "fusion"]:
+    if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
         return "val_loss"
     elif platform in ["nequip", "allegro"]:
         return "val0_epoch/weighted_sum"
@@ -257,10 +256,13 @@ def get_early_stopping_monitor(platform):
 
 def remove_early_stopping_callbacks(engine_cfg):
     # Remove from top-level 'callbacks'
-    if "callbacks" in engine_cfg and isinstance(engine_cfg["callbacks"], list):
-        engine_cfg["callbacks"] = [cb for cb in engine_cfg["callbacks"] if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")]
-        if not engine_cfg["callbacks"]:
-            del engine_cfg["callbacks"]
+    if "callbacks" in engine_cfg:
+        if isinstance(engine_cfg["callbacks"], list):
+            engine_cfg["callbacks"] = [cb for cb in engine_cfg["callbacks"] if not (isinstance(cb, dict) and cb.get("_target_") == "lightning.pytorch.callbacks.EarlyStopping")]
+            if not engine_cfg["callbacks"]:
+                del engine_cfg["callbacks"]
+        elif isinstance(engine_cfg["callbacks"], dict):
+            engine_cfg["callbacks"].pop("early_stopping", None)
     # Remove from trainer.callbacks if present
     if "trainer" in engine_cfg and "callbacks" in engine_cfg["trainer"]:
         if isinstance(engine_cfg["trainer"]["callbacks"], list):
@@ -285,19 +287,14 @@ def apply_early_stopping(user_cfg, engine_cfg, platform, key_mappings):
             engine_cfg.pop("patience", None)
         else:
             remove_early_stopping_callbacks(engine_cfg)
-            if platform in ["schnet", "painn", "fusion"]:
+            if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
                 if "training" in engine_cfg:
                     engine_cfg["training"].pop("early_stopping", None)
     elif enabled is True:
         if platform == "mace":
             patience = es_cfg.get("patience", 30)
             engine_cfg["patience"] = patience
-        elif platform in ["schnet", "painn", "fusion"]:
-            es_cfg_clean = {k: v for k, v in es_cfg.items() if k != "enabled"}
-            if "monitor" not in es_cfg_clean or not es_cfg_clean.get("monitor"):
-                es_cfg_clean["monitor"] = get_early_stopping_monitor(platform)
-            engine_cfg.setdefault("training", {})["early_stopping"] = es_cfg_clean
-        elif platform in ["nequip", "allegro"]:
+        elif platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
             update_early_stopping_callbacks(engine_cfg, es_cfg, key_mappings, platform)
 
 def preprocess_optimizer(user_cfg):
@@ -314,7 +311,8 @@ def preprocess_optimizer(user_cfg):
 def load_template(platform):
     """Load platform-specific template from the templates directory."""
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    template_path = os.path.join(base_dir, "templates", f"{platform if platform != 'painn' and platform != 'fusion' else 'schnet'}.yaml")
+    template_name = platform if platform != 'fusion' else 'schnet'
+    template_path = os.path.join(base_dir, "templates", f"{template_name}.yaml")
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template file for {platform} not found at {template_path}")
     with open(template_path, "r", encoding="utf-8") as f:
@@ -809,6 +807,15 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         input_xyz_file = user_cfg["input_xyz_file"]
     if input_xyz:
         input_xyz_file = input_xyz
+
+    # Fallback: If unified YAML specifies a .db that doesn't exist, try to find an .xyz or .npz
+    if input_xyz_file and input_xyz_file.endswith(".db") and not os.path.exists(input_xyz_file):
+        for ext in [".xyz", ".npz"]:
+            fb = input_xyz_file[:-3] + ext
+            if os.path.exists(fb):
+                input_xyz_file = fb
+                break
+
     if not input_xyz_file or not os.path.exists(input_xyz_file):
         raise ValueError(f"Input XYZ file not found: {input_xyz_file}")
 
@@ -826,7 +833,7 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         set_nested(engine_cfg, p.split("."), input_xyz_file)
     
     # NEW: unified YAML -> do NOT carry split_file into generated schnet/painn YAML
-    if platform in ["schnet", "painn"]:
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
         if isinstance(engine_cfg.get("data"), dict):
             engine_cfg["data"].pop("split_file", None)
             
@@ -835,10 +842,34 @@ def extract_engine_yaml(master_yaml_path, platform, input_xyz=None):
         set_nested(engine_cfg, ["data", "split_dataset", "train"], smart_round(train_size))
         set_nested(engine_cfg, ["data", "split_dataset", "val"], smart_round(val_size))
         set_nested(engine_cfg, ["data", "split_dataset", "test"], smart_round(test_size))
-    elif platform in ["schnet", "painn", "fusion"]:
-        set_nested(engine_cfg, ["training", "num_train"], smart_round(train_size))
-        set_nested(engine_cfg, ["training", "num_val"], smart_round(val_size))
-        set_nested(engine_cfg, ["training", "num_test"], smart_round(test_size))
+    elif platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
+        set_nested(engine_cfg, ["data", "num_train"], smart_round(train_size))
+        set_nested(engine_cfg, ["data", "num_val"], smart_round(val_size))
+        set_nested(engine_cfg, ["data", "num_test"], smart_round(test_size))
+
+    # Handle atomrefs
+    if platform in ["schnet", "painn", "so3net", "field_schnet"]:
+        atomrefs_avail = user_cfg.get("data", {}).get("atomrefs_available", True)
+        for tf in engine_cfg.get("data", {}).get("transforms", []):
+            if tf.get("_target_") == "schnetpack.transform.RemoveOffsets":
+                tf["remove_atomrefs"] = atomrefs_avail
+        for pp in engine_cfg.get("model", {}).get("postprocessors", []):
+            if pp.get("_target_") == "schnetpack.transform.AddOffsets":
+                pp["add_atomrefs"] = atomrefs_avail
+                
+        # Fix SchNetPack specific optimizer and scheduler class string formatting
+        if "task" in engine_cfg:
+            opt = engine_cfg["task"].get("optimizer_cls")
+            if isinstance(opt, dict) and "_target_" in opt:
+                engine_cfg["task"]["optimizer_cls"] = opt["_target_"]
+            elif isinstance(opt, str) and "." not in opt:
+                engine_cfg["task"]["optimizer_cls"] = f"torch.optim.{opt}"
+
+            sched = engine_cfg["task"].get("scheduler_cls")
+            if sched == "ReduceLROnPlateau":
+                engine_cfg["task"]["scheduler_cls"] = "schnetpack.train.ReduceLROnPlateau"
+            elif isinstance(sched, str) and "." not in sched:
+                engine_cfg["task"]["scheduler_cls"] = f"torch.optim.lr_scheduler.{sched}"
 
     # Special patches
     handle_pair_potential(user_cfg, engine_cfg, platform)

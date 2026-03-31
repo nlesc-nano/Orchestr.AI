@@ -12,7 +12,7 @@ def select_kmeans_medoids(features, n_clusters: int, random_state: int = 0):
     KMeans clustering + medoid selection: pick, for each cluster, the member closest to its centroid.
     Returns an array of selected indices (length = n_clusters).
     """
-    kmed = KMeans(n_clusters=n_clusters, random_state=random_state).fit(features)
+    kmed = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto").fit(features)
     centers = kmed.cluster_centers_
     cluster_lbls = kmed.labels_
 

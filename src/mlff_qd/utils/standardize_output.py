@@ -152,7 +152,7 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
         move_specific_prepared_data(explicit_data_paths, dest_dir)
         
         # Special-case: SchNet/PaiNN often produce a prepared split.npz (and related .npz files)
-        if platform in ("schnet", "painn"):
+        if platform in ("schnet", "painn", "so3net", "field_schnet"):
             move_prepared_data(platform, source_dir, results_dir, dest_dir)
             
     else:
@@ -161,17 +161,52 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
     if not results_dir:
         results_dir = os.path.join(source_dir, "results")
 
-    if platform in ("schnet", "painn", "fusion"):
+    if platform in ("schnet", "painn", "fusion", "so3net", "field_schnet"):
         # Generalized: Move best model(s) by user-supplied or default pattern
         
+        ckpt_path_name = "checkpoints"
+        tb_path_name = "tensorboard"
+
         if best_model_dir:
             logging.info(f"Using best model dir from YAML: {best_model_dir}")
             move_if_exists(os.path.join(results_dir, best_model_dir), standardized_dirs["best_model"])
         else:
             move_best_model(results_dir, standardized_dirs["best_model"])  # fallback
-        
-        
-        # Checkpoints: results/lightning_logs/version_*/checkpoints/
+
+        if config_yaml_path and os.path.exists(config_yaml_path):
+            import yaml
+            try:
+                with open(config_yaml_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                
+                ckpt_dir = cfg.get("callbacks", {}).get("model_checkpoint", {}).get("dirpath")
+                if ckpt_dir:
+                    ckpt_path_name = ckpt_dir
+                    
+                logger_cfg = cfg.get("logger", {})
+                if isinstance(logger_cfg, dict):
+                    # Loop through available loggers (tensorboard, csv, wandb) to find save_dir
+                    for _, l_val in logger_cfg.items():
+                        if isinstance(l_val, dict) and "save_dir" in l_val:
+                            tb_path_name = l_val["save_dir"]
+                            break
+            except Exception as e:
+                logging.warning(f"Could not parse YAML for dynamic paths: {e}")
+
+        # 1. Move checkpoints folder
+        schnet_ckpts = os.path.normpath(os.path.join(results_dir, ckpt_path_name))
+        if os.path.exists(schnet_ckpts):
+            for item in os.listdir(schnet_ckpts):
+                if "best" not in item.lower():
+                    move_if_exists(os.path.join(schnet_ckpts, item), standardized_dirs["checkpoints"])
+                    
+        # 2. Move logger folder to lightning_logs
+        schnet_tb = os.path.normpath(os.path.join(results_dir, tb_path_name))
+        if os.path.exists(schnet_tb):
+            for item in os.listdir(schnet_tb):
+                move_if_exists(os.path.join(schnet_tb, item), standardized_dirs["lightning_logs"])
+
+        # --- LEGACY: PyTorch Lightning structure ---
         lightning_logs = os.path.join(results_dir, "lightning_logs")
         if os.path.exists(lightning_logs):
             for version_folder in os.listdir(lightning_logs):
@@ -179,15 +214,15 @@ def standardize_output(platform, source_dir, dest_dir, results_dir=None, config_
                 if os.path.exists(vpath):
                     move_if_exists(vpath, standardized_dirs["checkpoints"])
             move_if_exists(lightning_logs, standardized_dirs["lightning_logs"])
-        # Logs: move .log files and hparams.yaml from results/
-        if os.path.exists(results_dir):
-            for f in os.listdir(results_dir):
-                if f.endswith(".log") or "hparams.yaml" in f:
-                    move_if_exists(os.path.join(results_dir, f), standardized_dirs["logs"])
-        for f in os.listdir(source_dir):
-            if f.endswith(".log"):
-                move_if_exists(os.path.join(source_dir, f), standardized_dirs["logs"])
-        
+            
+        # Logs: move .log files and hparams.yaml from results/ and source/
+        for d in [results_dir, source_dir]:
+            if os.path.exists(d):
+                for f in os.listdir(d):
+                    if f.endswith(".log") or "hparams.yaml" in f:
+                        move_if_exists(os.path.join(d, f), standardized_dirs["logs"])
+
+
         # Always move .csv/.pkl predictions from source/results
         move_prediction_files(source_dir, results_dir, dest_dir)
     

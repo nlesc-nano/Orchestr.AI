@@ -2,32 +2,297 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from mlff_qd.utils.pca import project_pca2
+from sklearn.manifold import TSNE
+
 import logging
 logger = logging.getLogger(__name__)
 
-def plot_pca(features, labels, title="PCA", filename="pca.png"):
-    red, _  = project_pca2(features)
-    plt.figure(figsize=(8,6))
-    cmap = ["blue","green","red","orange","purple","brown","pink","gray"]
-    for lbl in np.unique(labels):
-        m = (labels==lbl)
-        plt.scatter(red[m,0],red[m,1],label=f"grp{lbl}",c=cmap[lbl%len(cmap)],alpha=0.7)
-    plt.legend(); plt.title(title)
-    plt.savefig(filename, dpi=300); plt.close()
 
-def plot_outliers(features,labels,outliers,title,filename):
-    red, _  = project_pca2(features)
-    plt.figure(figsize=(8,6))
-    cmap = ["blue","green","red","orange"]
-    for lbl in np.unique(labels):
-        m_all = (labels==lbl)
-        m_in = m_all & (outliers==1)
-        m_out= m_all & (outliers==-1)
-        plt.scatter(red[m_in,0],red[m_in,1],c=cmap[lbl % len(cmap)],label=f"{lbl} in")
-        plt.scatter(red[m_out,0],red[m_out,1],c=cmap[lbl % len(cmap)],marker='x',s=50,label=f"{lbl} out")
-    plt.title(title); plt.legend()
-    plt.savefig(filename, dpi=300); plt.close()
-    
+def _save_close(filename, dpi=200):
+    plt.tight_layout()
+    plt.savefig(filename, dpi=dpi, bbox_inches="tight")
+    plt.close()
+    logger.info(f"[plot] Saved: {filename}")
+
+
+def _validate_selected(selected_idx, n):
+    if selected_idx is None:
+        return None
+    selected_idx = np.asarray(selected_idx)
+    if selected_idx.ndim != 1:
+        raise ValueError("selected_idx must be a 1D array of indices")
+    if len(selected_idx) == 0:
+        return selected_idx
+    if selected_idx.min() < 0 or selected_idx.max() >= n:
+        raise ValueError("selected_idx contains invalid indices")
+    return selected_idx
+
+
+def _subsample_indices(n, max_points=None, random_state=0):
+    if max_points is None or n <= max_points:
+        return np.arange(n)
+    rng = np.random.default_rng(random_state)
+    return rng.choice(n, size=max_points, replace=False)
+
+
+def plot_outliers(
+    features,
+    labels,
+    outliers,
+    title,
+    filename,
+    method="pca",
+    max_plot=20000,
+    random_state=0,
+    dpi=200,
+):
+    """
+    Plot inliers vs outliers in 2D.
+    labels is kept only for compatibility; it is not used for grouping.
+    """
+    logger.info("[plot_outliers] Starting....")
+
+    X = np.asarray(features)
+    op = np.asarray(outliers)
+
+    if X.shape[0] != len(op):
+        raise ValueError("features and outliers must have same number of rows")
+
+    idx = _subsample_indices(len(X), max_points=max_plot, random_state=random_state)
+    Xp = X[idx]
+    op = op[idx]
+
+    if len(X) > len(idx):
+        logger.info(f"[plot_outliers] Subsampling for plot: {len(idx)}/{len(X)}")
+
+    if method == "pca":
+        red, _ = project_pca2(Xp)
+
+    elif method == "tsne":
+        perplexity = min(30, max(5, len(Xp) - 1))
+        red = TSNE(
+            n_components=2,
+            init="pca",
+            learning_rate="auto",
+            perplexity=perplexity,
+            random_state=random_state,
+        ).fit_transform(Xp)
+
+    elif method == "umap":
+        try:
+            import umap
+            red = umap.UMAP(
+                n_components=2,
+                n_neighbors=15,
+                min_dist=0.1,
+                random_state=random_state,
+            ).fit_transform(Xp)
+        except ImportError:
+            logger.warning("[plot_outliers] UMAP not installed. Skipping UMAP outlier plot.")
+            return
+        except Exception as e:
+            logger.warning(f"[plot_outliers] UMAP failed. Skipping plot. Error: {e}")
+            return
+
+    else:
+        raise ValueError("method must be one of: 'pca', 'tsne', 'umap'")
+
+    m_in = (op == 1)
+    m_out = (op == -1)
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(red[m_in, 0], red[m_in, 1], s=8, alpha=0.45, label="inliers")
+    plt.scatter(red[m_out, 0], red[m_out, 1], s=28, alpha=0.9, marker="x", label="outliers")
+
+    plt.title(title)
+    plt.legend()
+    _save_close(filename, dpi=dpi)
+
+def plot_pca(
+    features,
+    labels=None,
+    title="PCA Projection",
+    filename="pca.png",
+    selected_idx=None,
+    max_plot=30000,
+    random_state=0,
+    dpi=200,
+):
+    """
+    PCA plot for full dataset, optionally overlaying selected subset.
+    Uses project_pca2(...) from mlff_qd.utils.pca.
+    """
+    logger.info("[plot_pca] Starting....")
+
+    X = np.asarray(features)
+    n = len(X)
+    selected_idx = _validate_selected(selected_idx, n)
+
+    bg_idx = _subsample_indices(n, max_points=max_plot, random_state=random_state)
+    if selected_idx is not None and len(selected_idx) > 0:
+        bg_idx = np.unique(np.concatenate([bg_idx, selected_idx]))
+
+    X_plot = X[bg_idx]
+    red, pca = project_pca2(X_plot)
+
+    plt.figure(figsize=(8, 6))
+
+    if selected_idx is None:
+        plt.scatter(red[:, 0], red[:, 1], s=8, alpha=0.6, label="frames")
+    else:
+        sel_set = set(selected_idx.tolist())
+        sel_mask = np.array([i in sel_set for i in bg_idx])
+        bg_mask = ~sel_mask
+
+        plt.scatter(red[bg_mask, 0], red[bg_mask, 1], s=8, alpha=0.25, label="all frames")
+        plt.scatter(red[sel_mask, 0], red[sel_mask, 1], s=35, alpha=0.95, label=f"selected ({sel_mask.sum()})")
+
+    evr = pca.explained_variance_ratio_
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title(title)
+    plt.legend()
+    _save_close(filename, dpi=dpi)
+
+def plot_umap(
+    features,
+    title="UMAP Projection",
+    filename="umap.png",
+    selected_idx=None,
+    max_plot=20000,
+    random_state=0,
+    n_neighbors=15,
+    min_dist=0.1,
+    dpi=200,
+):
+    """
+    UMAP plot for full dataset, optionally overlaying selected subset.
+    """
+    logger.info("[plot_umap] Starting....")
+
+    try:
+        import umap
+    except ImportError:
+        logger.warning("[plot_umap] UMAP not installed. Skipping UMAP plot.")
+        return
+
+    X = np.asarray(features)
+    n = len(X)
+    selected_idx = _validate_selected(selected_idx, n)
+
+    bg_idx = _subsample_indices(n, max_points=max_plot, random_state=random_state)
+    if selected_idx is not None and len(selected_idx) > 0:
+        bg_idx = np.unique(np.concatenate([bg_idx, selected_idx]))
+
+    X_plot = X[bg_idx]
+
+    try:
+        reducer = umap.UMAP(
+            n_components=2,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            random_state=random_state,
+        )
+        red = reducer.fit_transform(X_plot)
+    except Exception as e:
+        logger.warning(f"[plot_umap] UMAP failed. Skipping plot. Error: {e}")
+        return
+
+    plt.figure(figsize=(8, 6))
+
+    if selected_idx is None:
+        plt.scatter(red[:, 0], red[:, 1], s=8, alpha=0.6, label="frames")
+    else:
+        sel_set = set(selected_idx.tolist())
+        sel_mask = np.array([i in sel_set for i in bg_idx])
+        bg_mask = ~sel_mask
+
+        plt.scatter(red[bg_mask, 0], red[bg_mask, 1], s=8, alpha=0.25, label="all frames")
+        plt.scatter(red[sel_mask, 0], red[sel_mask, 1], s=35, alpha=0.95, label=f"selected ({sel_mask.sum()})")
+
+    plt.title(title)
+    plt.legend()
+    _save_close(filename, dpi=dpi)
+
+def plot_tsne(
+    features,
+    title="t-SNE Projection",
+    filename="tsne.png",
+    selected_idx=None,
+    max_plot=5000,
+    random_state=0,
+    perplexity=30,
+    dpi=200,
+):
+    """
+    t-SNE plot for full dataset, optionally overlaying selected subset.
+    """
+    logger.info("[plot_tsne] Starting....")
+
+    X = np.asarray(features)
+    n = len(X)
+    selected_idx = _validate_selected(selected_idx, n)
+
+    bg_idx = _subsample_indices(n, max_points=max_plot, random_state=random_state)
+    if selected_idx is not None and len(selected_idx) > 0:
+        bg_idx = np.unique(np.concatenate([bg_idx, selected_idx]))
+
+    X_plot = X[bg_idx]
+    effective_perplexity = min(perplexity, max(5, len(X_plot) - 1))
+
+    red = TSNE(
+        n_components=2,
+        init="pca",
+        learning_rate="auto",
+        perplexity=effective_perplexity,
+        random_state=random_state,
+    ).fit_transform(X_plot)
+
+    plt.figure(figsize=(8, 6))
+
+    if selected_idx is None:
+        plt.scatter(red[:, 0], red[:, 1], s=8, alpha=0.6, label="frames")
+    else:
+        sel_set = set(selected_idx.tolist())
+        sel_mask = np.array([i in sel_set for i in bg_idx])
+        bg_mask = ~sel_mask
+
+        plt.scatter(red[bg_mask, 0], red[bg_mask, 1], s=8, alpha=0.25, label="all frames")
+        plt.scatter(red[sel_mask, 0], red[sel_mask, 1], s=35, alpha=0.95, label=f"selected ({sel_mask.sum()})")
+
+    plt.title(title)
+    plt.legend()
+    _save_close(filename, dpi=dpi)
+
+
+# def plot_pca(features, labels, title="PCA", filename="pca.png"):
+#     red, _  = project_pca2(features)
+#     plt.figure(figsize=(8,6))
+#     cmap = ["blue","green","red","orange","purple","brown","pink","gray"]
+#     for lbl in np.unique(labels):
+#         m = (labels==lbl)
+#         plt.scatter(red[m,0],red[m,1],label=f"grp{lbl}",c=cmap[lbl%len(cmap)],alpha=0.7)
+#     plt.legend(); plt.title(title)
+#     plt.savefig(filename, dpi=300); plt.close()
+
+
+
+# def plot_outliers(features,labels,outliers,title,filename):
+#     logger.info(f"[plot_outliers] Starting....")
+#     red, _  = project_pca2(features)
+#     logger.info(f"[project_pca2] PCA projection done.")
+#     plt.figure(figsize=(8,6))
+#     cmap = ["blue","green","red","orange"]
+#     for lbl in np.unique(labels):
+#         m_all = (labels==lbl)
+#         m_in = m_all & (outliers==1)
+#         m_out= m_all & (outliers==-1)
+#         plt.scatter(red[m_in,0],red[m_in,1],c=cmap[lbl % len(cmap)],label=f"{lbl} in")
+#         plt.scatter(red[m_out,0],red[m_out,1],c=cmap[lbl % len(cmap)],marker='x',s=50,label=f"{lbl} out")
+#     plt.title(title); plt.legend()
+#     plt.savefig(filename, dpi=300); plt.close()
+
+  
 def plot_energy_and_forces(energies, forces, filename='analysis.png'):
     """Plot energy-per-frame, energy-per-atom, max/avg force with thresholds."""
     num_frames = len(energies)

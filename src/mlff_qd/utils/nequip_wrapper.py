@@ -3,7 +3,6 @@ import logging
 import tempfile
 import os
 import sys
-from nequip.scripts.train import main as nequip_train_main
 
 def run_nequip_training(config_path):
     """
@@ -24,7 +23,10 @@ def run_nequip_training(config_path):
             converted_file = preprocess_data_for_platform(config["input_xyz_file"], "nequip" if config.get("model", {}).get("_target_") != "allegro.model.AllegroModel" else "allegro")
             config["data"]["split_dataset"]["file_path"] = converted_file
         
-        temp_dir = os.path.dirname(config_path)
+        # Lazy import: only required when actually running NequIP
+        from nequip.scripts.train import main as nequip_train_main
+
+        temp_dir = os.path.dirname(config_path) or "."
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w", encoding="utf-8", dir=temp_dir)
         yaml.dump(config, temp_file, allow_unicode=True)
         temp_file.flush()
@@ -33,13 +35,13 @@ def run_nequip_training(config_path):
         config_name = os.path.basename(updated_config_path)
 
         argv = ["nequip-train", "-cp", temp_dir, "-cn", config_name]
-        
-        original_argv = sys.argv
+
+        old_argv = list(sys.argv)
         sys.argv = argv
         try:
             nequip_train_main()
         finally:
-            sys.argv = original_argv
+            sys.argv = old_argv
             os.unlink(updated_config_path)
     except Exception as e:
         logging.error(f"NequIP/Allegro training failed with config {config_path}: {str(e)}")
