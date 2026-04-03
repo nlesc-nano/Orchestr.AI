@@ -56,7 +56,53 @@ def compute_kmeans_elbow(features, k_values, random_state: int = 0):
         wcss.append(km.inertia_)
 
     return np.asarray(ks, dtype=int), np.asarray(wcss, dtype=float)
-    
+
+def suggest_elbow_k_values(n_samples: int, requested_sizes=None):
+    """
+    Suggest a compact, dataset-size-aware list of k values for elbow analysis.
+
+    Strategy:
+      - dense at small k
+      - moderate sampling at medium k
+      - a few larger values based on fractions of n_samples
+      - always include requested subset sizes if provided
+
+    Returns a sorted Python list of valid k values.
+    """
+    if n_samples < 3:
+        return []
+
+    requested_sizes = requested_sizes or []
+
+    base_small = [50, 100, 200, 300, 500]
+    base_medium = [600, 800, 1000, 1200, 1500]
+
+    frac_vals = [
+        int(round(0.25 * n_samples)),
+        int(round(0.35 * n_samples)),
+        int(round(0.50 * n_samples)),
+        int(round(0.75 * n_samples)),
+    ]
+
+    candidates = set(base_small + base_medium + frac_vals)
+
+    for s in requested_sizes:
+        try:
+            candidates.add(int(s))
+        except Exception:
+            pass
+
+    # valid k must satisfy 2 <= k < n_samples
+    ks = sorted(k for k in candidates if 2 <= k < n_samples)
+
+    # avoid overly long expensive lists for huge datasets
+    if len(ks) > 15:
+        # keep first 10 and last 5 as a simple compact strategy
+        ks = ks[:10] + ks[-5:]
+        ks = sorted(set(ks))
+
+    return ks
+
 def sample_indices(n_total: int,
                    n_target: int,
                    mode: str="subsample",

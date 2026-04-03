@@ -19,6 +19,7 @@ from mlff_qd.utils.pca import detect_outliers
 from mlff_qd.utils.cluster import (
     select_kmeans_medoids,
     compute_kmeans_elbow,
+    suggest_elbow_k_values,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -45,7 +46,7 @@ def consolidate_dataset(cfg: Dict):
 
     # Optional elbow plot config
     elbow_enabled = ds.get("plot_elbow", False)
-    elbow_k_values = ds.get("elbow_k_values", sizes)
+    elbow_k_values = ds.get("elbow_k_values", None)
 
     logger.info(f"[Consolidate] parsing {infile}…")
     # 2) Parse stacked XYZ
@@ -97,7 +98,17 @@ def consolidate_dataset(cfg: Dict):
     logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
 
     if elbow_enabled:
-        logger.info(f"[Elbow] Computing elbow curve for k values: {elbow_k_values}")
+        n_inliers = len(feats)
+
+        if elbow_k_values is None:
+            elbow_k_values = suggest_elbow_k_values(
+                n_samples=n_inliers,
+                requested_sizes=sizes,
+            )
+            logger.info(f"[Elbow] Auto-generated k values from n_inliers={n_inliers}: {elbow_k_values}")
+        else:
+            logger.info(f"[Elbow] Using user-provided k values: {elbow_k_values}")
+
         ks, wcss = compute_kmeans_elbow(
             feats,
             k_values=elbow_k_values,
@@ -111,9 +122,7 @@ def consolidate_dataset(cfg: Dict):
         )
 
         if len(ks) > 0:
-            logger.info(
-                "[Elbow] Finished. Inspect the elbow plot to choose a good future cluster count."
-            )
+            logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
