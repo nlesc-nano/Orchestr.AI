@@ -18,7 +18,8 @@ dataset:
 
    plot_elbow: true
    elbow_k_values: [10, 20, 150, 200, 1000, 1500, 1700, 1900]
-
+   auto_add_elbow_size: false # If true, automatically add the elbow-selected size to the 'sizes' list
+   elbow_selection_method: "knee"
   # Subset counts (number of structures from each method)
    subset_counts:
      MD: 4036  # Structures obtained from Molecular Dynamics (MD) simulation 

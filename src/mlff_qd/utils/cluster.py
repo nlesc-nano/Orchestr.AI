@@ -57,6 +57,57 @@ def compute_kmeans_elbow(features, k_values, random_state: int = 0):
 
     return np.asarray(ks, dtype=int), np.asarray(wcss, dtype=float)
 
+
+def recommend_elbow_k(ks, wcss):
+    """
+    Recommend an elbow k from (k, wcss) using the maximum-distance-to-line method.
+
+    Parameters
+    ----------
+    ks : array-like
+        Cluster counts.
+    wcss : array-like
+        Inertia / WCSS values.
+
+    Returns
+    -------
+    best_k : int or None
+        Recommended elbow cluster count, or None if not enough points.
+    """
+    ks = np.asarray(ks, dtype=float)
+    wcss = np.asarray(wcss, dtype=float)
+
+    if len(ks) < 3 or len(wcss) < 3:
+        logger.warning("[recommend_elbow_k] Need at least 3 elbow points. Skipping recommendation.")
+        return None
+
+    if len(ks) != len(wcss):
+        raise ValueError("ks and wcss must have the same length")
+
+    # Line from first to last point
+    p1 = np.array([ks[0], wcss[0]], dtype=float)
+    p2 = np.array([ks[-1], wcss[-1]], dtype=float)
+
+    line_vec = p2 - p1
+    line_norm = np.linalg.norm(line_vec)
+    if line_norm == 0:
+        logger.warning("[recommend_elbow_k] Degenerate elbow line. Skipping recommendation.")
+        return None
+
+    # Perpendicular distance from each point to the line
+    distances = []
+    for k, val in zip(ks, wcss):
+        p = np.array([k, val], dtype=float)
+        dist = np.abs(np.cross(line_vec, p - p1)) / line_norm
+        distances.append(dist)
+
+    distances = np.asarray(distances, dtype=float)
+    best_idx = int(np.argmax(distances))
+    best_k = int(round(ks[best_idx]))
+
+    logger.info(f"[recommend_elbow_k] Recommended elbow k = {best_k}")
+    return best_k
+    
 def suggest_elbow_k_values(n_samples: int, requested_sizes=None):
     """
     Suggest a compact, dataset-size-aware list of k values for elbow analysis.

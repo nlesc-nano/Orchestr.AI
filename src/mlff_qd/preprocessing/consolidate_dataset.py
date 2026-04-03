@@ -20,6 +20,7 @@ from mlff_qd.utils.cluster import (
     select_kmeans_medoids,
     compute_kmeans_elbow,
     suggest_elbow_k_values,
+    recommend_elbow_k,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -47,6 +48,8 @@ def consolidate_dataset(cfg: Dict):
     # Optional elbow plot config
     elbow_enabled = ds.get("plot_elbow", False)
     elbow_k_values = ds.get("elbow_k_values", None)
+    auto_add_elbow_size = ds.get("auto_add_elbow_size", False)
+    elbow_selection_method = ds.get("elbow_selection_method", "knee")
 
     logger.info(f"[Consolidate] parsing {infile}…")
     # 2) Parse stacked XYZ
@@ -97,6 +100,8 @@ def consolidate_dataset(cfg: Dict):
     F = F[inliers_mask]
     logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
 
+    elbow_best_k = None
+
     if elbow_enabled:
         n_inliers = len(feats)
 
@@ -114,6 +119,7 @@ def consolidate_dataset(cfg: Dict):
             k_values=elbow_k_values,
             random_state=seed,
         )
+
         plot_kmeans_elbow(
             ks,
             wcss,
@@ -123,6 +129,26 @@ def consolidate_dataset(cfg: Dict):
 
         if len(ks) > 0:
             logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
+
+        if auto_add_elbow_size:
+
+            if elbow_selection_method == "knee":
+                elbow_best_k = recommend_elbow_k(ks, wcss)
+            else:
+                logger.warning(
+                    f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
+                )
+                elbow_best_k = recommend_elbow_k(ks, wcss)
+
+
+            if elbow_best_k is not None:
+                elbow_best_k = min(elbow_best_k, len(feats))
+                logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
+
+                sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
+                logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
+            else:
+                logger.warning("[Elbow] Could not determine a recommended elbow size.")
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
@@ -146,6 +172,9 @@ def consolidate_dataset(cfg: Dict):
         logger.info(f"[Select] set_id={set_id}/{n_sets-1}, seed={set_seed}")
 
         for tgt in sizes:
+            if elbow_best_k is not None and int(tgt) == int(elbow_best_k):
+                logger.info(f"[Select] size={tgt} was auto-added from elbow recommendation")
+
             nsel = min(len(feats), tgt)
 
             sel_idxs = select_kmeans_medoids(feats, nsel, random_state=set_seed)
