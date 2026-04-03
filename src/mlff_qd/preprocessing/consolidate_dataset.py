@@ -6,18 +6,20 @@ from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
 from mlff_qd.utils.io import ( parse_stacked_xyz, save_stacked_xyz,
                               save_to_npz )
-# from mlff_qd.utils.plots import ( plot_energy_and_forces,
-#                                  plot_pca )
 from mlff_qd.utils.plots import (
     plot_energy_and_forces,
     plot_pca,
     plot_umap,
     plot_tsne,
+    plot_kmeans_elbow,
 )
 from mlff_qd.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
 from mlff_qd.utils.pca import detect_outliers
-from mlff_qd.utils.cluster import select_kmeans_medoids
+from mlff_qd.utils.cluster import (
+    select_kmeans_medoids,
+    compute_kmeans_elbow,
+)
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
@@ -40,6 +42,10 @@ def consolidate_dataset(cfg: Dict):
     bf       = ds.get("bootstrap_factor", 1)
     cont     = ds.get("contamination", 0.05)
     seed     = ds.get("seed", 0)
+
+    # Optional elbow plot config
+    elbow_enabled = ds.get("plot_elbow", False)
+    elbow_k_values = ds.get("elbow_k_values", sizes)
 
     logger.info(f"[Consolidate] parsing {infile}…")
     # 2) Parse stacked XYZ
@@ -89,6 +95,25 @@ def consolidate_dataset(cfg: Dict):
     P = P[inliers_mask]
     F = F[inliers_mask]
     logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
+
+    if elbow_enabled:
+        logger.info(f"[Elbow] Computing elbow curve for k values: {elbow_k_values}")
+        ks, wcss = compute_kmeans_elbow(
+            feats,
+            k_values=elbow_k_values,
+            random_state=seed,
+        )
+        plot_kmeans_elbow(
+            ks,
+            wcss,
+            title="KMeans Elbow on Inlier Feature Space",
+            filename=f"{prefix}_kmeans_elbow.png",
+        )
+
+        if len(ks) > 0:
+            logger.info(
+                "[Elbow] Finished. Inspect the elbow plot to choose a good future cluster count."
+            )
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(

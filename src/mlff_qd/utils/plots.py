@@ -34,7 +34,38 @@ def _subsample_indices(n, max_points=None, random_state=0):
     rng = np.random.default_rng(random_state)
     return rng.choice(n, size=max_points, replace=False)
 
+def plot_kmeans_elbow(
+    ks,
+    wcss,
+    title="KMeans Elbow",
+    filename="kmeans_elbow.png",
+    dpi=200,
+):
+    """
+    Plot WCSS vs number of clusters (k) for elbow analysis.
+    """
+    ks = np.asarray(ks)
+    wcss = np.asarray(wcss)
 
+    if len(ks) == 0 or len(wcss) == 0:
+        logger.warning("[plot_kmeans_elbow] Empty ks/wcss. Skipping elbow plot.")
+        return
+
+    if len(ks) != len(wcss):
+        raise ValueError("ks and wcss must have the same length")
+
+    logger.info("[plot_kmeans_elbow] Starting....")
+
+    plt.figure(figsize=(20, 6))
+    plt.plot(ks, wcss, marker="o")
+    plt.xticks(ks)
+    plt.xlabel("Number of clusters (k)")
+    plt.ylabel("WCSS / Inertia")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    _save_close(filename, dpi=dpi)
+
+    
 def plot_outliers(
     features,
     labels,

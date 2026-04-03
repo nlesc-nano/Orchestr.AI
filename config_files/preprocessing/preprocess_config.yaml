@@ -15,6 +15,10 @@ dataset:
    output_prefix: "consolidated_dataset" 
    
    sizes: [200,500]
+
+   plot_elbow: true
+   elbow_k_values: [10, 20, 150, 200, 1000, 1500, 1700, 1900]
+
   # Subset counts (number of structures from each method)
    subset_counts:
      MD: 4036  # Structures obtained from Molecular Dynamics (MD) simulation 

@@ -22,6 +22,40 @@ def select_kmeans_medoids(features, n_clusters: int, random_state: int = 0):
         dists   = np.linalg.norm(features[members] - centers[lbl], axis=1)
         sel_idxs.append(members[np.argmin(dists)])
     return np.asarray(sel_idxs, dtype=int)
+
+def compute_kmeans_elbow(features, k_values, random_state: int = 0):
+    """
+    Compute WCSS (inertia) for a sequence of k values.
+    Returns:
+        ks   : np.ndarray of valid cluster counts
+        wcss : np.ndarray of inertia values
+    """
+    X = np.asarray(features)
+    n_samples = len(X)
+
+    ks = []
+    wcss = []
+
+    for k in k_values:
+        k = int(k)
+        if k < 1:
+            logger.warning(f"[compute_kmeans_elbow] Skipping invalid k={k}")
+            continue
+        if k > n_samples:
+            logger.warning(f"[compute_kmeans_elbow] Skipping k={k} because k > n_samples={n_samples}")
+            continue
+
+        logger.info(f"[compute_kmeans_elbow] Fitting KMeans for k={k}")
+        km = KMeans(
+            n_clusters=k,
+            random_state=random_state,
+            n_init="auto",
+        ).fit(X)
+
+        ks.append(k)
+        wcss.append(km.inertia_)
+
+    return np.asarray(ks, dtype=int), np.asarray(wcss, dtype=float)
     
 def sample_indices(n_total: int,
                    n_target: int,
