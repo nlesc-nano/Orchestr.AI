@@ -13,6 +13,7 @@ from mlff_qd.utils.plots import (
     plot_tsne,
     plot_kmeans_elbow,
     plot_cluster_map,
+    plot_coverage_histogram,
 )
 from mlff_qd.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
@@ -24,6 +25,7 @@ from mlff_qd.utils.cluster import (
     recommend_elbow_k,
     assign_kmeans_labels,
     sample_indices,
+    compute_subset_coverage_metrics,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -221,6 +223,19 @@ def consolidate_dataset(cfg: Dict):
             sel_idxs = select_kmeans_medoids(feats, nsel, random_state=set_seed)
             logger.info(f"[KMeans] set={set_id} selected {len(sel_idxs)} reps for size {tgt}")
 
+            cov_metrics, cov_min_dists = compute_subset_coverage_metrics(feats, sel_idxs)
+            logger.info(
+                f"[Coverage-KMeans] set={set_id}, size={tgt}, "
+                f"mean={cov_metrics['mean_min_dist']:.6f}, "
+                f"p95={cov_metrics['p95_min_dist']:.6f}, "
+                f"max={cov_metrics['max_min_dist']:.6f}"
+            )
+
+            plot_coverage_histogram(
+                cov_min_dists,
+                title=f"Coverage Histogram (KMeans): selected {nsel} from {len(feats)} inliers",
+                filename=f"{prefix}_set{set_id}_{tgt}_coverage_hist_kmeans.png",
+            )
             # Coverage plots: full inlier space + selected subset overlay
             plot_pca(
                 feats,
@@ -286,6 +301,20 @@ def consolidate_dataset(cfg: Dict):
                 )
                 logger.info(f"[Random] set={set_id} selected {len(rnd_idxs)} random frames for size {tgt}")
 
+                rnd_cov_metrics, rnd_cov_min_dists = compute_subset_coverage_metrics(feats, rnd_idxs)
+                logger.info(
+                    f"[Coverage-Random] set={set_id}, size={tgt}, "
+                    f"mean={rnd_cov_metrics['mean_min_dist']:.6f}, "
+                    f"p95={rnd_cov_metrics['p95_min_dist']:.6f}, "
+                    f"max={rnd_cov_metrics['max_min_dist']:.6f}"
+                )
+
+                plot_coverage_histogram(
+                    rnd_cov_min_dists,
+                    title=f"Coverage Histogram (Random): selected {nsel} from {len(feats)} inliers",
+                    filename=f"{prefix}_set{set_id}_{tgt}_coverage_hist_random.png",
+                )
+                
                 plot_pca(
                     feats,
                     title=f"PCA Coverage (random): selected {nsel} from {len(feats)} inliers",

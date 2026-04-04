@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Sequence, Dict
 from sklearn.cluster import KMeans
+from sklearn.metrics import pairwise_distances_chunked
 from ase.data import atomic_numbers as _ase_atomic_numbers
 from mlff_qd.utils.io import parse_stacked_xyz
 
@@ -42,6 +43,63 @@ def assign_kmeans_labels(features, n_clusters: int, random_state: int = 0):
     ).fit(X)
 
     return km.labels_, km
+
+def compute_subset_coverage_metrics(features, selected_idx):
+    """
+    Compute nearest-selected-point coverage metrics.
+
+    For each point in the full dataset, compute distance to the nearest
+    selected point. Returns summary metrics and the full distance array.
+
+    Parameters
+    ----------
+    features : array-like, shape (n_samples, n_features)
+        Full feature matrix.
+    selected_idx : array-like, shape (n_selected,)
+        Indices of selected subset.
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with:
+          - mean_min_dist
+          - max_min_dist
+          - p95_min_dist
+          - n_selected
+          - n_total
+    min_dists : np.ndarray
+        Distance from each full point to its nearest selected point.
+    """
+    X = np.asarray(features)
+    sel = np.asarray(selected_idx, dtype=int)
+
+    if X.ndim != 2:
+        raise ValueError("features must be a 2D array")
+    if sel.ndim != 1:
+        raise ValueError("selected_idx must be a 1D array")
+    if len(sel) == 0:
+        raise ValueError("selected_idx is empty")
+    if sel.min() < 0 or sel.max() >= len(X):
+        raise ValueError("selected_idx contains invalid indices")
+
+    X_sel = X[sel]
+
+    min_dists_chunks = []
+    for chunk in pairwise_distances_chunked(X, X_sel, metric="euclidean"):
+        min_d = np.min(chunk, axis=1)
+        min_dists_chunks.append(min_d)
+
+    min_dists = np.concatenate(min_dists_chunks)
+
+    metrics = {
+        "mean_min_dist": float(np.mean(min_dists)),
+        "max_min_dist": float(np.max(min_dists)),
+        "p95_min_dist": float(np.percentile(min_dists, 95)),
+        "n_selected": int(len(sel)),
+        "n_total": int(len(X)),
+    }
+
+    return metrics, min_dists
 
 def compute_kmeans_elbow(features, k_values, random_state: int = 0):
     """

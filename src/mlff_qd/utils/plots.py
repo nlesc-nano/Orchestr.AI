@@ -139,6 +139,31 @@ def plot_outliers(
     plt.legend()
     _save_close(filename, dpi=dpi)
 
+def plot_coverage_histogram(
+    min_dists,
+    title="Coverage Distance Histogram",
+    filename="coverage_hist.png",
+    bins=50,
+    dpi=200,
+):
+    """
+    Plot histogram of nearest-selected-point distances.
+    """
+    d = np.asarray(min_dists)
+
+    if len(d) == 0:
+        logger.warning("[plot_coverage_histogram] Empty distance array. Skipping plot.")
+        return
+
+    logger.info("[plot_coverage_histogram] Starting....")
+
+    plt.figure(figsize=(8, 6))
+    plt.hist(d, bins=bins, alpha=0.8)
+    plt.xlabel("Nearest selected-point distance")
+    plt.ylabel("Count")
+    plt.title(title)
+    _save_close(filename, dpi=dpi)
+
 def plot_cluster_map(
     features,
     cluster_labels,
