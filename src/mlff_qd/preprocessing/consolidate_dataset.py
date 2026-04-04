@@ -23,6 +23,7 @@ from mlff_qd.utils.cluster import (
     suggest_elbow_k_values,
     recommend_elbow_k,
     assign_kmeans_labels,
+    sample_indices,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -48,6 +49,7 @@ def consolidate_dataset(cfg: Dict):
     seed     = ds.get("seed", 0)
 
     # Optional elbow plot config
+    create_random_baseline = ds.get("create_random_baseline", False)
     elbow_enabled = ds.get("plot_elbow", False)
     elbow_k_values = ds.get("elbow_k_values", None)
     elbow_max_k = ds.get("elbow_max_k", 1000)
@@ -213,6 +215,9 @@ def consolidate_dataset(cfg: Dict):
 
             nsel = min(len(feats), tgt)
 
+            # ==========================================================
+            # 1) Diverse subset via KMeans + medoid
+            # ==========================================================
             sel_idxs = select_kmeans_medoids(feats, nsel, random_state=set_seed)
             logger.info(f"[KMeans] set={set_id} selected {len(sel_idxs)} reps for size {tgt}")
 
@@ -267,3 +272,66 @@ def consolidate_dataset(cfg: Dict):
                 energies=E[sel_idxs],
                 forces=F[sel_idxs],
             )
+            # ==========================================================
+            # 2) Optional random baseline subset
+            # ==========================================================
+            if create_random_baseline:
+                rng = np.random.default_rng(set_seed)
+                rnd_idxs = sample_indices(
+                    n_total=len(feats),
+                    n_target=nsel,
+                    mode="subsample",
+                    bootstrap_factor=1,
+                    rng=rng,
+                )
+                logger.info(f"[Random] set={set_id} selected {len(rnd_idxs)} random frames for size {tgt}")
+
+                plot_pca(
+                    feats,
+                    title=f"PCA Coverage (random): selected {nsel} from {len(feats)} inliers",
+                    filename=f"{prefix}_set{set_id}_{tgt}_random_coverage_pca.png",
+                    selected_idx=rnd_idxs,
+                    random_state=set_seed,
+                )
+
+                try:
+                    plot_umap(
+                        feats,
+                        title=f"UMAP Coverage (random): selected {nsel} from {len(feats)} inliers",
+                        filename=f"{prefix}_set{set_id}_{tgt}_random_coverage_umap.png",
+                        selected_idx=rnd_idxs,
+                        random_state=set_seed,
+                    )
+                except Exception as e:
+                    logger.warning(f"[UMAP-random] Skipped due to error: {e}")
+
+                plot_tsne(
+                    feats,
+                    title=f"t-SNE Coverage (random): selected {nsel} from {len(feats)} inliers",
+                    filename=f"{prefix}_set{set_id}_{tgt}_random_coverage_tsne.png",
+                    selected_idx=rnd_idxs,
+                    random_state=set_seed,
+                )
+
+                rnd_xyz_fn = f"{prefix}_set{set_id}_{tgt}_random.xyz"
+                save_stacked_xyz(rnd_xyz_fn, E[rnd_idxs], P[rnd_idxs], F[rnd_idxs], atoms)
+
+                plot_energy_and_forces(
+                    E[rnd_idxs], F[rnd_idxs],
+                    filename=f"{prefix}_set{set_id}_EF_random_{tgt}.png"
+                )
+
+                preprocess_data_for_platform(rnd_xyz_fn, "mace")
+
+                rnd_centered_xyz = f"{prefix}_set{set_id}_{tgt}_random_centered.xyz"
+                rnd_centered_png = f"{prefix}_set{set_id}_{tgt}_random_centered.png"
+                process_xyz(rnd_xyz_fn, rnd_centered_xyz, rnd_centered_png)
+
+                rnd_npz_fn = f"{prefix}_set{set_id}_{tgt}_random.npz"
+                save_to_npz(
+                    filename=rnd_npz_fn,
+                    atomic_numbers=atomic_numbers_1d,
+                    positions=P[rnd_idxs],
+                    energies=E[rnd_idxs],
+                    forces=F[rnd_idxs],
+                )
