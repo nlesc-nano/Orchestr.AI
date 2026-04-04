@@ -23,6 +23,26 @@ def select_kmeans_medoids(features, n_clusters: int, random_state: int = 0):
         sel_idxs.append(members[np.argmin(dists)])
     return np.asarray(sel_idxs, dtype=int)
 
+def assign_kmeans_labels(features, n_clusters: int, random_state: int = 0):
+    """
+    Fit KMeans and return cluster labels and fitted model.
+    """ 
+    X = np.asarray(features)
+    n_samples = len(X)
+
+    if n_clusters < 1:
+        raise ValueError("n_clusters must be >= 1")
+    if n_clusters > n_samples:
+        raise ValueError(f"n_clusters={n_clusters} cannot exceed n_samples={n_samples}")
+
+    km = KMeans(
+        n_clusters=n_clusters,
+        random_state=random_state,
+        n_init="auto",
+    ).fit(X)
+
+    return km.labels_, km
+
 def compute_kmeans_elbow(features, k_values, random_state: int = 0):
     """
     Compute WCSS (inertia) for a sequence of k values.
@@ -107,7 +127,7 @@ def recommend_elbow_k(ks, wcss):
 
     logger.info(f"[recommend_elbow_k] Recommended elbow k = {best_k}")
     return best_k
-    
+
 def suggest_elbow_k_values(n_samples: int, requested_sizes=None):
     """
     Suggest a compact, dataset-size-aware list of k values for elbow analysis.

@@ -12,6 +12,7 @@ from mlff_qd.utils.plots import (
     plot_umap,
     plot_tsne,
     plot_kmeans_elbow,
+    plot_cluster_map,
 )
 from mlff_qd.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
@@ -21,6 +22,7 @@ from mlff_qd.utils.cluster import (
     compute_kmeans_elbow,
     suggest_elbow_k_values,
     recommend_elbow_k,
+    assign_kmeans_labels,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -149,6 +151,25 @@ def consolidate_dataset(cfg: Dict):
                 logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
             else:
                 logger.warning("[Elbow] Could not determine a recommended elbow size.")
+
+    if elbow_best_k is not None:
+        try:
+            cluster_labels, _ = assign_kmeans_labels(
+                feats,
+                n_clusters=elbow_best_k,
+                random_state=seed,
+            )
+
+            plot_cluster_map(
+                feats,
+                cluster_labels,
+                title=f"PCA Cluster Map (k={elbow_best_k})",
+                filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
+                method="pca",
+                random_state=seed,
+            )
+        except Exception as e:
+            logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
