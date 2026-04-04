@@ -50,7 +50,10 @@ def consolidate_dataset(cfg: Dict):
     # Optional elbow plot config
     elbow_enabled = ds.get("plot_elbow", False)
     elbow_k_values = ds.get("elbow_k_values", None)
+    elbow_max_k = ds.get("elbow_max_k", 1000)
     auto_add_elbow_size = ds.get("auto_add_elbow_size", False)
+    max_auto_elbow_size = ds.get("max_auto_elbow_size", 2000)
+    max_cluster_map_k = ds.get("max_cluster_map_k", 500)
     elbow_selection_method = ds.get("elbow_selection_method", "knee")
 
     logger.info(f"[Consolidate] parsing {infile}…")
@@ -111,6 +114,7 @@ def consolidate_dataset(cfg: Dict):
             elbow_k_values = suggest_elbow_k_values(
                 n_samples=n_inliers,
                 requested_sizes=sizes,
+                max_k=elbow_max_k,
             )
             logger.info(f"[Elbow] Auto-generated k values from n_inliers={n_inliers}: {elbow_k_values}")
         else:
@@ -142,34 +146,45 @@ def consolidate_dataset(cfg: Dict):
                 )
                 elbow_best_k = recommend_elbow_k(ks, wcss)
 
-
             if elbow_best_k is not None:
                 elbow_best_k = min(elbow_best_k, len(feats))
-                logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
 
-                sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
-                logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
+                if elbow_best_k <= max_auto_elbow_size:
+                    logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
+                    sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
+                    logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
+                else:
+                    logger.warning(
+                        f"[Elbow] Recommended k={elbow_best_k} exceeds "
+                        f"max_auto_elbow_size={max_auto_elbow_size}. Skipping auto-add."
+                    )
             else:
                 logger.warning("[Elbow] Could not determine a recommended elbow size.")
 
     if elbow_best_k is not None:
-        try:
-            cluster_labels, _ = assign_kmeans_labels(
-                feats,
-                n_clusters=elbow_best_k,
-                random_state=seed,
-            )
+        if elbow_best_k <= max_cluster_map_k:
+            try:
+                cluster_labels, _ = assign_kmeans_labels(
+                    feats,
+                    n_clusters=elbow_best_k,
+                    random_state=seed,
+                )
 
-            plot_cluster_map(
-                feats,
-                cluster_labels,
-                title=f"PCA Cluster Map (k={elbow_best_k})",
-                filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
-                method="pca",
-                random_state=seed,
+                plot_cluster_map(
+                    feats,
+                    cluster_labels,
+                    title=f"PCA Cluster Map (k={elbow_best_k})",
+                    filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
+                    method="pca",
+                    random_state=seed,
+                )
+            except Exception as e:
+                logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
+        else:
+            logger.warning(
+                f"[ClusterMap] Skipping cluster map because elbow_best_k={elbow_best_k} "
+                f"> max_cluster_map_k={max_cluster_map_k}"
             )
-        except Exception as e:
-            logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(

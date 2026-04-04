@@ -14,12 +14,18 @@ dataset:
   
    output_prefix: "consolidated_dataset" 
    
-   sizes: [200,500]
+   sizes: [200,500] # Number of structures to include in each subset (for training/validation splits)
 
    plot_elbow: true
-   elbow_k_values: [10, 20, 150, 200, 1000, 1500, 1700, 1900]
-   auto_add_elbow_size: false # If true, automatically add the elbow-selected size to the 'sizes' list
+  #  elbow_k_values: [10, 20, 150, 200, 1000, 1500] # If elbow_k_values is set, then: elbow_max_k is effectively ignored for list generation
+   elbow_max_k: 5000  # Used only when plot_elbow: true and elbow_k_values is not provided, elbow_max_k: 1000 means auto list stops at 1000
+
+   auto_add_elbow_size: true # If true, automatically add the elbow-selected size to the 'sizes' list
+   max_auto_elbow_size: 2000 # Maximum allowed size for auto-added elbow subset (to prevent adding excessively large subsets)
+
+   max_cluster_map_k: 1000 # Maximum k value for generating the cluster map 
    elbow_selection_method: "knee"
+   
   # Subset counts (number of structures from each method)
    subset_counts:
      MD: 4036  # Structures obtained from Molecular Dynamics (MD) simulation 
