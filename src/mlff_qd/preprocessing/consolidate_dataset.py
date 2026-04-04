@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import numpy as np
+import csv
 from typing import Dict
 from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
@@ -205,6 +206,8 @@ def consolidate_dataset(cfg: Dict):
     atomic_numbers_1d = np.array([_ase_atomic_numbers[sym] for sym in atoms],
                                  dtype=np.int32)
 
+    # Collect coverage metrics for CSV + log summary
+    coverage_rows = []
 
     # 11) K-means medoid selection for each target size, repeated n_sets times with different seeds
     for set_id in range(n_sets):
@@ -230,6 +233,15 @@ def consolidate_dataset(cfg: Dict):
                 f"p95={cov_metrics['p95_min_dist']:.6f}, "
                 f"max={cov_metrics['max_min_dist']:.6f}"
             )
+
+            coverage_rows.append({
+                "set_id": int(set_id),
+                "size": int(nsel),
+                "method": "kmeans",
+                "mean_min_dist": float(cov_metrics["mean_min_dist"]),
+                "p95_min_dist": float(cov_metrics["p95_min_dist"]),
+                "max_min_dist": float(cov_metrics["max_min_dist"]),
+            })
 
             plot_coverage_histogram(
                 cov_min_dists,
@@ -309,6 +321,15 @@ def consolidate_dataset(cfg: Dict):
                     f"max={rnd_cov_metrics['max_min_dist']:.6f}"
                 )
 
+                coverage_rows.append({
+                    "set_id": int(set_id),
+                    "size": int(nsel),
+                    "method": "random",
+                    "mean_min_dist": float(rnd_cov_metrics["mean_min_dist"]),
+                    "p95_min_dist": float(rnd_cov_metrics["p95_min_dist"]),
+                    "max_min_dist": float(rnd_cov_metrics["max_min_dist"]),
+                })
+
                 plot_coverage_histogram(
                     rnd_cov_min_dists,
                     title=f"Coverage Histogram (Random): selected {nsel} from {len(feats)} inliers",
@@ -364,3 +385,49 @@ def consolidate_dataset(cfg: Dict):
                     energies=E[rnd_idxs],
                     forces=F[rnd_idxs],
                 )
+
+    # 12) Save coverage summary CSV + print compact summary
+    if coverage_rows:
+        coverage_rows = sorted(
+            coverage_rows,
+            key=lambda r: (r["size"], r["method"], r["set_id"])
+        )
+
+        coverage_csv = f"{prefix}_coverage_summary.csv"
+        fieldnames = [
+            "set_id",
+            "size",
+            "method",
+            "mean_min_dist",
+            "p95_min_dist",
+            "max_min_dist",
+        ]
+
+        with open(coverage_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(coverage_rows)
+
+        logger.info(f"[CoverageSummary] Saved full coverage summary to {coverage_csv}")
+    
+        grouped = {}
+        for row in coverage_rows:
+            key = (row["size"], row["method"])
+            grouped.setdefault(key, {
+                "mean_min_dist": [],
+                "p95_min_dist": [],
+                "max_min_dist": [],
+            })
+            grouped[key]["mean_min_dist"].append(row["mean_min_dist"])
+            grouped[key]["p95_min_dist"].append(row["p95_min_dist"])
+            grouped[key]["max_min_dist"].append(row["max_min_dist"])
+
+        for (size, method), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
+            mean_avg = sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"])
+            p95_avg = sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"])
+            max_avg = sum(vals["max_min_dist"]) / len(vals["max_min_dist"])
+
+            logger.info(
+                f"[CoverageSummary] size={size}, method={method}, "
+                f"mean={mean_avg:.6f}, p95={p95_avg:.6f}, max={max_avg:.6f}"
+            )
