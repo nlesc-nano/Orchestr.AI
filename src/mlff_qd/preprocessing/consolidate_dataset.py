@@ -280,19 +280,20 @@ def consolidate_dataset(cfg: Dict):
         if len(ks) > 0:
             logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
 
-        if auto_add_elbow_size:
+        # Determine recommended elbow k independently of auto-add
+        if elbow_selection_method == "knee":
+            elbow_best_k = recommend_elbow_k(ks, wcss)
+        else:
+            logger.warning(
+                f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
+            )
+            elbow_best_k = recommend_elbow_k(ks, wcss)
 
-            if elbow_selection_method == "knee":
-                elbow_best_k = recommend_elbow_k(ks, wcss)
-            else:
-                logger.warning(
-                    f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
-                )
-                elbow_best_k = recommend_elbow_k(ks, wcss)
+        if elbow_best_k is not None:
+            elbow_best_k = min(elbow_best_k, len(feats))
+            logger.info(f"[Elbow] Recommended elbow size: {elbow_best_k}")
 
-            if elbow_best_k is not None:
-                elbow_best_k = min(elbow_best_k, len(feats))
-
+            if auto_add_elbow_size:
                 if elbow_best_k <= max_auto_elbow_size:
                     logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
                     sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
@@ -302,8 +303,8 @@ def consolidate_dataset(cfg: Dict):
                         f"[Elbow] Recommended k={elbow_best_k} exceeds "
                         f"max_auto_elbow_size={max_auto_elbow_size}. Skipping auto-add."
                     )
-            else:
-                logger.warning("[Elbow] Could not determine a recommended elbow size.")
+        else:
+            logger.warning("[Elbow] Could not determine a recommended elbow size.")
 
     if elbow_best_k is not None:
         if elbow_best_k <= max_cluster_map_k:
