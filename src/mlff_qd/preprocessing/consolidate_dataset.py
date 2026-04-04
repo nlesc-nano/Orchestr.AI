@@ -35,6 +35,145 @@ from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 import logging
 logger = logging.getLogger(__name__)
 
+def export_subset_bundle(
+    feats,
+    E,
+    P,
+    F,
+    atoms,
+    atomic_numbers_1d,
+    sel_idxs,
+    prefix,
+    set_id,
+    tgt,
+    method_name,
+    coverage_rows,
+    random_state=0,
+):
+    """
+    Export one selected subset and all associated plots/files.
+
+    This handles:
+      - coverage metrics + histogram
+      - PCA/UMAP/t-SNE coverage plots
+      - XYZ save
+      - energy/force plot
+      - MACE preprocessing
+      - centering
+      - NPZ save
+
+    Parameters
+    ----------
+    feats : np.ndarray
+        Full inlier feature matrix.
+    E, P, F : np.ndarray
+        Inlier energies, positions, forces.
+    atoms : list
+        Atomic symbols.
+    atomic_numbers_1d : np.ndarray
+        1D atomic numbers for NPZ export.
+    sel_idxs : np.ndarray
+        Selected indices for this subset.
+    prefix : str
+        Output prefix.
+    set_id : int
+        Repetition / split index.
+    tgt : int
+        Target subset size.
+    method_name : str
+        Selection method name, e.g. "kmeans", "random", "fps".
+    coverage_rows : list
+        List to append summary rows into.
+    random_state : int
+        Random seed for visualization.
+    """
+    nsel = len(sel_idxs)
+    n_total = len(feats)
+
+    tag = "" if method_name == "kmeans" else f"_{method_name}"
+    method_label = method_name.upper()
+
+    # 1) Coverage metrics
+    cov_metrics, cov_min_dists = compute_subset_coverage_metrics(feats, sel_idxs)
+    logger.info(
+        f"[Coverage-{method_label}] set={set_id}, size={tgt}, "
+        f"mean={cov_metrics['mean_min_dist']:.6f}, "
+        f"p95={cov_metrics['p95_min_dist']:.6f}, "
+        f"max={cov_metrics['max_min_dist']:.6f}"
+    )
+
+    coverage_rows.append({
+        "set_id": int(set_id),
+        "size": int(nsel),
+        "method": method_name,
+        "mean_min_dist": float(cov_metrics["mean_min_dist"]),
+        "p95_min_dist": float(cov_metrics["p95_min_dist"]),
+        "max_min_dist": float(cov_metrics["max_min_dist"]),
+    })
+
+    plot_coverage_histogram(
+        cov_min_dists,
+        title=f"Coverage Histogram ({method_label}): selected {nsel} from {n_total} inliers",
+        filename=f"{prefix}_set{set_id}_{tgt}_coverage_hist{tag}.png",
+    )
+
+    # 2) Coverage plots
+    plot_pca(
+        feats,
+        title=f"PCA Coverage ({method_label}): selected {nsel} from {n_total} inliers",
+        filename=f"{prefix}_set{set_id}_{tgt}_coverage_pca{tag}.png",
+        selected_idx=sel_idxs,
+        random_state=random_state,
+    )
+
+    try:
+        plot_umap(
+            feats,
+            title=f"UMAP Coverage ({method_label}): selected {nsel} from {n_total} inliers",
+            filename=f"{prefix}_set{set_id}_{tgt}_coverage_umap{tag}.png",
+            selected_idx=sel_idxs,
+            random_state=random_state,
+        )
+    except Exception as e:
+        logger.warning(f"[UMAP-{method_name}] Skipped due to error: {e}")
+
+    plot_tsne(
+        feats,
+        title=f"t-SNE Coverage ({method_label}): selected {nsel} from {n_total} inliers",
+        filename=f"{prefix}_set{set_id}_{tgt}_coverage_tsne{tag}.png",
+        selected_idx=sel_idxs,
+        random_state=random_state,
+    )
+
+    # 3) Save XYZ
+    xyz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.xyz"
+    save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
+
+    # 4) Energy/force plots
+    plot_energy_and_forces(
+        E[sel_idxs],
+        F[sel_idxs],
+        filename=f"{prefix}_set{set_id}_EF_{method_name}_{tgt}.png"
+    )
+
+    # 5) Platform preprocessing
+    preprocess_data_for_platform(xyz_fn, "mace")
+
+    # 6) Centering
+    centered_xyz = f"{prefix}_set{set_id}_{tgt}{tag}_centered.xyz"
+    centered_png = f"{prefix}_set{set_id}_{tgt}{tag}_centered.png"
+    process_xyz(xyz_fn, centered_xyz, centered_png)
+
+    # 7) Save NPZ
+    npz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.npz"
+    save_to_npz(
+        filename=npz_fn,
+        atomic_numbers=atomic_numbers_1d,
+        positions=P[sel_idxs],
+        energies=E[sel_idxs],
+        forces=F[sel_idxs],
+    )
+
 def consolidate_dataset(cfg: Dict):
     """
     Main pipeline: parse, outlier‐filter, SOAP, features, clustering,
@@ -226,79 +365,22 @@ def consolidate_dataset(cfg: Dict):
             sel_idxs = select_kmeans_medoids(feats, nsel, random_state=set_seed)
             logger.info(f"[KMeans] set={set_id} selected {len(sel_idxs)} reps for size {tgt}")
 
-            cov_metrics, cov_min_dists = compute_subset_coverage_metrics(feats, sel_idxs)
-            logger.info(
-                f"[Coverage-KMeans] set={set_id}, size={tgt}, "
-                f"mean={cov_metrics['mean_min_dist']:.6f}, "
-                f"p95={cov_metrics['p95_min_dist']:.6f}, "
-                f"max={cov_metrics['max_min_dist']:.6f}"
-            )
-
-            coverage_rows.append({
-                "set_id": int(set_id),
-                "size": int(nsel),
-                "method": "kmeans",
-                "mean_min_dist": float(cov_metrics["mean_min_dist"]),
-                "p95_min_dist": float(cov_metrics["p95_min_dist"]),
-                "max_min_dist": float(cov_metrics["max_min_dist"]),
-            })
-
-            plot_coverage_histogram(
-                cov_min_dists,
-                title=f"Coverage Histogram (KMeans): selected {nsel} from {len(feats)} inliers",
-                filename=f"{prefix}_set{set_id}_{tgt}_coverage_hist_kmeans.png",
-            )
-            # Coverage plots: full inlier space + selected subset overlay
-            plot_pca(
-                feats,
-                title=f"PCA Coverage: selected {nsel} from {len(feats)} inliers",
-                filename=f"{prefix}_set{set_id}_{tgt}_coverage_pca.png",
-                selected_idx=sel_idxs,
+            export_subset_bundle(
+                feats=feats,
+                E=E,
+                P=P,
+                F=F,
+                atoms=atoms,
+                atomic_numbers_1d=atomic_numbers_1d,
+                sel_idxs=sel_idxs,
+                prefix=prefix,
+                set_id=set_id,
+                tgt=tgt,
+                method_name="kmeans",
+                coverage_rows=coverage_rows,
                 random_state=set_seed,
             )
 
-            try:
-                plot_umap(
-                    feats,
-                    title=f"UMAP Coverage: selected {nsel} from {len(feats)} inliers",
-                    filename=f"{prefix}_set{set_id}_{tgt}_coverage_umap.png",
-                    selected_idx=sel_idxs,
-                    random_state=set_seed,
-                )
-            except Exception as e:
-                logger.warning(f"[UMAP] Skipped due to error: {e}")
-
-            plot_tsne(
-                feats,
-                title=f"t-SNE Coverage: selected {nsel} from {len(feats)} inliers",
-                filename=f"{prefix}_set{set_id}_{tgt}_coverage_tsne.png",
-                selected_idx=sel_idxs,
-                random_state=set_seed,
-            )
-
-            # ---- output names include set_id ----
-            xyz_fn = f"{prefix}_set{set_id}_{tgt}.xyz"
-            save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
-
-            plot_energy_and_forces(
-                E[sel_idxs], F[sel_idxs],
-                filename=f"{prefix}_set{set_id}_EF_sel_{tgt}.png"
-            )
-
-            preprocess_data_for_platform(xyz_fn, 'mace')
-
-            centered_xyz = f"{prefix}_set{set_id}_{tgt}_centered.xyz"
-            centered_png = f"{prefix}_set{set_id}_{tgt}_centered.png"
-            process_xyz(xyz_fn, centered_xyz, centered_png)
-
-            npz_fn = f"{prefix}_set{set_id}_{tgt}.npz"
-            save_to_npz(
-                filename=npz_fn,
-                atomic_numbers=atomic_numbers_1d,
-                positions=P[sel_idxs],
-                energies=E[sel_idxs],
-                forces=F[sel_idxs],
-            )
             # ==========================================================
             # 2) Optional random baseline subset
             # ==========================================================
@@ -313,79 +395,21 @@ def consolidate_dataset(cfg: Dict):
                 )
                 logger.info(f"[Random] set={set_id} selected {len(rnd_idxs)} random frames for size {tgt}")
 
-                rnd_cov_metrics, rnd_cov_min_dists = compute_subset_coverage_metrics(feats, rnd_idxs)
-                logger.info(
-                    f"[Coverage-Random] set={set_id}, size={tgt}, "
-                    f"mean={rnd_cov_metrics['mean_min_dist']:.6f}, "
-                    f"p95={rnd_cov_metrics['p95_min_dist']:.6f}, "
-                    f"max={rnd_cov_metrics['max_min_dist']:.6f}"
-                )
-
-                coverage_rows.append({
-                    "set_id": int(set_id),
-                    "size": int(nsel),
-                    "method": "random",
-                    "mean_min_dist": float(rnd_cov_metrics["mean_min_dist"]),
-                    "p95_min_dist": float(rnd_cov_metrics["p95_min_dist"]),
-                    "max_min_dist": float(rnd_cov_metrics["max_min_dist"]),
-                })
-
-                plot_coverage_histogram(
-                    rnd_cov_min_dists,
-                    title=f"Coverage Histogram (Random): selected {nsel} from {len(feats)} inliers",
-                    filename=f"{prefix}_set{set_id}_{tgt}_coverage_hist_random.png",
-                )
-                
-                plot_pca(
-                    feats,
-                    title=f"PCA Coverage (random): selected {nsel} from {len(feats)} inliers",
-                    filename=f"{prefix}_set{set_id}_{tgt}_random_coverage_pca.png",
-                    selected_idx=rnd_idxs,
+                export_subset_bundle(
+                    feats=feats,
+                    E=E,
+                    P=P,
+                    F=F,
+                    atoms=atoms,
+                    atomic_numbers_1d=atomic_numbers_1d,
+                    sel_idxs=rnd_idxs,
+                    prefix=prefix,
+                    set_id=set_id,
+                    tgt=tgt,
+                    method_name="random",
+                    coverage_rows=coverage_rows,
                     random_state=set_seed,
                 )
-
-                try:
-                    plot_umap(
-                        feats,
-                        title=f"UMAP Coverage (random): selected {nsel} from {len(feats)} inliers",
-                        filename=f"{prefix}_set{set_id}_{tgt}_random_coverage_umap.png",
-                        selected_idx=rnd_idxs,
-                        random_state=set_seed,
-                    )
-                except Exception as e:
-                    logger.warning(f"[UMAP-random] Skipped due to error: {e}")
-
-                plot_tsne(
-                    feats,
-                    title=f"t-SNE Coverage (random): selected {nsel} from {len(feats)} inliers",
-                    filename=f"{prefix}_set{set_id}_{tgt}_random_coverage_tsne.png",
-                    selected_idx=rnd_idxs,
-                    random_state=set_seed,
-                )
-
-                rnd_xyz_fn = f"{prefix}_set{set_id}_{tgt}_random.xyz"
-                save_stacked_xyz(rnd_xyz_fn, E[rnd_idxs], P[rnd_idxs], F[rnd_idxs], atoms)
-
-                plot_energy_and_forces(
-                    E[rnd_idxs], F[rnd_idxs],
-                    filename=f"{prefix}_set{set_id}_EF_random_{tgt}.png"
-                )
-
-                preprocess_data_for_platform(rnd_xyz_fn, "mace")
-
-                rnd_centered_xyz = f"{prefix}_set{set_id}_{tgt}_random_centered.xyz"
-                rnd_centered_png = f"{prefix}_set{set_id}_{tgt}_random_centered.png"
-                process_xyz(rnd_xyz_fn, rnd_centered_xyz, rnd_centered_png)
-
-                rnd_npz_fn = f"{prefix}_set{set_id}_{tgt}_random.npz"
-                save_to_npz(
-                    filename=rnd_npz_fn,
-                    atomic_numbers=atomic_numbers_1d,
-                    positions=P[rnd_idxs],
-                    energies=E[rnd_idxs],
-                    forces=F[rnd_idxs],
-                )
-
     # 12) Save coverage summary CSV + print compact summary
     if coverage_rows:
         coverage_rows = sorted(
