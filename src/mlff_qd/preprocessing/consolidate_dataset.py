@@ -174,6 +174,58 @@ def export_subset_bundle(
         forces=F[sel_idxs],
     )
 
+def save_coverage_summary(prefix, coverage_rows):
+    """
+    Save full coverage summary to CSV and print compact grouped summary in logs.
+    """
+    if not coverage_rows:
+        logger.info("[CoverageSummary] No coverage rows collected. Skipping summary export.")
+        return
+
+    coverage_rows = sorted(
+        coverage_rows,
+        key=lambda r: (r["size"], r["method"], r["set_id"])
+    )
+
+    coverage_csv = f"{prefix}_coverage_summary.csv"
+    fieldnames = [
+        "set_id",
+        "size",
+        "method",
+        "mean_min_dist",
+        "p95_min_dist",
+        "max_min_dist",
+    ]
+
+    with open(coverage_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(coverage_rows)
+
+    logger.info(f"[CoverageSummary] Saved full coverage summary to {coverage_csv}")
+
+    grouped = {}
+    for row in coverage_rows:
+        key = (row["size"], row["method"])
+        grouped.setdefault(key, {
+            "mean_min_dist": [],
+            "p95_min_dist": [],
+            "max_min_dist": [],
+        })
+        grouped[key]["mean_min_dist"].append(row["mean_min_dist"])
+        grouped[key]["p95_min_dist"].append(row["p95_min_dist"])
+        grouped[key]["max_min_dist"].append(row["max_min_dist"])
+
+    for (size, method), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
+        mean_avg = sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"])
+        p95_avg = sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"])
+        max_avg = sum(vals["max_min_dist"]) / len(vals["max_min_dist"])
+
+        logger.info(
+            f"[CoverageSummary] size={size}, method={method}, "
+            f"mean={mean_avg:.6f}, p95={p95_avg:.6f}, max={max_avg:.6f}"
+        )
+
 def consolidate_dataset(cfg: Dict):
     """
     Main pipeline: parse, outlier‐filter, SOAP, features, clustering,
@@ -412,47 +464,4 @@ def consolidate_dataset(cfg: Dict):
                     random_state=set_seed,
                 )
     # 12) Save coverage summary CSV + print compact summary
-    if coverage_rows:
-        coverage_rows = sorted(
-            coverage_rows,
-            key=lambda r: (r["size"], r["method"], r["set_id"])
-        )
-
-        coverage_csv = f"{prefix}_coverage_summary.csv"
-        fieldnames = [
-            "set_id",
-            "size",
-            "method",
-            "mean_min_dist",
-            "p95_min_dist",
-            "max_min_dist",
-        ]
-
-        with open(coverage_csv, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(coverage_rows)
-
-        logger.info(f"[CoverageSummary] Saved full coverage summary to {coverage_csv}")
-    
-        grouped = {}
-        for row in coverage_rows:
-            key = (row["size"], row["method"])
-            grouped.setdefault(key, {
-                "mean_min_dist": [],
-                "p95_min_dist": [],
-                "max_min_dist": [],
-            })
-            grouped[key]["mean_min_dist"].append(row["mean_min_dist"])
-            grouped[key]["p95_min_dist"].append(row["p95_min_dist"])
-            grouped[key]["max_min_dist"].append(row["max_min_dist"])
-
-        for (size, method), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
-            mean_avg = sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"])
-            p95_avg = sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"])
-            max_avg = sum(vals["max_min_dist"]) / len(vals["max_min_dist"])
-
-            logger.info(
-                f"[CoverageSummary] size={size}, method={method}, "
-                f"mean={mean_avg:.6f}, p95={p95_avg:.6f}, max={max_avg:.6f}"
-            )
+    save_coverage_summary(prefix, coverage_rows)
