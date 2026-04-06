@@ -27,6 +27,7 @@ from mlff_qd.utils.cluster import (
     assign_kmeans_labels,
     sample_indices,
     compute_subset_coverage_metrics,
+    select_farthest_point_sampling,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -364,6 +365,9 @@ def consolidate_dataset(cfg: Dict):
 
     # Optional elbow plot config
     create_random_baseline = ds.get("create_random_baseline", False)
+    create_fps_baseline = ds.get("create_fps_baseline", False)
+    max_fps_size = ds.get("max_fps_size", 300)
+
     elbow_enabled = ds.get("plot_elbow", False)
     elbow_k_values = ds.get("elbow_k_values", None)
     elbow_max_k = ds.get("elbow_max_k", 1000)
@@ -522,5 +526,42 @@ def consolidate_dataset(cfg: Dict):
                     coverage_rows=coverage_rows,
                     random_state=set_seed,
                 )
+
+            # ==========================================================
+            # 3) Optional FPS subset
+            # ==========================================================
+            if create_fps_baseline:
+                if nsel <= max_fps_size:
+                    fps_idxs = select_farthest_point_sampling(
+                        feats,
+                        nsel,
+                        random_state=set_seed,
+                    )
+
+                    logger.info(
+                        f"[FPS] set={set_id} selected {len(fps_idxs)} frames for size {tgt}"
+                    )
+
+                    export_subset_bundle(
+                        feats=feats,
+                        E=E,
+                        P=P,
+                        F=F,
+                        atoms=atoms,
+                        atomic_numbers_1d=atomic_numbers_1d,
+                        sel_idxs=fps_idxs,
+                        prefix=prefix,
+                        set_id=set_id,
+                        tgt=tgt,
+                        method_name="fps",
+                        coverage_rows=coverage_rows,
+                        random_state=set_seed,
+                    )
+                else:
+                    logger.warning(
+                        f"[FPS] Skipping FPS for size={nsel} because "
+                        f"nsel > max_fps_size={max_fps_size}"
+                    )
+
     # 12) Save coverage summary CSV + print compact summary
     save_coverage_summary(prefix, coverage_rows)
