@@ -308,6 +308,44 @@ def run_elbow_analysis(
 
     return sizes, elbow_best_k
 
+def maybe_plot_cluster_map(
+    feats,
+    elbow_best_k,
+    prefix,
+    seed,
+    max_cluster_map_k=500,
+):
+    """
+    Plot cluster map only when elbow_best_k is available and not too large.
+    """
+    if elbow_best_k is None:
+        return
+
+    if elbow_best_k > max_cluster_map_k:
+        logger.warning(
+            f"[ClusterMap] Skipping cluster map because elbow_best_k={elbow_best_k} "
+            f"> max_cluster_map_k={max_cluster_map_k}"
+        )
+        return
+
+    try:
+        cluster_labels, _ = assign_kmeans_labels(
+            feats,
+            n_clusters=elbow_best_k,
+            random_state=seed,
+        )
+
+        plot_cluster_map(
+            feats,
+            cluster_labels,
+            title=f"PCA Cluster Map (k={elbow_best_k})",
+            filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
+            method="pca",
+            random_state=seed,
+        )
+    except Exception as e:
+        logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
+
 def consolidate_dataset(cfg: Dict):
     """
     Main pipeline: parse, outlier‐filter, SOAP, features, clustering,
@@ -396,30 +434,13 @@ def consolidate_dataset(cfg: Dict):
         elbow_selection_method=elbow_selection_method,
     )
 
-    if elbow_best_k is not None:
-        if elbow_best_k <= max_cluster_map_k:
-            try:
-                cluster_labels, _ = assign_kmeans_labels(
-                    feats,
-                    n_clusters=elbow_best_k,
-                    random_state=seed,
-                )
-
-                plot_cluster_map(
-                    feats,
-                    cluster_labels,
-                    title=f"PCA Cluster Map (k={elbow_best_k})",
-                    filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
-                    method="pca",
-                    random_state=seed,
-                )
-            except Exception as e:
-                logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
-        else:
-            logger.warning(
-                f"[ClusterMap] Skipping cluster map because elbow_best_k={elbow_best_k} "
-                f"> max_cluster_map_k={max_cluster_map_k}"
-            )
+    maybe_plot_cluster_map(
+        feats=feats,
+        elbow_best_k=elbow_best_k,
+        prefix=prefix,
+        seed=seed,
+        max_cluster_map_k=max_cluster_map_k,
+    )
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
