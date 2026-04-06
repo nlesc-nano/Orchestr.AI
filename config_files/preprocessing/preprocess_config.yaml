@@ -16,6 +16,8 @@ dataset:
    
    sizes: [200,500] # Number of structures to include in each subset (for training/validation splits)
    create_random_baseline: true
+   create_fps_baseline: true
+   max_fps_size: 300 # Maximum size for FPS baseline subset (to prevent excessively large subsets)
    
    plot_elbow: true
   #  elbow_k_values: [10, 20, 150, 200, 1000, 1500] # If elbow_k_values is set, then: elbow_max_k is effectively ignored for list generation
