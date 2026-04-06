@@ -226,6 +226,88 @@ def save_coverage_summary(prefix, coverage_rows):
             f"mean={mean_avg:.6f}, p95={p95_avg:.6f}, max={max_avg:.6f}"
         )
 
+def run_elbow_analysis(
+    feats,
+    sizes,
+    prefix,
+    seed,
+    elbow_enabled=False,
+    elbow_k_values=None,
+    elbow_max_k=1000,
+    auto_add_elbow_size=False,
+    max_auto_elbow_size=2000,
+    elbow_selection_method="knee",
+):
+    """
+    Run elbow analysis and optionally auto-add a recommended subset size.
+
+    Returns
+    -------
+    sizes : list[int]
+        Possibly updated subset sizes.
+    elbow_best_k : int or None
+        Recommended elbow cluster count, if available.
+    """
+    elbow_best_k = None
+
+    if not elbow_enabled:
+        return sizes, elbow_best_k
+
+    n_inliers = len(feats)
+
+    if elbow_k_values is None:
+        elbow_k_values = suggest_elbow_k_values(
+            n_samples=n_inliers,
+            requested_sizes=sizes,
+            max_k=elbow_max_k,
+        )
+        logger.info(f"[Elbow] Auto-generated k values from n_inliers={n_inliers}: {elbow_k_values}")
+    else:
+        logger.info(f"[Elbow] Using user-provided k values: {elbow_k_values}")
+
+    ks, wcss = compute_kmeans_elbow(
+        feats,
+        k_values=elbow_k_values,
+        random_state=seed,
+    )
+
+    plot_kmeans_elbow(
+        ks,
+        wcss,
+        title="KMeans Elbow on Inlier Feature Space",
+        filename=f"{prefix}_kmeans_elbow.png",
+    )
+
+    if len(ks) > 0:
+        logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
+
+    if elbow_selection_method == "knee":
+        elbow_best_k = recommend_elbow_k(ks, wcss)
+    else:
+        logger.warning(
+            f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
+        )
+        elbow_best_k = recommend_elbow_k(ks, wcss)
+
+    if elbow_best_k is not None:
+        elbow_best_k = min(elbow_best_k, len(feats))
+        logger.info(f"[Elbow] Recommended elbow size: {elbow_best_k}")
+
+        if auto_add_elbow_size:
+            if elbow_best_k <= max_auto_elbow_size:
+                logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
+                sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
+                logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
+            else:
+                logger.warning(
+                    f"[Elbow] Recommended k={elbow_best_k} exceeds "
+                    f"max_auto_elbow_size={max_auto_elbow_size}. Skipping auto-add."
+                )
+    else:
+        logger.warning("[Elbow] Could not determine a recommended elbow size.")
+
+    return sizes, elbow_best_k
+
 def consolidate_dataset(cfg: Dict):
     """
     Main pipeline: parse, outlier‐filter, SOAP, features, clustering,
@@ -301,62 +383,18 @@ def consolidate_dataset(cfg: Dict):
     F = F[inliers_mask]
     logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
 
-    elbow_best_k = None
-
-    if elbow_enabled:
-        n_inliers = len(feats)
-
-        if elbow_k_values is None:
-            elbow_k_values = suggest_elbow_k_values(
-                n_samples=n_inliers,
-                requested_sizes=sizes,
-                max_k=elbow_max_k,
-            )
-            logger.info(f"[Elbow] Auto-generated k values from n_inliers={n_inliers}: {elbow_k_values}")
-        else:
-            logger.info(f"[Elbow] Using user-provided k values: {elbow_k_values}")
-
-        ks, wcss = compute_kmeans_elbow(
-            feats,
-            k_values=elbow_k_values,
-            random_state=seed,
-        )
-
-        plot_kmeans_elbow(
-            ks,
-            wcss,
-            title="KMeans Elbow on Inlier Feature Space",
-            filename=f"{prefix}_kmeans_elbow.png",
-        )
-
-        if len(ks) > 0:
-            logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
-
-        # Determine recommended elbow k independently of auto-add
-        if elbow_selection_method == "knee":
-            elbow_best_k = recommend_elbow_k(ks, wcss)
-        else:
-            logger.warning(
-                f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
-            )
-            elbow_best_k = recommend_elbow_k(ks, wcss)
-
-        if elbow_best_k is not None:
-            elbow_best_k = min(elbow_best_k, len(feats))
-            logger.info(f"[Elbow] Recommended elbow size: {elbow_best_k}")
-
-            if auto_add_elbow_size:
-                if elbow_best_k <= max_auto_elbow_size:
-                    logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
-                    sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
-                    logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
-                else:
-                    logger.warning(
-                        f"[Elbow] Recommended k={elbow_best_k} exceeds "
-                        f"max_auto_elbow_size={max_auto_elbow_size}. Skipping auto-add."
-                    )
-        else:
-            logger.warning("[Elbow] Could not determine a recommended elbow size.")
+    sizes, elbow_best_k = run_elbow_analysis(
+        feats=feats,
+        sizes=sizes,
+        prefix=prefix,
+        seed=seed,
+        elbow_enabled=elbow_enabled,
+        elbow_k_values=elbow_k_values,
+        elbow_max_k=elbow_max_k,
+        auto_add_elbow_size=auto_add_elbow_size,
+        max_auto_elbow_size=max_auto_elbow_size,
+        elbow_selection_method=elbow_selection_method,
+    )
 
     if elbow_best_k is not None:
         if elbow_best_k <= max_cluster_map_k:
