@@ -92,6 +92,61 @@ def assign_kmeans_labels(features, n_clusters: int, random_state: int = 0):
 
     return km.labels_, km
 
+
+def compute_selection_entropy(cluster_labels_full, selected_idx):
+    """
+    Compute Shannon entropy of a selected subset over full-data cluster labels.
+
+    Parameters
+    ----------
+    cluster_labels_full : array-like, shape (n_samples,)
+        Cluster labels for the full dataset.
+    selected_idx : array-like, shape (n_selected,)
+        Indices of selected subset.
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with:
+          - entropy
+          - normalized_entropy
+          - occupied_clusters
+          - total_clusters
+    """
+    labels = np.asarray(cluster_labels_full, dtype=int)
+    sel = np.asarray(selected_idx, dtype=int)
+
+    if labels.ndim != 1:
+        raise ValueError("cluster_labels_full must be 1D")
+    if sel.ndim != 1:
+        raise ValueError("selected_idx must be 1D")
+    if len(sel) == 0:
+        raise ValueError("selected_idx is empty")
+    if sel.min() < 0 or sel.max() >= len(labels):
+        raise ValueError("selected_idx contains invalid indices")
+
+    sel_labels = labels[sel]
+    counts = np.bincount(sel_labels)
+    counts = counts[counts > 0]
+
+    probs = counts / counts.sum()
+    entropy = -np.sum(probs * np.log(probs))
+
+    total_clusters = int(labels.max()) + 1
+    occupied_clusters = int(len(counts))
+
+    if total_clusters > 1:
+        normalized_entropy = float(entropy / np.log(total_clusters))
+    else:
+        normalized_entropy = 0.0
+
+    return {
+        "entropy": float(entropy),
+        "normalized_entropy": normalized_entropy,
+        "occupied_clusters": occupied_clusters,
+        "total_clusters": total_clusters,
+    }
+    
 def compute_subset_coverage_metrics(features, selected_idx):
     """
     Compute nearest-selected-point coverage metrics.
