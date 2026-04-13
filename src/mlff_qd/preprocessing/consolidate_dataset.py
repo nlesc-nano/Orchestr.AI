@@ -33,6 +33,7 @@ from mlff_qd.utils.cluster import (
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
+from mlff_qd.utils.coverage_report import plot_coverage_summary_report
 
 import logging
 logger = logging.getLogger(__name__)
@@ -656,3 +657,4 @@ def consolidate_dataset(cfg: Dict):
 
     # 12) Save coverage summary CSV + print compact summary
     save_coverage_summary(prefix, coverage_rows)
+    plot_coverage_summary_report(f"{prefix}_coverage_summary_compact.csv")
