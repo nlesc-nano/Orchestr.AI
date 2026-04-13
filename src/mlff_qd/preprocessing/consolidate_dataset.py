@@ -28,6 +28,7 @@ from mlff_qd.utils.cluster import (
     sample_indices,
     compute_subset_coverage_metrics,
     select_farthest_point_sampling,
+    compute_selection_entropy,
 )
 from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
@@ -50,6 +51,8 @@ def export_subset_bundle(
     method_name,
     coverage_rows,
     random_state=0,
+    entropy_cluster_labels=None,
+    entropy_k=None,
 ):
     """
     Export one selected subset and all associated plots/files.
@@ -103,6 +106,28 @@ def export_subset_bundle(
         f"max={cov_metrics['max_min_dist']:.6f}"
     )
 
+    entropy_metrics = {
+        "entropy": None,
+        "normalized_entropy": None,
+        "occupied_clusters": None,
+        "total_clusters": entropy_k,
+    }
+
+    if entropy_cluster_labels is not None:
+        try:
+            entropy_metrics = compute_selection_entropy(
+                entropy_cluster_labels,
+                sel_idxs,
+            )
+            logger.info(
+                f"[Entropy-{method_label}] set={set_id}, size={tgt}, "
+                f"H={entropy_metrics['entropy']:.6f}, "
+                f"Hnorm={entropy_metrics['normalized_entropy']:.6f}, "
+                f"occupied={entropy_metrics['occupied_clusters']}/{entropy_metrics['total_clusters']}"
+            )
+        except Exception as e:
+            logger.warning(f"[Entropy-{method_label}] Failed: {e}")
+
     coverage_rows.append({
         "set_id": int(set_id),
         "size": int(nsel),
@@ -110,6 +135,10 @@ def export_subset_bundle(
         "mean_min_dist": float(cov_metrics["mean_min_dist"]),
         "p95_min_dist": float(cov_metrics["p95_min_dist"]),
         "max_min_dist": float(cov_metrics["max_min_dist"]),
+        "entropy": entropy_metrics["entropy"],
+        "normalized_entropy": entropy_metrics["normalized_entropy"],
+        "occupied_clusters": entropy_metrics["occupied_clusters"],
+        "total_clusters": entropy_metrics["total_clusters"],
     })
 
     plot_coverage_histogram(
@@ -196,6 +225,10 @@ def save_coverage_summary(prefix, coverage_rows):
         "mean_min_dist",
         "p95_min_dist",
         "max_min_dist",
+        "entropy",
+        "normalized_entropy",
+        "occupied_clusters",
+        "total_clusters",
     ]
 
     with open(coverage_csv, "w", newline="") as f:
@@ -203,7 +236,7 @@ def save_coverage_summary(prefix, coverage_rows):
         writer.writeheader()
         writer.writerows(coverage_rows)
 
-    logger.info(f"[CoverageSummary] Saved full coverage summary to {coverage_csv}")
+    compact_rows = []
 
     grouped = {}
     for row in coverage_rows:
@@ -212,20 +245,50 @@ def save_coverage_summary(prefix, coverage_rows):
             "mean_min_dist": [],
             "p95_min_dist": [],
             "max_min_dist": [],
+            "entropy": [],
+            "normalized_entropy": [],
+            "occupied_clusters": [],
         })
         grouped[key]["mean_min_dist"].append(row["mean_min_dist"])
         grouped[key]["p95_min_dist"].append(row["p95_min_dist"])
         grouped[key]["max_min_dist"].append(row["max_min_dist"])
+        grouped[key]["entropy"].append(row["entropy"])
+        grouped[key]["normalized_entropy"].append(row["normalized_entropy"])
+        grouped[key]["occupied_clusters"].append(row["occupied_clusters"])
 
     for (size, method), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
-        mean_avg = sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"])
-        p95_avg = sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"])
-        max_avg = sum(vals["max_min_dist"]) / len(vals["max_min_dist"])
+        compact_rows.append({
+            "size": size,
+            "method": method,
+            "mean_min_dist_avg": sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"]),
+            "p95_min_dist_avg": sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"]),
+            "max_min_dist_avg": sum(vals["max_min_dist"]) / len(vals["max_min_dist"]),
+            "entropy_avg": sum(vals["entropy"]) / len(vals["entropy"]),
+            "normalized_entropy_avg": sum(vals["normalized_entropy"]) / len(vals["normalized_entropy"]),
+            "occupied_clusters_avg": sum(vals["occupied_clusters"]) / len(vals["occupied_clusters"]),
+            "n_repeats": len(vals["mean_min_dist"]),
+        })
 
-        logger.info(
-            f"[CoverageSummary] size={size}, method={method}, "
-            f"mean={mean_avg:.6f}, p95={p95_avg:.6f}, max={max_avg:.6f}"
-        )
+    compact_csv = f"{prefix}_coverage_summary_compact.csv"
+    compact_fieldnames = [
+        "size",
+        "method",
+        "mean_min_dist_avg",
+        "p95_min_dist_avg",
+        "max_min_dist_avg",
+        "entropy_avg",
+        "normalized_entropy_avg",
+        "occupied_clusters_avg",
+        "n_repeats",
+    ]
+
+    with open(compact_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=compact_fieldnames)
+        writer.writeheader()
+        writer.writerows(compact_rows)
+
+    logger.info(f"[CoverageSummary] Saved compact coverage summary to {compact_csv}")
+
 
 def run_elbow_analysis(
     feats,
@@ -446,6 +509,28 @@ def consolidate_dataset(cfg: Dict):
         max_cluster_map_k=max_cluster_map_k,
     )
 
+    # Reference clustering for entropy calculation
+    entropy_cluster_labels = None
+    entropy_k = None
+
+    if len(feats) > 1:
+        if elbow_best_k is not None:
+            entropy_k = min(int(elbow_best_k), len(feats) - 1)
+        else:
+            entropy_k = min(100, len(feats) - 1)
+
+        if entropy_k >= 2:
+            try:
+                entropy_cluster_labels, _ = assign_kmeans_labels(
+                    feats,
+                    n_clusters=entropy_k,
+                    random_state=seed,
+                )
+                logger.info(f"[Entropy] Using reference clustering with k={entropy_k}")
+            except Exception as e:
+                logger.warning(f"[Entropy] Failed to compute reference clustering: {e}")
+                entropy_cluster_labels = None
+
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
         feats,
@@ -495,6 +580,8 @@ def consolidate_dataset(cfg: Dict):
                 method_name="kmeans",
                 coverage_rows=coverage_rows,
                 random_state=set_seed,
+                entropy_cluster_labels=entropy_cluster_labels,
+                entropy_k=entropy_k,
             )
 
             # ==========================================================
@@ -525,6 +612,8 @@ def consolidate_dataset(cfg: Dict):
                     method_name="random",
                     coverage_rows=coverage_rows,
                     random_state=set_seed,
+                    entropy_cluster_labels=entropy_cluster_labels,
+                    entropy_k=entropy_k,
                 )
 
             # ==========================================================
@@ -555,7 +644,9 @@ def consolidate_dataset(cfg: Dict):
                         tgt=tgt,
                         method_name="fps",
                         coverage_rows=coverage_rows,
-                        random_state=set_seed,
+                        random_state=set_seed,                
+                        entropy_cluster_labels=entropy_cluster_labels,
+                        entropy_k=entropy_k,
                     )
                 else:
                     logger.warning(
