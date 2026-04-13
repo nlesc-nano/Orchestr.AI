@@ -15,6 +15,7 @@ from mlff_qd.utils.plots import (
     plot_kmeans_elbow,
     plot_cluster_map,
     plot_coverage_histogram,
+    plot_pca_density_contour,
 )
 from mlff_qd.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
@@ -34,6 +35,7 @@ from mlff_qd.utils.descriptors import compute_local_descriptors
 from mlff_qd.utils.centering import process_xyz
 from mlff_qd.utils.data_conversion import preprocess_data_for_platform
 from mlff_qd.utils.coverage_report import plot_coverage_summary_report
+
 
 import logging
 logger = logging.getLogger(__name__)
@@ -204,6 +206,15 @@ def export_subset_bundle(
         energies=E[sel_idxs],
         forces=F[sel_idxs],
     )
+
+    if False:  # diagnostic only
+        plot_pca_density_contour(
+            embeddings=feats,
+            selected_indices=sel_idxs,
+            title=f"PCA Density Contour ({method_label}): selected {nsel} from {n_total} inliers",
+            output_path=f"{prefix}_set{set_id}_{tgt}_pca_density_contour{tag}.png",
+            random_state=random_state,
+        )
 
 def save_coverage_summary(prefix, coverage_rows):
     """
