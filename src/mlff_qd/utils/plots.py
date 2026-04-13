@@ -479,3 +479,100 @@ def plot_energy_and_forces(energies, forces, filename='analysis.png'):
     plt.savefig(filename, dpi=300)
     plt.close(fig)
     logger.info(f"[Plot] Energy/force plots saved to {filename}")
+
+def plot_pca_density_contour(
+    embeddings,
+    selected_indices=None,
+    title="PCA Density Contour",
+    output_path="pca_density_contour.png",
+    max_plot=30000,
+    random_state=0,
+    bins=120,
+    levels=20,
+    dpi=200,
+):
+    """
+    Plot a PCA density contour of the full embedding space and optionally
+    overlay selected points as small circles.
+
+    Parameters
+    ----------
+    embeddings : np.ndarray, shape (n_samples, n_features)
+        Full feature / embedding matrix.
+    selected_indices : array-like or None
+        Indices of selected subset to overlay.
+    title : str
+        Plot title.
+    output_path : str
+        Output image path.
+    max_plot : int
+        Maximum number of points used to estimate density background.
+    random_state : int
+        Random seed for subsampling.
+    bins : int
+        Number of 2D histogram bins per axis.
+    levels : int
+        Number of contour levels.
+    dpi : int
+        Output DPI.
+    """
+    logger.info("[plot_pca_density_contour] Starting....")
+
+    X = np.asarray(embeddings)
+    n = len(X)
+
+    if X.ndim != 2:
+        raise ValueError("embeddings must be a 2D array")
+    if n == 0:
+        logger.warning("[plot_pca_density_contour] Empty embeddings. Skipping plot.")
+        return
+
+    selected_indices = _validate_selected(selected_indices, n)
+
+    # Background points for density estimate
+    bg_idx = _subsample_indices(n, max_points=max_plot, random_state=random_state)
+    if selected_indices is not None and len(selected_indices) > 0:
+        bg_idx = np.unique(np.concatenate([bg_idx, selected_indices]))
+
+    X_plot = X[bg_idx]
+    red, _ = project_pca2(X_plot)
+
+    x = red[:, 0]
+    y = red[:, 1]
+
+    # Build a smooth-ish density field from a 2D histogram
+    H, xedges, yedges = np.histogram2d(x, y, bins=bins, density=True)
+
+    # Convert bin edges to centers for contour plotting
+    xc = 0.5 * (xedges[:-1] + xedges[1:])
+    yc = 0.5 * (yedges[:-1] + yedges[1:])
+    Xg, Yg = np.meshgrid(xc, yc, indexing="xy")
+
+    # histogram2d returns shape (nx, ny), contourf expects Z shaped like mesh
+    Z = H.T
+
+    plt.figure(figsize=(8, 6))
+    cf = plt.contourf(Xg, Yg, Z, levels=levels, cmap="jet")
+    cbar = plt.colorbar(cf)
+    cbar.set_label("Density")
+
+    # Overlay selected points if given
+    if selected_indices is not None and len(selected_indices) > 0:
+        sel_set = set(selected_indices.tolist())
+        sel_mask = np.array([i in sel_set for i in bg_idx])
+
+        plt.scatter(
+            red[sel_mask, 0],
+            red[sel_mask, 1],
+            s=34,
+            facecolors="none",
+            edgecolors="black",
+            linewidths=0.9,
+            label=f"selected ({sel_mask.sum()})",
+        )
+        plt.legend()
+
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title(title)
+    _save_close(output_path, dpi=dpi)
