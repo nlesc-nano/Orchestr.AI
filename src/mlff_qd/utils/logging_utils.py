@@ -5,7 +5,7 @@ import functools
 
 def setup_logging(log_file: str = "mlff_qd.log", level: int = logging.INFO):
     """
-    Initialize a generic logger for MLFF_QD modules.
+    Initialize a generic logger for Orchestr.AI modules.
     Writes logs both to console and to a file (default: mlff_qd.log in cwd).
     Safe to call multiple times — won't duplicate handlers.
     """
