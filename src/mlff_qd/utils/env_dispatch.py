@@ -162,7 +162,7 @@ def dispatch_to_engine_env(
     env["MLFFQD_ENGINE"] = engine  # useful for debugging/logging
 
     # Optional: carry over current working dir and PYTHONPATH
-    # - If MLFF_QD is installed in both envs (recommended), no PYTHONPATH is needed.
+    # - If Orchestr.AI is installed in both envs (recommended), no PYTHONPATH is needed.
     # - If in editable mode, still fine.
 
     try:
