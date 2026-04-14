@@ -7,11 +7,17 @@
 # - n_rbf: For schnet, painn, fusion → RBF basis functions. For nequip/allegro → mapped to bessel basis.
 # ==============================================================================
 
-platform: fusion  # [schnet, painn, fusion, nequip, allegro, mace]
+platform: fusion  # [schnet, painn, so3net, field_schnet, fusion, nequip, allegro, mace]
 
 common:
   data:
     input_xyz_file: ./basic_consolidated_dataset_1000CdSe.xyz   # Path to your XYZ file
+    atomrefs_available: true   # atomrefs_available: false  # Set to true if your dataset includes atom reference energies/forces for offset correction. 
+    # If false, the code will skip adding offsets.
+    atomrefs:                  # Define atomic reference energies here (symbol or atomic number)
+      Cl: -405.77437669156273614
+      Te: -219.49156681006164149
+      Hg: -1118.3844369317112069
 
   model:
     mp_layers: 3       # Number of message-passing layers in the neural network.

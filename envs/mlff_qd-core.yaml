@@ -1,4 +1,4 @@
-name: mlff_legacy
+name: mlff-core
 channels:
   - defaults
   - conda-forge
@@ -14,5 +14,3 @@ dependencies:
       - torch==2.10.0
       - schnetpack
       - dscribe
-      - nequip==0.16.0
-      - git+https://github.com/mir-group/allegro.git@v0.8.0

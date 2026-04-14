@@ -1,0 +1,8 @@
+torch==2.10.0
+nequip
+nequip-allegro
+tensorboard
+tensorboardX
+openequivariance
+cuequivariance-torch
+cuequivariance-ops-torch-cu12
