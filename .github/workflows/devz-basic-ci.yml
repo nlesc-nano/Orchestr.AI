@@ -1,8 +1,8 @@
-name: dev_z Basic CI
+name: dev Basic CI
 
 on:
   push:
-    branches: [dev_z]
+    branches: [dev]
 
 jobs:
   basic-check:
@@ -12,10 +12,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Conda (mlff env)
+      - name: Set up Conda (Orchestr.AI legacy env)
         uses: conda-incubator/setup-miniconda@v3
         with:
-          activate-environment: mlff
+          activate-environment: orchestr_ai_legacy
           environment-file: environment.yaml
           python-version: "3.12"
           auto-activate-base: false
