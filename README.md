@@ -43,29 +43,29 @@ Add `PRINT_VERSIONS=0` before the command to skip version checks and speed up in
 #### Option A — Conda
 ```bash
 PRINT_VERSIONS=0 bash scripts/setup_envs.sh
-source scripts/mlff_qd_env.sh
+source scripts/orchestr_ai_env.sh
 ```
 
 #### Option B — Micromamba
 ```bash
 PRINT_VERSIONS=0 bash scripts/setup_envs_micromamba.sh
-source scripts/mlff_qd_env.sh
+source scripts/orchestr_ai_env.sh
 ```
 
 #### Option C — Micromamba + UV
 ```bash
 PRINT_VERSIONS=0 bash scripts/setup_envs_micromamba_uv.sh
-source scripts/mlff_qd_env.sh
+source scripts/orchestr_ai_env.sh
 ```
 
 #### Option D — Legacy (manual setup)
 
 ```bash
 conda env create -f environment.yaml
-conda activate mlff
+conda activate orchestr_ai_legacy
 pip install mace-torch==0.3.14
 pip install -e .
-source scripts/mlff_qd_single_env.sh
+source scripts/orchestr_ai_single_env.sh
 ```
 
 
@@ -75,9 +75,9 @@ source scripts/mlff_qd_single_env.sh
 #### Example of internal dispatch
 
 ```text
-Running in env prefix: mlffqd-core
-[Orchestr.AI] Dispatch: engine 'nequip' → env 'mlffqd-nequip'
-Running in env prefix: mlffqd-nequip
+Running in env prefix: orchestr_ai-core
+[Orchestr.AI] Dispatch: engine 'nequip' → env 'orchestr_ai-nequip'
+Running in env prefix: orchestr_ai-nequip
 ```
 
 <strong>What this setup does</strong>
@@ -86,7 +86,7 @@ Running in env prefix: mlffqd-nequip
   - core → SchNet, PaiNN, SO3net, FieldSchNet
   - nequip → NequIP, Allegro
   - mace → MACE
-- Installs mlff_qd in all environments
+- Installs Orchestr.AI (mlff_qd package) in all environments
 - Enables automatic environment dispatch
 
 
@@ -98,15 +98,15 @@ Modify these scripts:
 - setup_envs_micromamba_uv.sh
 
 Environment variables for custom names:
-- MLFFQD_CORE_CONDA_ENV
-- MLFFQD_NEQUIP_CONDA_ENV
-- MLFFQD_MACE_CONDA_ENV
+- ORCHESTRAI_CORE_CONDA_ENV
+- ORCHESTRAI_NEQUIP_CONDA_ENV
+- ORCHESTRAI_MACE_CONDA_ENV
 
 Example:
 ```bash
-export MLFFQD_CORE_CONDA_ENV=mycore
-export MLFFQD_NEQUIP_CONDA_ENV=mynequip
-export MLFFQD_MACE_CONDA_ENV=mymace
+export ORCHESTRAI_CORE_CONDA_ENV=mycore
+export ORCHESTRAI_NEQUIP_CONDA_ENV=mynequip
+export ORCHESTRAI_MACE_CONDA_ENV=mymace
 ```
 
 </details>
