@@ -1,7 +1,7 @@
-# MLFF_QD  
+# Orchestr.AI  
 ## Unified Platform for Machine-Learning Force Fields for Quantum Dots 🚀
 
-**MLFF_QD** is a unified, modular, and engine‑agnostic framework for training state‑of‑the‑art machine learning force fields (MLFFs) for **quantum dots (QDs)**.  
+**Orchestr.AI** is a unified, modular, and engine‑agnostic framework for training state‑of‑the‑art machine learning force fields (MLFFs) for **quantum dots (QDs)**.  
 It integrates multiple ML engines under a single interface:
 
 ✅ **SchNet**
@@ -13,8 +13,8 @@ It integrates multiple ML engines under a single interface:
 ✅ **MACE**
 
 ## 1. Installation
-For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
-MLFF_QD supports **three installation modes** depending on your system and preference:
+For the installation of the Orchestr.AI platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
+Orchestr.AI supports **three installation modes** depending on your system and preference:
 
 
 | Mode | Tool | Recommended For |
@@ -27,8 +27,8 @@ MLFF_QD supports **three installation modes** depending on your system and prefe
 ### Clone the repository
 
 ```bash
-git clone https://github.com/nlesc-nano/MLFF_QD.git
-cd MLFF_QD
+git clone https://github.com/nlesc-nano/Orchestr.AI.git
+cd Orchestr.AI
 ```
 
 
@@ -76,7 +76,7 @@ source scripts/mlff_qd_single_env.sh
 
 ```text
 Running in env prefix: mlffqd-core
-[MLFF_QD] Dispatch: engine 'nequip' → env 'mlffqd-nequip'
+[Orchestr.AI] Dispatch: engine 'nequip' → env 'mlffqd-nequip'
 Running in env prefix: mlffqd-nequip
 ```
 
@@ -158,7 +158,7 @@ python -m mlff_qd.preprocessing.generate_mlff_dataset --config my_experiment.yam
 
 ### 3. Training Guide
 
-MLFF_QD supports **two** ways to train:
+Orchestr.AI supports **two** ways to train:
 
 
 ####  **A) Using Unified YAML (Recommended)**  
