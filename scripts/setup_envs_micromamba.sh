@@ -4,16 +4,16 @@ set -euo pipefail
 # =========================
 # ENV NAMES (user override supported)
 # =========================
-CORE_ENV="${MLFFQD_CORE_CONDA_ENV:-mlffqd-core}"
-NEQUIP_ENV="${MLFFQD_NEQUIP_CONDA_ENV:-mlffqd-nequip}"
-MACE_ENV="${MLFFQD_MACE_CONDA_ENV:-mlffqd-mace}"
+CORE_ENV="${ORCHESTRAI_CORE_CONDA_ENV:-orchestr_ai-core}"
+NEQUIP_ENV="${ORCHESTRAI_NEQUIP_CONDA_ENV:-orchestr_ai-nequip}"
+MACE_ENV="${ORCHESTRAI_MACE_CONDA_ENV:-orchestr_ai-mace}"
 
 # =========================
 # FILE PATHS
 # =========================
-CORE_YAML="${MLFFQD_CORE_YAML:-envs/mlff_qd-core.yaml}"
-NEQUIP_YAML="${MLFFQD_NEQUIP_YAML:-envs/mlff_qd-nequip.yaml}"
-MACE_YAML="${MLFFQD_MACE_YAML:-envs/mlff_qd-mace.yaml}"
+CORE_YAML="${ORCHESTRAI_CORE_YAML:-envs/orchestr_ai-core.yaml}"
+NEQUIP_YAML="${ORCHESTRAI_NEQUIP_YAML:-envs/orchestr_ai-nequip.yaml}"
+MACE_YAML="${ORCHESTRAI_MACE_YAML:-envs/orchestr_ai-mace.yaml}"
 
 PRINT_VERSIONS="${PRINT_VERSIONS:-1}"
 
@@ -35,9 +35,9 @@ create_or_update_env_from_yaml () {
   fi
 }
 
-install_mlff_qd_editable () {
+install_orchestr_ai_editable () {
   local ENVNAME="$1"
-  echo "[INFO] Installing MLFF_QD into '$ENVNAME' (editable)"
+  echo "[INFO] Installing Orchestr.AI into '$ENVNAME' (editable)"
   micromamba run -n "$ENVNAME" python -m pip install -U pip
   micromamba run -n "$ENVNAME" python -m pip install -e .
 }
@@ -80,17 +80,17 @@ echo ""
 # ---------- CORE ------------
 echo "[1/3] Core env"
 create_or_update_env_from_yaml "$CORE_ENV" "$CORE_YAML"
-install_mlff_qd_editable "$CORE_ENV"
+install_orchestr_ai_editable "$CORE_ENV"
 
 # ---------- NEQUIP ------------
 echo "[2/3] NequIP env"
 create_or_update_env_from_yaml "$NEQUIP_ENV" "$NEQUIP_YAML"
-install_mlff_qd_editable "$NEQUIP_ENV"
+install_orchestr_ai_editable "$NEQUIP_ENV"
 
 # ---------- MACE ------------
 echo "[3/3] MACE env"
 create_or_update_env_from_yaml "$MACE_ENV" "$MACE_YAML"
-install_mlff_qd_editable "$MACE_ENV"
+install_orchestr_ai_editable "$MACE_ENV"
 
 # ========== VERIFY (PRINT VERSIONS) =============
 if [[ "$PRINT_VERSIONS" == "1" ]]; then
@@ -102,13 +102,13 @@ if [[ "$PRINT_VERSIONS" == "1" ]]; then
 fi
 
 # ============ EXPORT ENV VARS FOR DISPATCH ============
-ENV_EXPORT_FILE="scripts/mlff_qd_env.sh"
+ENV_EXPORT_FILE="scripts/orchestr_ai_env.sh"
 mkdir -p scripts
 
 cat > "$ENV_EXPORT_FILE" <<EOF
-export MLFFQD_CORE_CONDA_ENV="$CORE_ENV"
-export MLFFQD_NEQUIP_CONDA_ENV="$NEQUIP_ENV"
-export MLFFQD_MACE_CONDA_ENV="$MACE_ENV"
+export ORCHESTRAI_CORE_CONDA_ENV="$CORE_ENV"
+export ORCHESTRAI_NEQUIP_CONDA_ENV="$NEQUIP_ENV"
+export ORCHESTRAI_MACE_CONDA_ENV="$MACE_ENV"
 EOF
 
 echo ""

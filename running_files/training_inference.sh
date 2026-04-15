@@ -49,10 +49,10 @@ echo "→ logging.folder set to './results'"
 echo "→ DB will be created at: $SCRATCH_DIR/results/$DB_NAME"
 
 # 9) Run training & inference in the node-local scratch
-srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CONFIG_FILE"
+srun --chdir="$SCRATCH_DIR" python -m orchestr_ai.training --config "$CONFIG_FILE"
 if [ $? -eq 0 ]; then
   echo "✔ Training succeeded — running inference"
-  srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training.inference --config "$CONFIG_FILE"
+  srun --chdir="$SCRATCH_DIR" python -m orchestr_ai.training.inference --config "$CONFIG_FILE"
 else
   echo "✘ Training failed — skipping inference"
 fi

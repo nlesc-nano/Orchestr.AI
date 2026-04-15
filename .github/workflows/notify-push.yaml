@@ -1,7 +1,7 @@
-name: Notify on Push to dev_z
+name: Notify on Push to dev
 on:
   push:
-    branches: [dev_z]  # Later main
+    branches: [dev]  # Later main
 
 jobs:
   notify-push:
