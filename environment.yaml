@@ -1,4 +1,4 @@
-name: mlff_legacy
+name: orchestr_ai_legacy
 channels:
   - defaults
   - conda-forge

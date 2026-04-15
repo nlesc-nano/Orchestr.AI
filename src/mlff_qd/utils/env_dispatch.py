@@ -111,7 +111,7 @@ def resolve_python(profile: EnvProfile) -> str:
 
 def _is_dispatched() -> bool:
     # Recursion guard: once we hop envs, do not hop again.
-    return os.environ.get("MLFFQD_DISPATCHED", "").strip() == "1"
+    return os.environ.get("ORCHESTRAI_DISPATCHED", "").strip() == "1"
 
 
 def should_dispatch(engine: str, engine_to_profile: Dict[str, EnvProfile]) -> bool:
@@ -158,8 +158,8 @@ def dispatch_to_engine_env(
         argv += extra_args
 
     env = os.environ.copy()
-    env["MLFFQD_DISPATCHED"] = "1"
-    env["MLFFQD_ENGINE"] = engine  # useful for debugging/logging
+    env["ORCHESTRAI_DISPATCHED"] = "1"
+    env["ORCHESTRAI_ENGINE"] = engine  # useful for debugging/logging
 
     # Optional: carry over current working dir and PYTHONPATH
     # - If Orchestr.AI is installed in both envs (recommended), no PYTHONPATH is needed.
