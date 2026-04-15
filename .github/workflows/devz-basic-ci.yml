@@ -27,7 +27,7 @@ jobs:
           pip install mace-torch==0.3.13
           pip install -e .
 
-      - name: Smoke test – import mlff_qd
+      - name: Smoke test – import orchestr_ai
         shell: bash -l {0}
         run: |
-          python -c "import mlff_qd; print('Imported mlff_qd OK')"
+          python -c "import orchestr_ai; print('Imported orchestr_ai OK')"
