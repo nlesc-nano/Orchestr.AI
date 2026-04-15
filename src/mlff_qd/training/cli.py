@@ -106,7 +106,7 @@ def run_benchmark(args, scratch_dir):
         combined_df.to_csv('benchmark_summary.csv', index_label='Engine')
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="MLFF-QD CLI")
+    parser = argparse.ArgumentParser(description="Orchestr.AI CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--engine", required=False, help="Engine override (allegro, mace, nequip, schnet, painn, fusion)")
     parser.add_argument("--input", help="Path to input XYZ file (overrides input_xyz_file in YAML)")
@@ -299,9 +299,9 @@ def main():
     platform = (args.engine or config.get("platform", "")).lower()
 
     # --- Env dispatch (single command, multi-env) ---
-    core_env   = os.getenv("MLFFQD_CORE_CONDA_ENV", "mlffqd-core")
-    nequip_env = os.getenv("MLFFQD_NEQUIP_CONDA_ENV", "mlffqd-nequip")
-    mace_env   = os.getenv("MLFFQD_MACE_CONDA_ENV", "mlffqd-mace")
+    core_env   = os.getenv("ORCHESTRAI_CORE_CONDA_ENV", "orchestr_ai-core")
+    nequip_env = os.getenv("ORCHESTRAI_NEQUIP_CONDA_ENV", "orchestr_ai-nequip")
+    mace_env   = os.getenv("ORCHESTRAI_MACE_CONDA_ENV", "orchestr_ai-mace")
 
     engine_to_profile = {
         "schnet":          EnvProfile(conda_env=core_env),
@@ -316,18 +316,18 @@ def main():
     # ---- PRINT CURRENT ENV ----
     print(f"Running in env prefix: {_env_label()}")
 
-    single_env_mode = os.getenv("MLFFQD_SINGLE_ENV", "0") == "1"
+    single_env_mode = os.getenv("ORCHESTRAI_SINGLE_ENV", "0") == "1"
 
     if not single_env_mode and should_dispatch(platform, engine_to_profile):
         target = engine_to_profile[platform].conda_env
-        print(f"[MLFF_QD] Dispatch: engine '{platform}' → env '{target}'")
+        print(f"[Orchestr.AI] Dispatch: engine '{platform}' → env '{target}'")
         dispatch_to_engine_env(platform, engine_to_profile)
 
     if single_env_mode:
-        print(f"[MLFF_QD] Single-env mode enabled; no dispatch for engine '{platform}'")
+        print(f"[Orchestr.AI] Single-env mode enabled; no dispatch for engine '{platform}'")
 
-    print(f"[MLFF_QD] Engine: {platform} | Env prefix: {_env_label()}")
-    print(f"[MLFF_QD] Python: {sys.executable}")
+    print(f"[Orchestr.AI] Engine: {platform} | Env prefix: {_env_label()}")
+    print(f"[Orchestr.AI] Python: {sys.executable}")
 
 
     all_platforms = ["nequip", "allegro", "mace", "schnet", "painn", "fusion", "so3net", "field_schnet"]

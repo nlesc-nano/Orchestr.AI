@@ -34,7 +34,38 @@ def _subsample_indices(n, max_points=None, random_state=0):
     rng = np.random.default_rng(random_state)
     return rng.choice(n, size=max_points, replace=False)
 
+def plot_kmeans_elbow(
+    ks,
+    wcss,
+    title="KMeans Elbow",
+    filename="kmeans_elbow.png",
+    dpi=200,
+):
+    """
+    Plot WCSS vs number of clusters (k) for elbow analysis.
+    """
+    ks = np.asarray(ks)
+    wcss = np.asarray(wcss)
 
+    if len(ks) == 0 or len(wcss) == 0:
+        logger.warning("[plot_kmeans_elbow] Empty ks/wcss. Skipping elbow plot.")
+        return
+
+    if len(ks) != len(wcss):
+        raise ValueError("ks and wcss must have the same length")
+
+    logger.info("[plot_kmeans_elbow] Starting....")
+
+    plt.figure(figsize=(20, 6))
+    plt.plot(ks, wcss, marker="o")
+    plt.xticks(ks)
+    plt.xlabel("Number of clusters (k)")
+    plt.ylabel("WCSS / Inertia")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    _save_close(filename, dpi=dpi)
+
+    
 def plot_outliers(
     features,
     labels,
@@ -108,6 +139,112 @@ def plot_outliers(
     plt.legend()
     _save_close(filename, dpi=dpi)
 
+def plot_coverage_histogram(
+    min_dists,
+    title="Coverage Distance Histogram",
+    filename="coverage_hist.png",
+    bins=50,
+    dpi=200,
+):
+    """
+    Plot histogram of nearest-selected-point distances.
+    """
+    d = np.asarray(min_dists)
+
+    if len(d) == 0:
+        logger.warning("[plot_coverage_histogram] Empty distance array. Skipping plot.")
+        return
+
+    logger.info("[plot_coverage_histogram] Starting....")
+
+    plt.figure(figsize=(8, 6))
+    plt.hist(d, bins=bins, alpha=0.8)
+    plt.xlabel("Nearest selected-point distance")
+    plt.ylabel("Count")
+    plt.title(title)
+    _save_close(filename, dpi=dpi)
+
+def plot_cluster_map(
+    features,
+    cluster_labels,
+    title="Cluster Map",
+    filename="cluster_map.png",
+    method="pca",
+    max_plot=30000,
+    random_state=0,
+    dpi=200,
+):
+    """
+    Fast cluster visualization for full dataset.
+
+    Uses one scatter call with c=cluster_labels to avoid slow per-cluster loops.
+    """
+    logger.info(f"[plot_cluster_map] Starting.... method={method}")
+
+    X = np.asarray(features)
+    y = np.asarray(cluster_labels)
+
+    if len(X) != len(y):
+        raise ValueError("features and cluster_labels must have same length")
+
+    idx = _subsample_indices(len(X), max_points=max_plot, random_state=random_state)
+    Xp = X[idx]
+    yp = y[idx]
+
+    if len(X) > len(idx):
+        logger.info(f"[plot_cluster_map] Subsampling for plot: {len(idx)}/{len(X)}")
+
+    if method == "pca":
+        red, _ = project_pca2(Xp)
+
+    elif method == "tsne":
+        perplexity = min(30, max(5, len(Xp) - 1))
+        red = TSNE(
+            n_components=2,
+            init="pca",
+            learning_rate="auto",
+            perplexity=perplexity,
+            random_state=random_state,
+        ).fit_transform(Xp)
+
+    elif method == "umap":
+        try:
+            import umap
+            red = umap.UMAP(
+                n_components=2,
+                n_neighbors=15,
+                min_dist=0.1,
+                random_state=random_state,
+            ).fit_transform(Xp)
+        except ImportError:
+            logger.warning("[plot_cluster_map] UMAP not installed. Skipping UMAP cluster plot.")
+            return
+        except Exception as e:
+            logger.warning(f"[plot_cluster_map] UMAP failed. Skipping plot. Error: {e}")
+            return
+
+    else:
+        raise ValueError("method must be one of: 'pca', 'tsne', 'umap'")
+
+    plt.figure(figsize=(8, 6))
+    sc = plt.scatter(
+        red[:, 0],
+        red[:, 1],
+        c=yp,
+        s=10,
+        alpha=0.75,
+        cmap="tab20",
+    )
+    plt.title(title)
+    plt.xlabel("Component 1")
+    plt.ylabel("Component 2")
+
+    # optional compact colorbar
+    cbar = plt.colorbar(sc)
+    cbar.set_label("Cluster ID")
+
+    _save_close(filename, dpi=dpi)
+    
 def plot_pca(
     features,
     labels=None,
