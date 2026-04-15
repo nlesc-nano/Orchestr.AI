@@ -1,7 +1,7 @@
-# MLFF_QD  
+# Orchestr.AI  
 ## Unified Platform for Machine-Learning Force Fields for Quantum Dots 🚀
 
-**MLFF_QD** is a unified, modular, and engine‑agnostic framework for training state‑of‑the‑art machine learning force fields (MLFFs) for **quantum dots (QDs)**.  
+**Orchestr.AI** is a unified, modular, and engine‑agnostic framework for training state‑of‑the‑art machine learning force fields (MLFFs) for **quantum dots (QDs)**.  
 It integrates multiple ML engines under a single interface:
 
 ✅ **SchNet**
@@ -13,8 +13,8 @@ It integrates multiple ML engines under a single interface:
 ✅ **MACE**
 
 ## 1. Installation
-For the installation of the MLFF_QD platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
-MLFF_QD supports **three installation modes** depending on your system and preference:
+For the installation of the Orchestr.AI platform and all the required packages, we recommend to create a conda environment using Python 3.12. 
+Orchestr.AI supports **three installation modes** depending on your system and preference:
 
 
 | Mode | Tool | Recommended For |
@@ -27,8 +27,8 @@ MLFF_QD supports **three installation modes** depending on your system and prefe
 ### Clone the repository
 
 ```bash
-git clone https://github.com/nlesc-nano/MLFF_QD.git
-cd MLFF_QD
+git clone https://github.com/nlesc-nano/Orchestr.AI.git
+cd Orchestr.AI
 ```
 
 
@@ -43,29 +43,29 @@ Add `PRINT_VERSIONS=0` before the command to skip version checks and speed up in
 #### Option A — Conda
 ```bash
 PRINT_VERSIONS=0 bash scripts/setup_envs.sh
-source scripts/mlff_qd_env.sh
+source scripts/orchestr_ai_env.sh
 ```
 
 #### Option B — Micromamba
 ```bash
 PRINT_VERSIONS=0 bash scripts/setup_envs_micromamba.sh
-source scripts/mlff_qd_env.sh
+source scripts/orchestr_ai_env.sh
 ```
 
 #### Option C — Micromamba + UV
 ```bash
 PRINT_VERSIONS=0 bash scripts/setup_envs_micromamba_uv.sh
-source scripts/mlff_qd_env.sh
+source scripts/orchestr_ai_env.sh
 ```
 
 #### Option D — Legacy (manual setup)
 
 ```bash
 conda env create -f environment.yaml
-conda activate mlff
+conda activate orchestr_ai_legacy
 pip install mace-torch==0.3.14
 pip install -e .
-source scripts/mlff_qd_single_env.sh
+source scripts/orchestr_ai_single_env.sh
 ```
 
 
@@ -75,9 +75,9 @@ source scripts/mlff_qd_single_env.sh
 #### Example of internal dispatch
 
 ```text
-Running in env prefix: mlffqd-core
-[MLFF_QD] Dispatch: engine 'nequip' → env 'mlffqd-nequip'
-Running in env prefix: mlffqd-nequip
+Running in env prefix: orchestr_ai-core
+[Orchestr.AI] Dispatch: engine 'nequip' → env 'orchestr_ai-nequip'
+Running in env prefix: orchestr_ai-nequip
 ```
 
 <strong>What this setup does</strong>
@@ -86,7 +86,7 @@ Running in env prefix: mlffqd-nequip
   - core → SchNet, PaiNN, SO3net, FieldSchNet
   - nequip → NequIP, Allegro
   - mace → MACE
-- Installs mlff_qd in all environments
+- Installs orchestr_ai package in all environments
 - Enables automatic environment dispatch
 
 
@@ -98,15 +98,15 @@ Modify these scripts:
 - setup_envs_micromamba_uv.sh
 
 Environment variables for custom names:
-- MLFFQD_CORE_CONDA_ENV
-- MLFFQD_NEQUIP_CONDA_ENV
-- MLFFQD_MACE_CONDA_ENV
+- ORCHESTRAI_CORE_CONDA_ENV
+- ORCHESTRAI_NEQUIP_CONDA_ENV
+- ORCHESTRAI_MACE_CONDA_ENV
 
 Example:
 ```bash
-export MLFFQD_CORE_CONDA_ENV=mycore
-export MLFFQD_NEQUIP_CONDA_ENV=mynequip
-export MLFFQD_MACE_CONDA_ENV=mymace
+export ORCHESTRAI_CORE_CONDA_ENV=mycore
+export ORCHESTRAI_NEQUIP_CONDA_ENV=mynequip
+export ORCHESTRAI_MACE_CONDA_ENV=mymace
 ```
 
 </details>
@@ -148,17 +148,17 @@ An input file example for the preprocessing of the data can be found in `config_
 
 By default, the preprocessing code assumes that the input file is `preprocess_config.yaml`. If that is the case, it can be run as:
 ```bash
-python -m mlff_qd.preprocessing.generate_mlff_dataset
+python -m orchestr_ai.preprocessing.generate_mlff_dataset
 ```
 
 However, if an user wants to specify a different custom configuration file for the preprocessing, the code can be run as:
 ```bash
-python -m mlff_qd.preprocessing.generate_mlff_dataset --config my_experiment.yaml
+python -m orchestr_ai.preprocessing.generate_mlff_dataset --config my_experiment.yaml
 ```
 
 ### 3. Training Guide
 
-MLFF_QD supports **two** ways to train:
+Orchestr.AI supports **two** ways to train:
 
 
 ####  **A) Using Unified YAML (Recommended)**  
@@ -189,7 +189,7 @@ If both flags are given:
 
 The main entry:
 ```bash
-python -m mlff_qd.training
+python -m orchestr_ai.training
 ```
 Arguments:
 ```
@@ -208,15 +208,15 @@ Arguments:
 ##### 3.2.1 Generate engine YAML and immediately train
 
 ```bash
-python -m mlff_qd.training --config input.yaml --engine <engine_name> --train-after-generate
-python -m mlff_qd.training --config input.yaml --engine schnet --train-after-generate
+python -m orchestr_ai.training --config input.yaml --engine <engine_name> --train-after-generate
+python -m orchestr_ai.training --config input.yaml --engine schnet --train-after-generate
 ```
 
 ##### 3.2.2 Only generate engine YAML (no training)
 
 ```bash
-python -m mlff_qd.training --config input.yaml --engine <engine_name> --only-generate
-python -m mlff_qd.training --config input.yaml --engine schnet --only-generate
+python -m orchestr_ai.training --config input.yaml --engine <engine_name> --only-generate
+python -m orchestr_ai.training --config input.yaml --engine schnet --only-generate
 ```
 
 #### 3.3 Running on SLURM
@@ -250,7 +250,7 @@ sbatch run_training.sh input.yaml --engine allegro --train-after-generate
 **Train directly**
 
 ```bash
-python -m mlff_qd.training --config schnet.yaml --engine schnet
+python -m orchestr_ai.training --config schnet.yaml --engine schnet
 ```
 or SLURM:
 
@@ -263,7 +263,7 @@ sbatch run_training.sh schnet.yaml --engine schnet
 #### 3.5 Override dataset path (optional)
 But you can specify input data inside `input.yaml`.
 ```bash
-python -m mlff_qd.training --config schnet.yaml --engine schnet --input data/new.xyz
+python -m orchestr_ai.training --config schnet.yaml --engine schnet --input data/new.xyz
 ```
 
 
@@ -271,9 +271,9 @@ python -m mlff_qd.training --config schnet.yaml --engine schnet --input data/new
 
 | Task | Recommended Command |
 |------|---------------------|
-| Generate engine YAML only | `python -m mlff_qd.training --config input.yaml --engine <engine_name> --only-generate` |
-| Generate + Train | `python -m mlff_qd.training --config input.yaml --engine <engine_name> --train-after-generate` |
-| Train using engine-specific YAML | `python -m mlff_qd.training --config <engine_name>.yaml --engine <engine_name>` |
+| Generate engine YAML only | `python -m orchestr_ai.training --config input.yaml --engine <engine_name> --only-generate` |
+| Generate + Train | `python -m orchestr_ai.training --config input.yaml --engine <engine_name> --train-after-generate` |
+| Train using engine-specific YAML | `python -m orchestr_ai.training --config <engine_name>.yaml --engine <engine_name>` |
 | SLURM – Generate only | `sbatch run_training.sh input.yaml --engine <engine_name> --only-generate` |
 | SLURM – Generate + Train | `sbatch run_training.sh input.yaml --engine <engine_name> --train-after-generate` |
 
@@ -282,26 +282,26 @@ python -m mlff_qd.training --config schnet.yaml --engine schnet --input data/new
 ### Inference code
 After the training has finished, an user can run the inference code that generates the MLFF:
 ```bash
-python -m mlff_qd.training.inference
+python -m orchestr_ai.training.inference
 ```
 By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
 ```bash
-python -m mlff_qd.training.inference --config input_file.yaml
+python -m orchestr_ai.training.inference --config input_file.yaml
 ```
 
 After inference, if an user wants to use fine-tuning, that option is also available in the following way:
 ```bash
-python -m mlff_qd.training.fine_tuning
+python -m orchestr_ai.training.fine_tuning
 ```
 If an input file different from the default one was used, the procedure is the following:
 ```bash
-python -m mlff_qd.training.fine_tuning --config input_file.yaml
+python -m orchestr_ai.training.fine_tuning --config input_file.yaml
 ```
 
 ### Postprocessing
 More details will be added in future versions, but the postprocessing code is run as:
 ```bash
-python -m mlff_qd.postprocessing
+python -m orchestr_ai.postprocessing
 ```
 The postprocessing part of the code, requires also to install the following packages: plotly, kneed.
 

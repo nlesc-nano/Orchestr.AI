@@ -2,19 +2,15 @@
 *npz
 *hdf5
 
-src/mlff_qd.egg-info/*
-src/mlff_qd/__pycache__/*
-src/mlff_qd/fine_tuning/__pycache__/*
-src/mlff_qd/postprocessing/__pycache__/*
-src/mlff_qd/preprocessing/__pycache__/*
-src/mlff_qd/training/__pycache__/*
-src/mlff_qd/benchmarks/__pycache__/*
-src/mlff_qd/utils/__pycache__/*
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
 
 *png
 *log
-mlff_qd.egg-info/*
 bundle*
 
-src/mlff_qd/postprocessing/test/*/neighbor_cache/*
+src/orchestr_ai/postprocessing/test/*/neighbor_cache/*
 *.patch
