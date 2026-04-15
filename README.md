@@ -86,7 +86,7 @@ Running in env prefix: orchestr_ai-nequip
   - core → SchNet, PaiNN, SO3net, FieldSchNet
   - nequip → NequIP, Allegro
   - mace → MACE
-- Installs Orchestr.AI (mlff_qd package) in all environments
+- Installs orchestr_ai package in all environments
 - Enables automatic environment dispatch
 
 
@@ -148,12 +148,12 @@ An input file example for the preprocessing of the data can be found in `config_
 
 By default, the preprocessing code assumes that the input file is `preprocess_config.yaml`. If that is the case, it can be run as:
 ```bash
-python -m mlff_qd.preprocessing.generate_mlff_dataset
+python -m orchestr_ai.preprocessing.generate_mlff_dataset
 ```
 
 However, if an user wants to specify a different custom configuration file for the preprocessing, the code can be run as:
 ```bash
-python -m mlff_qd.preprocessing.generate_mlff_dataset --config my_experiment.yaml
+python -m orchestr_ai.preprocessing.generate_mlff_dataset --config my_experiment.yaml
 ```
 
 ### 3. Training Guide
@@ -189,7 +189,7 @@ If both flags are given:
 
 The main entry:
 ```bash
-python -m mlff_qd.training
+python -m orchestr_ai.training
 ```
 Arguments:
 ```
@@ -208,15 +208,15 @@ Arguments:
 ##### 3.2.1 Generate engine YAML and immediately train
 
 ```bash
-python -m mlff_qd.training --config input.yaml --engine <engine_name> --train-after-generate
-python -m mlff_qd.training --config input.yaml --engine schnet --train-after-generate
+python -m orchestr_ai.training --config input.yaml --engine <engine_name> --train-after-generate
+python -m orchestr_ai.training --config input.yaml --engine schnet --train-after-generate
 ```
 
 ##### 3.2.2 Only generate engine YAML (no training)
 
 ```bash
-python -m mlff_qd.training --config input.yaml --engine <engine_name> --only-generate
-python -m mlff_qd.training --config input.yaml --engine schnet --only-generate
+python -m orchestr_ai.training --config input.yaml --engine <engine_name> --only-generate
+python -m orchestr_ai.training --config input.yaml --engine schnet --only-generate
 ```
 
 #### 3.3 Running on SLURM
@@ -250,7 +250,7 @@ sbatch run_training.sh input.yaml --engine allegro --train-after-generate
 **Train directly**
 
 ```bash
-python -m mlff_qd.training --config schnet.yaml --engine schnet
+python -m orchestr_ai.training --config schnet.yaml --engine schnet
 ```
 or SLURM:
 
@@ -263,7 +263,7 @@ sbatch run_training.sh schnet.yaml --engine schnet
 #### 3.5 Override dataset path (optional)
 But you can specify input data inside `input.yaml`.
 ```bash
-python -m mlff_qd.training --config schnet.yaml --engine schnet --input data/new.xyz
+python -m orchestr_ai.training --config schnet.yaml --engine schnet --input data/new.xyz
 ```
 
 
@@ -271,9 +271,9 @@ python -m mlff_qd.training --config schnet.yaml --engine schnet --input data/new
 
 | Task | Recommended Command |
 |------|---------------------|
-| Generate engine YAML only | `python -m mlff_qd.training --config input.yaml --engine <engine_name> --only-generate` |
-| Generate + Train | `python -m mlff_qd.training --config input.yaml --engine <engine_name> --train-after-generate` |
-| Train using engine-specific YAML | `python -m mlff_qd.training --config <engine_name>.yaml --engine <engine_name>` |
+| Generate engine YAML only | `python -m orchestr_ai.training --config input.yaml --engine <engine_name> --only-generate` |
+| Generate + Train | `python -m orchestr_ai.training --config input.yaml --engine <engine_name> --train-after-generate` |
+| Train using engine-specific YAML | `python -m orchestr_ai.training --config <engine_name>.yaml --engine <engine_name>` |
 | SLURM – Generate only | `sbatch run_training.sh input.yaml --engine <engine_name> --only-generate` |
 | SLURM – Generate + Train | `sbatch run_training.sh input.yaml --engine <engine_name> --train-after-generate` |
 
@@ -282,26 +282,26 @@ python -m mlff_qd.training --config schnet.yaml --engine schnet --input data/new
 ### Inference code
 After the training has finished, an user can run the inference code that generates the MLFF:
 ```bash
-python -m mlff_qd.training.inference
+python -m orchestr_ai.training.inference
 ```
 By default, it will look for a input file called input.yaml. Thus, if an user wants to specify another input file, one can do the following:
 ```bash
-python -m mlff_qd.training.inference --config input_file.yaml
+python -m orchestr_ai.training.inference --config input_file.yaml
 ```
 
 After inference, if an user wants to use fine-tuning, that option is also available in the following way:
 ```bash
-python -m mlff_qd.training.fine_tuning
+python -m orchestr_ai.training.fine_tuning
 ```
 If an input file different from the default one was used, the procedure is the following:
 ```bash
-python -m mlff_qd.training.fine_tuning --config input_file.yaml
+python -m orchestr_ai.training.fine_tuning --config input_file.yaml
 ```
 
 ### Postprocessing
 More details will be added in future versions, but the postprocessing code is run as:
 ```bash
-python -m mlff_qd.postprocessing
+python -m orchestr_ai.postprocessing
 ```
 The postprocessing part of the code, requires also to install the following packages: plotly, kneed.
 

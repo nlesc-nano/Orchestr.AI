@@ -123,11 +123,11 @@ echo "SCRATCH_DIR=$SCRATCH_DIR"; ls -ld "$SCRATCH_DIR" "$SCRATCH_DIR/results" ||
 ###############################################
 # 7. RUN TRAINING
 # Purpose:
-#   - Execute mlff_qd.training with given config
+#   - Execute orchestr_ai.training with given config
 #   - Fail-fast if DDP configuration is invalid (handled in Python)
 ###############################################
 
-srun --chdir="$SCRATCH_DIR" python -m mlff_qd.training --config "$CFG_BASENAME" "${@:2}" || echo "Training failed, proceeding with copy"
+srun --chdir="$SCRATCH_DIR" python -m orchestr_ai.training --config "$CFG_BASENAME" "${@:2}" || echo "Training failed, proceeding with copy"
 
 ###############################################
 # 8. COPY RESULTS BACK
