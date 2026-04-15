@@ -36,7 +36,7 @@ data:
   - _target_: schnetpack.transform.RemoveOffsets
     property: energy
     remove_atomrefs: true
-    remove_mean: true
+    remove_mean: false
   - _target_: schnetpack.transform.MatScipyNeighborList
     cutoff: ${globals.cutoff}
   - _target_: schnetpack.transform.CastTo32
