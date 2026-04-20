@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./logo.png" width="50%" title="Orchestr.AI" alt="Orchestr.AI"/>
+  <img src="./logo.png" width="80%" title="Orchestr.AI" alt="Orchestr.AI"/>
 </p>
 <br/>
 
