@@ -2,7 +2,7 @@ import numpy as np
 import os
 from scipy.spatial import distance_matrix
 from ase.io import read, write
-from mlff_qd.utils.data_conversion import convert_to_npz
+from orchestr_ai.utils.data_conversion import convert_to_npz
 import logging
 logger = logging.getLogger(__name__)
         

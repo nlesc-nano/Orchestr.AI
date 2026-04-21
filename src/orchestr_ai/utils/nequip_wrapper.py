@@ -19,7 +19,7 @@ def run_nequip_training(config_path):
             config["optimizer_betas"] = tuple(config["optimizer_betas"])
         
         if "data" in config and "split_dataset" in config["data"] and "input_xyz_file" in config:
-            from mlff_qd.utils.data_conversion import preprocess_data_for_platform
+            from orchestr_ai.utils.data_conversion import preprocess_data_for_platform
             converted_file = preprocess_data_for_platform(config["input_xyz_file"], "nequip" if config.get("model", {}).get("_target_") != "allegro.model.AllegroModel" else "allegro")
             config["data"]["split_dataset"]["file_path"] = converted_file
         

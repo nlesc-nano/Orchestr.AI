@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from mlff_qd.utils.pca import project_pca2
+from orchestr_ai.utils.pca import project_pca2
 from sklearn.manifold import TSNE
 
 import logging
@@ -257,7 +257,7 @@ def plot_pca(
 ):
     """
     PCA plot for full dataset, optionally overlaying selected subset.
-    Uses project_pca2(...) from mlff_qd.utils.pca.
+    Uses project_pca2(...) from orchestr_ai.utils.pca.
     """
     logger.info("[plot_pca] Starting....")
 

@@ -2,10 +2,10 @@
 
 import argparse
 import logging
-from mlff_qd.preprocessing.consolidate_dataset import consolidate_dataset
-from mlff_qd.utils.compact import create_stacked_xyz
-from mlff_qd.utils.logging_utils import setup_logging
-from mlff_qd.utils.helpers import load_config_preproc, parse_args
+from orchestr_ai.preprocessing.consolidate_dataset import consolidate_dataset
+from orchestr_ai.utils.compact import create_stacked_xyz
+from orchestr_ai.utils.logging_utils import setup_logging
+from orchestr_ai.utils.helpers import load_config_preproc, parse_args
 
 setup_logging("data_preprocessing.log")
 logger = logging.getLogger(__name__)

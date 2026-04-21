@@ -9,12 +9,12 @@ from pytorch_lightning.loggers import CSVLogger
 
 import schnetpack as spk
 
-from mlff_qd.training.trainer_utils import setup_task_and_trainer
-from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+from orchestr_ai.training.trainer_utils import setup_task_and_trainer
+from orchestr_ai.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
         prepare_transformations, setup_data_module, show_dataset_info )
-from mlff_qd.utils.model import setup_model
-from mlff_qd.utils.helpers import load_config, parse_args, get_optimizer_class, get_scheduler_class
-from mlff_qd.utils.logging_utils import setup_logging
+from orchestr_ai.utils.model import setup_model
+from orchestr_ai.utils.helpers import load_config, parse_args, get_optimizer_class, get_scheduler_class
+from orchestr_ai.utils.logging_utils import setup_logging
 
 def set_seed(seed):
     np.random.seed(seed)

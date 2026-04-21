@@ -1,4 +1,4 @@
-# mlff_qd/utils/descriptors.py
+# orchestr_ai/utils/descriptors.py
 import numpy as np
 from ase import Atoms
 from dscribe.descriptors import SOAP

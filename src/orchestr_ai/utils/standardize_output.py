@@ -3,7 +3,7 @@ import shutil
 import logging
 import argparse
 import glob
-from mlff_qd.utils.yaml_utils import NPZ_ENGINES, XYZ_ENGINES
+from orchestr_ai.utils.yaml_utils import NPZ_ENGINES, XYZ_ENGINES
 
 def move_if_exists(src, dst_dir, rename=None):
     if os.path.exists(src):

@@ -17,20 +17,20 @@ from ase.io import read, write
 from sklearn.isotonic import IsotonicRegression
 
 # === Local Module Imports ===
-from mlff_qd.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
-from mlff_qd.postprocessing.calculator import setup_neighbor_list, evaluate_model
-from mlff_qd.postprocessing.stats import MLFFStats
-from mlff_qd.postprocessing.features import compute_features
-from mlff_qd.postprocessing.uq_metrics_calculator import calculate_uq_metrics
-from mlff_qd.postprocessing.mlff_plotting import plot_mlff_stats
-from mlff_qd.postprocessing.plotting import generate_uq_plots
+from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
+from orchestr_ai.postprocessing.calculator import setup_neighbor_list, evaluate_model
+from orchestr_ai.postprocessing.stats import MLFFStats
+from orchestr_ai.postprocessing.features import compute_features
+from orchestr_ai.postprocessing.uq_metrics_calculator import calculate_uq_metrics
+from orchestr_ai.postprocessing.mlff_plotting import plot_mlff_stats
+from orchestr_ai.postprocessing.plotting import generate_uq_plots
 # Active Learning & Geometry Sanity
-from mlff_qd.postprocessing.active_learning import (
+from orchestr_ai.postprocessing.active_learning import (
     calibrate_alpha_reg_gcv, 
     adaptive_learning_mig_pool_windowed, 
     adaptive_learning_ensemble_calibrated
 )
-from mlff_qd.postprocessing.rdf import (
+from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
     fast_filter_by_rdf_kdtree,
     debug_plot_rdfs

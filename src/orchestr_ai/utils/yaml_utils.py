@@ -766,23 +766,23 @@ def handle_mace_finetuning(engine_cfg, user_cfg):
     return engine_cfg
   
 def validate_split_file(split_file: str, engine: str = "unknown") -> str:
-    logging.info("[MLFF_QD][%s] Validating split_file: %s", engine, split_file)
+    logging.info("[Orchestr.AI][%s] Validating split_file: %s", engine, split_file)
 
     if not split_file.endswith(".npz"):
         raise ValueError(
-            f"[MLFF_QD][{engine}] split_file must be a .npz file, but got: {split_file}"
+            f"[Orchestr.AI][{engine}] split_file must be a .npz file, but got: {split_file}"
         )
 
     if not os.path.exists(split_file):
         raise FileNotFoundError(
-            f"[MLFF_QD][{engine}] split_file does not exist: {split_file}"
+            f"[Orchestr.AI][{engine}] split_file does not exist: {split_file}"
         )
 
     try:
         np.load(split_file)
     except Exception as e:
         raise ValueError(
-            f"[MLFF_QD][{engine}] split_file exists but is not a valid NPZ file: {split_file}"
+            f"[Orchestr.AI][{engine}] split_file exists but is not a valid NPZ file: {split_file}"
         ) from e
 
     return os.path.abspath(split_file)

@@ -13,7 +13,7 @@ def run_mace_training(config_path):
             config = yaml.safe_load(f) or {}
         
         # fail-fast validation (stop on mismatch)
-        from mlff_qd.utils.yaml_utils import validate_mace_launch_policy
+        from orchestr_ai.utils.yaml_utils import validate_mace_launch_policy
         validate_mace_launch_policy(config)
         
         # Lazy import: only required when actually running MACE

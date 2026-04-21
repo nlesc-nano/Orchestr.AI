@@ -2,11 +2,11 @@ import os
 import logging
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from mlff_qd.utils.callbacks import StopWhenLRBelow, StopWhenGoodEnough, EarlyStoppingWithLog
+from orchestr_ai.utils.callbacks import StopWhenLRBelow, StopWhenGoodEnough, EarlyStoppingWithLog
 import schnetpack as spk
-from mlff_qd.utils.yaml_utils import _int_or_len_devices 
+from orchestr_ai.utils.yaml_utils import _int_or_len_devices 
 
-from mlff_qd.utils.helpers import get_optimizer_class, get_scheduler_class 
+from orchestr_ai.utils.helpers import get_optimizer_class, get_scheduler_class 
 
 def setup_task_and_trainer(config, nnpot, outputs, folder):
     optimizer_name = config['training']['optimizer']['type']

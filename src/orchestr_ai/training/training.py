@@ -4,12 +4,12 @@ import logging
 import os
 import yaml 
 
-from mlff_qd.training.trainer_utils import setup_task_and_trainer
-from mlff_qd.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
+from orchestr_ai.training.trainer_utils import setup_task_and_trainer
+from orchestr_ai.utils.data_processing import ( load_data, preprocess_data, setup_logging_and_dataset,
         prepare_transformations, setup_data_module, show_dataset_info )
-from mlff_qd.utils.model import setup_model
-from mlff_qd.utils.helpers import load_config
-from mlff_qd.utils.yaml_utils import validate_split_file
+from orchestr_ai.utils.model import setup_model
+from orchestr_ai.utils.helpers import load_config
+from orchestr_ai.utils.yaml_utils import validate_split_file
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -73,7 +73,7 @@ def run_schnet_training(config_path, engine: str = "unknown"):
 
         split_file = validate_split_file(split_file, engine)
 
-    logging.info("[MLFF_QD][%s] Training resolved split_file from config: %s", engine, split_file)
+    logging.info("[Orchestr.AI][%s] Training resolved split_file from config: %s", engine, split_file)
     
     custom_data = setup_data_module(
         config,
