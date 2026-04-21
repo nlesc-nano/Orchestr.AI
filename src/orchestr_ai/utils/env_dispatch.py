@@ -1,4 +1,4 @@
-# src/mlff_qd/utils/env_dispatch.py
+# src/orchestr_ai/utils/env_dispatch.py
 from __future__ import annotations
 
 import json
@@ -140,7 +140,7 @@ def dispatch_to_engine_env(
     extra_args: Optional[list[str]] = None,
 ) -> "NoReturn":
     """
-    Re-exec `python -m mlff_qd.training ...` under the correct python.
+    Re-exec `python -m orchestr_ai.training ...` under the correct python.
 
     You call this early, after parsing args enough to know the engine.
     """
@@ -152,7 +152,7 @@ def dispatch_to_engine_env(
 
     # Re-run the same module under the other env, passing through args.
     # We preserve the user's args, and optionally allow extra args.
-    argv = [target_python, "-m", "mlff_qd.training"]
+    argv = [target_python, "-m", "orchestr_ai.training"]
     argv += sys.argv[1:]
     if extra_args:
         argv += extra_args

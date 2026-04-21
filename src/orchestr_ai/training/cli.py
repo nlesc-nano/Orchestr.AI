@@ -7,18 +7,18 @@ import tempfile
 import shutil
 import sys
 
-from mlff_qd.utils.helpers import load_config
-from mlff_qd.utils.yaml_utils import extract_engine_yaml, validate_input_file, apply_autoddp, _env_world_size
-from mlff_qd.utils.standardize_output import standardize_output
-from mlff_qd.utils.yaml_utils import get_dataset_paths_from_yaml
-from mlff_qd.utils.env_dispatch import EnvProfile, should_dispatch, dispatch_to_engine_env
+from orchestr_ai.utils.helpers import load_config
+from orchestr_ai.utils.yaml_utils import extract_engine_yaml, validate_input_file, apply_autoddp, _env_world_size
+from orchestr_ai.utils.standardize_output import standardize_output
+from orchestr_ai.utils.yaml_utils import get_dataset_paths_from_yaml
+from orchestr_ai.utils.env_dispatch import EnvProfile, should_dispatch, dispatch_to_engine_env
 try:
-    from mlff_qd.fine_tuning.fine_tune import main as run_schnet_fine_tuning
+    from orchestr_ai.fine_tuning.fine_tune import main as run_schnet_fine_tuning
 except ImportError:
     run_schnet_fine_tuning = None
 
 def run_benchmark(args, scratch_dir):
-    from mlff_qd.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
+    from orchestr_ai.benchmarks.benchmark_mlff import extract_metrics, post_process_benchmark
     import pandas as pd
     engines = ['schnet', 'painn', 'fusion', 'nequip', 'allegro', 'mace', 'so3net', 'field_schnet']
     benchmark_results_dir = './benchmark_results'
@@ -27,13 +27,13 @@ def run_benchmark(args, scratch_dir):
     results = []
     
     # Pre-resolve the input file for conversion if needed
-    from mlff_qd.utils.helpers import load_config
+    from orchestr_ai.utils.helpers import load_config
     tmp_cfg = load_config(args.config)
     resolved_input = args.input or tmp_cfg.get("common", {}).get("data", {}).get("input_xyz_file")
     
     db_path = None
     if resolved_input and os.path.exists(resolved_input):
-        from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
+        from orchestr_ai.utils.schnetpack_wrapper import convert_to_schnetpack_db
         data_cfg = tmp_cfg.get("common", {}).get("data", {})
         atomrefs_dict = data_cfg.get("atomrefs", None) if data_cfg.get("atomrefs_available", True) else None
         db_path = convert_to_schnetpack_db(resolved_input, scratch_dir, atomrefs_dict=atomrefs_dict)
@@ -370,7 +370,7 @@ def main():
 
         if input_path and not input_path.endswith(".db") and os.path.exists(input_path):
             logging.info(f"[{platform}] Converting {input_path} to SchNetPack DB...")
-            from mlff_qd.utils.schnetpack_wrapper import convert_to_schnetpack_db
+            from orchestr_ai.utils.schnetpack_wrapper import convert_to_schnetpack_db
 
             # Extract atomrefs for conversion
             if is_unified:
@@ -424,12 +424,12 @@ def main():
         is_finetuning = user_yaml_dict.get("common", {}).get("fine_tuning", {}).get("enabled", False)
         if platform in ["schnet", "painn", "fusion", "so3net", "field_schnet"]:
             
-            from mlff_qd.utils.schnetpack_wrapper import run_schnetpack_training
+            from orchestr_ai.utils.schnetpack_wrapper import run_schnetpack_training
             if is_finetuning:
                 print(f"[CLI] Fine-tuning mode detected for {platform}.")
                 
                 if run_schnet_fine_tuning is None:
-                    raise ImportError("Could not import 'main' from mlff_qd.fine_tuning.fine_tune.")
+                    raise ImportError("Could not import 'main' from orchestr_ai.fine_tuning.fine_tune.")
 
                 # Create mock args because fine_tune.py expects args.config
                 class MockArgs:
@@ -445,13 +445,13 @@ def main():
                     run_schnet_inference(engine_yaml, engine=platform)
 
         elif platform == "nequip":
-            from mlff_qd.utils.nequip_wrapper import run_nequip_training
+            from orchestr_ai.utils.nequip_wrapper import run_nequip_training
             run_nequip_training(os.path.abspath(engine_yaml))
         elif platform == "mace":
-            from mlff_qd.utils.mace_wrapper import run_mace_training
+            from orchestr_ai.utils.mace_wrapper import run_mace_training
             run_mace_training(engine_yaml)
         elif platform == "allegro":
-            from mlff_qd.utils.nequip_wrapper import run_nequip_training
+            from orchestr_ai.utils.nequip_wrapper import run_nequip_training
             run_nequip_training(os.path.abspath(engine_yaml))
 
         results_dir = get_output_dir(engine_cfg, platform)

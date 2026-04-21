@@ -5,9 +5,9 @@ import csv
 from typing import Dict
 from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
-from mlff_qd.utils.io import ( parse_stacked_xyz, save_stacked_xyz,
+from orchestr_ai.utils.io import ( parse_stacked_xyz, save_stacked_xyz,
                               save_to_npz )
-from mlff_qd.utils.plots import (
+from orchestr_ai.utils.plots import (
     plot_energy_and_forces,
     plot_pca,
     plot_umap,
@@ -16,10 +16,10 @@ from mlff_qd.utils.plots import (
     plot_cluster_map,
     plot_coverage_histogram,
 )
-from mlff_qd.utils.helpers import ( analyze_reference_forces,
+from orchestr_ai.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
-from mlff_qd.utils.pca import detect_outliers
-from mlff_qd.utils.cluster import (
+from orchestr_ai.utils.pca import detect_outliers
+from orchestr_ai.utils.cluster import (
     select_kmeans_medoids,
     compute_kmeans_elbow,
     suggest_elbow_k_values,
@@ -28,9 +28,9 @@ from mlff_qd.utils.cluster import (
     sample_indices,
     compute_subset_coverage_metrics,
 )
-from mlff_qd.utils.descriptors import compute_local_descriptors
-from mlff_qd.utils.centering import process_xyz
-from mlff_qd.utils.data_conversion import preprocess_data_for_platform
+from orchestr_ai.utils.descriptors import compute_local_descriptors
+from orchestr_ai.utils.centering import process_xyz
+from orchestr_ai.utils.data_conversion import preprocess_data_for_platform
 
 import logging
 logger = logging.getLogger(__name__)

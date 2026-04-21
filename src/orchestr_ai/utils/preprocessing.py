@@ -3,8 +3,8 @@ import random
 
 from periodictable import elements
 
-from mlff_qd.utils.analysis import compute_rmsd_matrix
-from mlff_qd.utils.io import save_xyz
+from orchestr_ai.utils.analysis import compute_rmsd_matrix
+from orchestr_ai.utils.io import save_xyz
 
 import logging
 logger = logging.getLogger(__name__)

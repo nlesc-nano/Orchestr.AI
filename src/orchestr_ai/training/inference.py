@@ -13,12 +13,12 @@ import math
 from schnetpack.data import ASEAtomsData
 import pytorch_lightning as pl 
 
-from mlff_qd.utils.logging_utils import timer, setup_logging
-from mlff_qd.utils.data_processing import ( preprocess_data, setup_logging_and_dataset,
+from orchestr_ai.utils.logging_utils import timer, setup_logging
+from orchestr_ai.utils.data_processing import ( preprocess_data, setup_logging_and_dataset,
         prepare_transformations, setup_data_module, show_dataset_info )
-from mlff_qd.utils.model import setup_model
-from mlff_qd.utils.helpers import load_config, parse_args
-from mlff_qd.utils.yaml_utils import validate_split_file 
+from orchestr_ai.utils.model import setup_model
+from orchestr_ai.utils.helpers import load_config, parse_args
+from orchestr_ai.utils.yaml_utils import validate_split_file 
 
 def convert_units(value, from_unit, to_unit):
     """Convert energy or force values between different unit systems."""
@@ -197,7 +197,7 @@ def run_schnet_inference(config_file, engine: str = "unknown"):
             split_file = os.path.join(os.path.dirname(os.path.abspath(ds_path)), split_file)
         split_file = validate_split_file(split_file, engine)
 
-    logging.info("[MLFF_QD][%s] Inference resolved split_file: %s", engine, split_file)
+    logging.info("[Orchestr.AI][%s] Inference resolved split_file: %s", engine, split_file)
 
     custom_data = setup_data_module(
         config,

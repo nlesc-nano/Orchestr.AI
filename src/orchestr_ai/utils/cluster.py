@@ -3,7 +3,7 @@ from typing import Sequence, Dict
 from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances_chunked
 from ase.data import atomic_numbers as _ase_atomic_numbers
-from mlff_qd.utils.io import parse_stacked_xyz
+from orchestr_ai.utils.io import parse_stacked_xyz
 
 import logging
 logger = logging.getLogger(__name__)

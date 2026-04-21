@@ -1,6 +1,6 @@
 import numpy as np
 
-from mlff_qd.utils.io import (
+from orchestr_ai.utils.io import (
     get_num_atoms,
     parse_positions_xyz,
     parse_forces_xyz,

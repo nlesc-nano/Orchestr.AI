@@ -21,7 +21,7 @@ if script_dir not in sys.path:
 
 # Import only the necessary plotting functions from plotting.py
 try:
-    from mlff_qd.postprocessing.plotting import (
+    from orchestr_ai.postprocessing.plotting import (
         generate_uq_plots,
         generate_al_influence_plots,
         generate_al_traditional_plots

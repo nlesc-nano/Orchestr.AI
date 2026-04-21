@@ -29,7 +29,7 @@ def detect_outliers(features, contamination: float, labels, title: str, filename
     y_pred = clf.fit_predict(features)   # -1 outlier, +1 inlier
 
     try:
-        from mlff_qd.utils.plots import plot_outliers
+        from orchestr_ai.utils.plots import plot_outliers
 
         plot_outliers(
             features,

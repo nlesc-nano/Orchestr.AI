@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from itertools import combinations
 from typing import Tuple, List, Optional
-from mlff_qd.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
+from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
 
 # =============================================================================
 # 1. MATH & LATENT SPACE UTILITIES
