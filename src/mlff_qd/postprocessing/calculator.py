@@ -267,6 +267,10 @@ class MaceCalculator(BaseCalculator):
         self.model.to(self.device)
         self.model.eval()
         
+        # Align global dtype with the loaded model
+        model_dtype = next(self.model.parameters()).dtype
+        torch.set_default_dtype(model_dtype)
+        
         # --- Robust z_table extraction ---
         from mace.tools import utils
         self.z_table = None
