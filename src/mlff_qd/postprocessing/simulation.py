@@ -21,6 +21,8 @@ from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.optimize import BFGSLineSearch
 from ase.vibrations import Vibrations
+from ase.calculators.calculator import Calculator, all_changes
+from ase.calculators.mixing import SumCalculator
 
 # --- Global Timing Variables ---
 last_call_time = None
@@ -246,6 +248,64 @@ def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file):
     """
     log_geo_opt_status(optimizer, atoms, log_file, trajectory_file)
 
+class SphericalConfinementCalculator(Calculator):
+    """
+    Constant-force spherical boundary (nanoreactor-style).
+
+        V_i = F0 · max(0, |r_i − c| − R)
+        F_i = −F0 · r̂_i   [atoms outside sphere], 0 otherwise
+
+    Parameters
+    ----------
+    radius : float
+        Sphere radius [Å].
+    force_constant : float
+        Inward force magnitude [eV/Å].
+    center : array-like or None
+        Fixed sphere center [Å].  If None AND atoms is None → frozen lazily
+        on the first calculate() call (= initial geometry centroid).
+    atoms : ase.Atoms or None
+        If provided, centroid of its positions is used as center immediately.
+        Ignored when center is given explicitly.
+    """
+    implemented_properties = ["energy", "forces"]
+
+    def __init__(self, radius, force_constant, center=None, atoms=None, **kwargs):
+        super().__init__(**kwargs)
+        self.radius         = float(radius)
+        self.force_constant = float(force_constant)
+
+        if center is not None:
+            self._center = np.asarray(center, dtype=np.float64)
+        elif atoms is not None:
+            self._center = atoms.get_positions().mean(axis=0)
+        else:
+            self._center = None
+
+    # ------------------------------------------------------------------
+    def calculate(self, atoms=None, properties=("energy", "forces"), system_changes=all_changes):
+        super().calculate(atoms, properties, system_changes)
+
+        # Freeze center once on first call (initial geometry centroid)
+        if self._center is None:
+            self._center = atoms.get_positions().mean(axis=0)
+
+        pos  = atoms.get_positions()
+        disp = pos - self._center
+        dist = np.linalg.norm(disp, axis=1)
+        pen  = dist - self.radius
+        
+        # energy = float(self.force_constant * np.maximum(pen, 0.0).sum())      # constant force
+        energy = float(0.5 * self.spring_constant * (pen[out] ** 2).sum())      # harmonic potential
+        forces = np.zeros_like(pos)
+        
+        out    = pen > 0.0
+        if out.any():
+            # −F0 → inward constant force
+            # forces[out] = ((-self.force_constant / dist[out, np.newaxis]) * disp[out])                    # constant force
+            forces[out] = ((-self.spring_constant * pen[out] / dist[out])[:, np.newaxis] * disp[out])       # harmonic potential
+
+        self.results = {"energy": energy, "forces": forces}
 
 # === Simulation Drivers ===
 
@@ -401,12 +461,22 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
     use_langevin  = md.get("use_langevin",     True)
     traj_file     = md.get("trajectory_file_md")
     log_file      = md.get("log_file")
+    radius        = md.get("confinement_radius", 10.0)
+    force_constant= md.get("confinement_force",  0.05)
+    center        = md.get("confinement_center",  None)
 
     # -----------------------------------------------------------------
     #  calculator + starting velocities
     # -----------------------------------------------------------------
     calc = get_ase_calculator(model_obj, config, device, neighbor_list)
-    atoms.calc = calc
+    
+    if md.get("reactor", False):
+        print(f"Using spherical confinement with radius {radius} Å and force {force_constant} eV/Å.")
+        confinement_calc = SphericalConfinementCalculator(radius, force_constant, center, atoms)
+        atoms.calc = SumCalculator([calc, confinement_calc])
+    else:
+        atoms.calc = calc
+    
     MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
 
     # -----------------------------------------------------------------
