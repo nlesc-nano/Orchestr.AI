@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="./logo.png" width="50%" title="Orchestr.AI" alt="Orchestr.AI"/>
+</p>
+<br/>
+
 # Orchestr.AI  
 ## Unified Platform for Machine-Learning Force Fields for Quantum Dots 🚀
 

@@ -1,0 +1,103 @@
+# ===========================
+# Experiment & Paths
+# ===========================
+name: HgTe_spin_multihead
+seed: 42
+log_level: INFO
+error_table: PerAtomMAE
+
+# ===========================
+# Hardware & Precision
+# ===========================
+device: cuda
+default_dtype: float32
+
+train_file: HgTe_spin_combined.xyz
+valid_fraction: 0.2
+# ===========================
+# Multihead dataset setup
+# ===========================
+multiheads_finetuning: false
+
+
+heads:
+  singlet:
+    train_file: HgTe_spin_combined.xyz
+    energy_key: E_singlet
+    forces_key: f_singlet
+    E0s: average
+
+  triplet:
+    train_file: HgTe_spin_combined.xyz
+    energy_key: E_triplet
+    forces_key: f_triplet
+    E0s: average
+
+
+# ===========================
+# Data loading
+# ===========================
+batch_size: 2
+valid_batch_size: 2
+num_workers: 8
+pin_memory: true
+
+# ===========================
+# Model Configuration
+# ===========================
+model: MACE
+r_max: 12.0
+num_radial_basis: 20
+num_cutoff_basis: 6
+max_ell: 3
+num_channels: 64
+max_L: 2
+num_interactions: 2
+correlation: 3
+compute_avg_num_neighbors: true
+scaling: rms_forces_scaling
+
+# ===========================
+# Forces / Stress
+# ===========================
+compute_forces: true
+compute_stress: false
+
+# ===========================
+# Training Parameters
+# ===========================
+max_num_epochs: 3
+patience: 30
+eval_interval: 1
+
+ema: true
+ema_decay: 0.99
+
+# ===========================
+# Stage Two / SWA
+# ===========================
+# swa: true
+# start_swa: 300
+# swa_energy_weight: 1000.0
+# swa_forces_weight: 100.0
+
+# ===========================
+# Loss Weights
+# ===========================
+loss: weighted
+energy_weight: 1.0
+forces_weight: 100.0
+
+# ===========================
+# Optimizer & Scheduler
+# ===========================
+optimizer: adam
+lr: 0.001
+weight_decay: 1e-5
+
+scheduler: ReduceLROnPlateau
+lr_factor: 0.8
+scheduler_patience: 5
+lr_scheduler_gamma: 0.9993
+
+# distributed: true
