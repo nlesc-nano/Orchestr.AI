@@ -100,36 +100,54 @@ class DatasetManager:
         
     def load_datasets(self):
         print("\n--- Setting up Datasets ---")
-        assert self.eval_path and os.path.exists(self.eval_path), f"Eval file not found: {self.eval_path}"
-        
-        val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval")
-        val_frames = read(self.eval_path, index=":", format="extxyz")
-        
         train_frames, train_E, train_F, train_pos = [], [], [], []
         if self.train_path and os.path.exists(self.train_path):
             train_E, train_F, train_pos = parse_extxyz(self.train_path, "training_data")
             train_frames = read(self.train_path, index=":", format="extxyz")
-            
-            # Redundancy Purge
-            eval_mask = []
-            energy_tol, pos_tol = 0.0001, 0.0001
-            for i, (e_eval, p_eval) in enumerate(zip(val_E, val_pos)):
-                is_redundant = False
-                e_eval_rounded = round(e_eval, 5)
-                for j, (e_train, p_train) in enumerate(zip(train_E, train_pos)):
-                    e_train_rounded = round(e_train, 5)
-                    if abs(e_eval_rounded - e_train_rounded) < energy_tol:
-                        if p_eval.shape[0] >= 3 and p_train.shape[0] >= 3:
-                            if np.allclose(p_eval[:3], p_train[:3], atol=pos_tol):
-                                print(f"Redundant structure found: Eval frame {i} is redundant with Training frame {j}.")
-                                is_redundant = True
-                                break
-                eval_mask.append(not is_redundant)
-            
-            val_frames = [f for f, k in zip(val_frames, eval_mask) if k]
-            val_E = [e for e, k in zip(val_E, eval_mask) if k]
-            val_F = [f for f, k in zip(val_F, eval_mask) if k]
-            print(f"Validation frames after purge: {len(val_frames)}")
+
+        if self.eval_path and not os.path.exists(self.eval_path):
+            raise FileNotFoundError(f"Eval file not found: {self.eval_path}")
+
+        val_frames, val_E, val_F, val_pos = [], [], [], []
+        if self.eval_path and os.path.exists(self.eval_path) and not self._same_train_eval_file():
+            val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval")
+            val_frames = read(self.eval_path, index=":", format="extxyz")
+
+            if train_frames:
+                # Redundancy purge only when train and eval are distinct sources.
+                eval_mask = []
+                energy_tol, pos_tol = 0.0001, 0.0001
+                for i, (e_eval, p_eval) in enumerate(zip(val_E, val_pos)):
+                    is_redundant = False
+                    e_eval_rounded = round(e_eval, 5)
+                    for j, (e_train, p_train) in enumerate(zip(train_E, train_pos)):
+                        e_train_rounded = round(e_train, 5)
+                        if abs(e_eval_rounded - e_train_rounded) < energy_tol:
+                            if p_eval.shape[0] >= 3 and p_train.shape[0] >= 3:
+                                if np.allclose(p_eval[:3], p_train[:3], atol=pos_tol):
+                                    print(f"Redundant structure found: Eval frame {i} is redundant with Training frame {j}.")
+                                    is_redundant = True
+                                    break
+                    eval_mask.append(not is_redundant)
+
+                val_frames = [f for f, k in zip(val_frames, eval_mask) if k]
+                val_E = [e for e, k in zip(val_E, eval_mask) if k]
+                val_F = [f for f, k in zip(val_F, eval_mask) if k]
+                print(f"Validation frames after purge: {len(val_frames)}")
+
+                if len(val_frames) == 0:
+                    print("[DatasetManager] Validation set is empty after purge. Falling back to internal split from training_data.")
+                    train_frames, train_E, train_F, train_pos, val_frames, val_E, val_F = self._split_from_single_source(
+                        train_frames, train_E, train_F, train_pos, "validation emptied by redundancy purge"
+                    )
+        elif train_frames:
+            reason = "eval_input_xyz not provided" if not self.eval_path else "training_data and eval_input_xyz point to the same file"
+            train_frames, train_E, train_F, train_pos, val_frames, val_E, val_F = self._split_from_single_source(
+                train_frames, train_E, train_F, train_pos, reason
+            )
+
+        if not train_frames and not val_frames:
+            raise ValueError("No labeled data found. Provide at least training_data or eval_input_xyz.")
 
         all_frames = train_frames + val_frames
         n_train, n_val = len(train_frames), len(val_frames)
@@ -150,6 +168,47 @@ class DatasetManager:
             "val_frames_ref": val_frames
         }
 
+    def _split_from_single_source(self, frames, energies, forces, positions, reason):
+        """Builds an internal train/validation split when only one labeled source is available."""
+        n_total = len(frames)
+        if n_total < 2:
+            raise ValueError("Need at least 2 labeled frames to create train/validation split.")
+
+        raw_val_size = float(self.eval_cfg.get("auto_val_size", 0.10))
+        n_val = int(np.ceil(n_total * raw_val_size))
+
+        n_val = max(1, max(int(self.eval_cfg.get("min_val_frames", 50)), n_val))
+        n_val = min(n_val, n_total - 1)
+
+        perm = np.random.default_rng(self.eval_cfg.get("split_seed", 42)).permutation(n_total)
+        val_idx = np.sort(perm[:n_val])
+        train_idx = np.sort(perm[n_val:])
+
+        train_frames = [frames[i] for i in train_idx]
+        train_E = [energies[i] for i in train_idx]
+        train_F = [forces[i] for i in train_idx]
+        train_pos = [positions[i] for i in train_idx]
+
+        val_frames = [frames[i] for i in val_idx]
+        val_E = [energies[i] for i in val_idx]
+        val_F = [forces[i] for i in val_idx]
+
+        print(
+            f"[DatasetManager] Using internal split ({reason}): "
+            f"train={len(train_frames)}, val={len(val_frames)}."
+        )
+
+        return train_frames, train_E, train_F, train_pos, val_frames, val_E, val_F
+
+    def _same_train_eval_file(self):
+        if not (self.train_path and self.eval_path):
+            return False
+        if not (os.path.exists(self.train_path) and os.path.exists(self.eval_path)):
+            return False
+        try:
+            return os.path.samefile(self.train_path, self.eval_path)
+        except OSError:
+            return os.path.abspath(self.train_path) == os.path.abspath(self.eval_path)
 
 class EnsembleRunner:
     """Handles loading, running, aggregating, and caching ensemble ML predictions."""
