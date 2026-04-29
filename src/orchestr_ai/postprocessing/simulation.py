@@ -130,11 +130,29 @@ def get_ase_calculator(model, config, device, neighbor_list):
                     model.z_table = z_table
                 else:
                     z_table = val
-                break
+                break    
 
         # 2. Return the official calculator using the correct plural 'models' keyword
         # We pass the model inside a list as MACE expects for ensembles or single models.
-        return MACECalculator(models=[model], device=str(device), default_dtype="float32")
+        # return MACECalculator(models=[model], device=str(device), default_dtype="float32")
+        mace_head = config.get("mace_head", None)
+
+        kwargs = {
+            "models": [model],
+            "device": str(device),
+            "default_dtype": "float32",
+        }
+
+        if mace_head is not None:
+            if mace_head in ["singlet", "triplet"]:
+                print(f"[MACE] Using head: {mace_head}")
+                kwargs["head"] = mace_head
+            else:
+                print(f"[MACE WARNING] Invalid mace_head='{mace_head}', using default head.")
+        else:
+            print("[MACE] No head specified, using default model head.")
+
+        return MACECalculator(**kwargs)
 
     elif framework == "nequip":
         from nequip.ase import NequIPCalculator
