@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import re
 from scipy.spatial import distance_matrix
 from ase.io import read, write
 from orchestr_ai.utils.data_conversion import convert_to_npz
@@ -23,7 +24,7 @@ def estimate_padding(positions):
     # clip between 3.0 and 10.0 Å for sanity
     return float(np.clip(padding, 3.0, 10.0))
 
-def process_xyz(input_file, output_file, png_file):
+def process_xyz(input_file, output_file, png_file, spin_state="single"):
     with open(input_file, 'r') as f:
         lines = f.readlines()
 
@@ -72,10 +73,27 @@ def process_xyz(input_file, output_file, png_file):
 
         # Write frame
         output_lines.append(f"{num_atoms}\n")
-        output_lines.append(
-            f'Lattice="{box_lengths[0]:.6f} 0.0 0.0 0.0 {box_lengths[1]:.6f} 0.0 0.0 0.0 {box_lengths[2]:.6f}" '
-            f'Properties=species:S:1:pos:R:3:forces:R:3 pbc="F F F" energy={header} - centered\n'
-        )
+        
+        if spin_state == "dual":
+            # Extract energies from the existing MACE header safely using regex
+            e_s_match = re.search(r"E_singlet=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            e_t_match = re.search(r"E_triplet=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            de_match  = re.search(r"Delta_E=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            
+            e_s = e_s_match.group(1) if e_s_match else "0.0"
+            e_t = e_t_match.group(1) if e_t_match else "0.0"
+            de  = de_match.group(1) if de_match else "0.0"
+            
+            output_lines.append(
+                f'Lattice="{box_lengths[0]:.6f} 0.0 0.0 0.0 {box_lengths[1]:.6f} 0.0 0.0 0.0 {box_lengths[2]:.6f}" '
+                f'Properties=species:S:1:pos:R:3:f_singlet:R:3:f_triplet:R:3 pbc="F F F" '
+                f'E_singlet={e_s} E_triplet={e_t} Delta_E={de} - centered\n'
+            )
+        else:
+            output_lines.append(
+                f'Lattice="{box_lengths[0]:.6f} 0.0 0.0 0.0 {box_lengths[1]:.6f} 0.0 0.0 0.0 {box_lengths[2]:.6f}" '
+                f'Properties=species:S:1:pos:R:3:forces:R:3 pbc="F F F" energy={header} - centered\n'
+            )
 
         for (elem, rest), pos in zip(frame_atoms, frame_positions):
             rest_str = ' '.join(rest)

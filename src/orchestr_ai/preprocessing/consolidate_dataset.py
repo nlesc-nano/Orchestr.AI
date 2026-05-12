@@ -5,7 +5,7 @@ import csv
 from typing import Dict
 from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
-from orchestr_ai.utils.io import ( parse_stacked_xyz, save_stacked_xyz,
+from orchestr_ai.utils.io import ( parse_stacked_xyz, parse_dual_spin_xyz, save_stacked_xyz,
                               save_to_npz )
 from orchestr_ai.utils.plots import (
     plot_energy_and_forces,
@@ -56,6 +56,8 @@ def export_subset_bundle(
     random_state=0,
     entropy_cluster_labels=None,
     entropy_k=None,
+    spin_state="single",
+    E_s=None, E_t=None, dE=None, F_s=None, F_t=None
 ):
     """
     Export one selected subset and all associated plots/files.
@@ -180,7 +182,15 @@ def export_subset_bundle(
 
     # 3) Save XYZ
     xyz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.xyz"
-    save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
+    if spin_state == "dual":
+        save_stacked_xyz(
+            xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms,
+            spin_state="dual",
+            E_s=E_s[sel_idxs], E_t=E_t[sel_idxs], dE=dE[sel_idxs],
+            F_s=F_s[sel_idxs], F_t=F_t[sel_idxs]
+        )
+    else:
+        save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
 
     # 4) Energy/force plots
     plot_energy_and_forces(
@@ -195,7 +205,7 @@ def export_subset_bundle(
     # 6) Centering
     centered_xyz = f"{prefix}_set{set_id}_{tgt}{tag}_centered.xyz"
     centered_png = f"{prefix}_set{set_id}_{tgt}{tag}_centered.png"
-    process_xyz(xyz_fn, centered_xyz, centered_png)
+    process_xyz(xyz_fn, centered_xyz, centered_png, spin_state=spin_state)
 
     # 7) Save NPZ
     npz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.npz"
@@ -451,10 +461,28 @@ def consolidate_dataset(cfg: Dict):
     max_cluster_map_k = ds.get("max_cluster_map_k", 500)
     elbow_selection_method = ds.get("elbow_selection_method", "knee")
 
+    # logger.info(f"[Consolidate] parsing {infile}…")
+    # # 2) Parse stacked XYZ
+    # E, P, F, atoms = parse_stacked_xyz(infile)
+    # labels_full = np.arange(len(E))  
+
     logger.info(f"[Consolidate] parsing {infile}…")
-    # 2) Parse stacked XYZ
-    E, P, F, atoms = parse_stacked_xyz(infile)
-    labels_full = np.arange(len(E))  
+    # 2) Parse stacked XYZ & Gatekeeper Logic
+    if ds.get("spin_state") == "dual":
+        E_s, E_t, dE, P, F_s, F_t, atoms = parse_dual_spin_xyz(infile)
+        target = ds.get("target_state", "singlet")
+        
+        if target == "triplet":
+            E_active, F_active = E_t, F_t
+        else:
+            E_active, F_active = E_s, F_s
+            
+        # Bind the active states to the classic E and F variables so the core pipeline runs untouched
+        E, F = E_active, F_active 
+        labels_full = np.arange(len(E))
+    else:
+        E, P, F, atoms = parse_stacked_xyz(infile)
+        labels_full = np.arange(len(E))
 
     n_frames = len(E)
     n_atoms  = len(atoms)
@@ -495,9 +523,15 @@ def consolidate_dataset(cfg: Dict):
     # 9) Keep only inliers
     labels = labels_full[inliers_mask]
     feats = feats[inliers_mask]
-    E = E[inliers_mask]
-    P = P[inliers_mask]
-    F = F[inliers_mask]
+    if ds.get("spin_state") == "dual":
+        E_s, E_t, dE = E_s[inliers_mask], E_t[inliers_mask], dE[inliers_mask]
+        P, F_s, F_t = P[inliers_mask], F_s[inliers_mask], F_t[inliers_mask]
+       
+        E = E_t if ds.get("target_state") == "triplet" else E_s
+        F = F_t if ds.get("target_state") == "triplet" else F_s
+    else:
+        E, P, F = E[inliers_mask], P[inliers_mask], F[inliers_mask]
+
     logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
 
     sizes, elbow_best_k = run_elbow_analysis(
@@ -552,7 +586,14 @@ def consolidate_dataset(cfg: Dict):
     )
 
     # 10) Save full inliers file
-    save_stacked_xyz(f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms)
+
+    if ds.get("spin_state") == "dual":
+        save_stacked_xyz(
+            f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms,
+            spin_state="dual", E_s=E_s, E_t=E_t, dE=dE, F_s=F_s, F_t=F_t
+        )
+    else:
+        save_stacked_xyz(f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms)
 
     # Precompute 1D atomic_numbers for NPZ
     atomic_numbers_1d = np.array([_ase_atomic_numbers[sym] for sym in atoms],
@@ -560,6 +601,14 @@ def consolidate_dataset(cfg: Dict):
 
     # Collect coverage metrics for CSV + log summary
     coverage_rows = []
+
+    dual_kwargs = {}
+    if ds.get("spin_state") == "dual":
+        dual_kwargs = {
+            "spin_state": "dual",
+            "E_s": E_s, "E_t": E_t, "dE": dE,
+            "F_s": F_s, "F_t": F_t
+        }
 
     # 11) K-means medoid selection for each target size, repeated n_sets times with different seeds
     for set_id in range(n_sets):
@@ -594,6 +643,7 @@ def consolidate_dataset(cfg: Dict):
                 random_state=set_seed,
                 entropy_cluster_labels=entropy_cluster_labels,
                 entropy_k=entropy_k,
+                **dual_kwargs
             )
 
             # ==========================================================
@@ -626,6 +676,7 @@ def consolidate_dataset(cfg: Dict):
                     random_state=set_seed,
                     entropy_cluster_labels=entropy_cluster_labels,
                     entropy_k=entropy_k,
+                    **dual_kwargs
                 )
 
             # ==========================================================
@@ -659,6 +710,7 @@ def consolidate_dataset(cfg: Dict):
                         random_state=set_seed,                
                         entropy_cluster_labels=entropy_cluster_labels,
                         entropy_k=entropy_k,
+                        **dual_kwargs
                     )
                 else:
                     logger.warning(

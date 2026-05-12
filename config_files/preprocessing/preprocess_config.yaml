@@ -7,6 +7,9 @@ dataset:
   # Uncomment 'input_file' if you have one file with positions, forces, and energy.
   # input_file: "dataset_pos_frc_ev.xyz"
 
+   spin_state: "dual"       # Options: "single" (default) or "dual"
+   target_state: "triplet"  # Options: "singlet" or "triplet" (Defines the Active state for ML stats)
+
   # --- Option B: Auto combine separate position and force files ---
   # Use these lines if your positions and forces are in two different files.
    pos_file: "HgTe-pos-1.xyz"
