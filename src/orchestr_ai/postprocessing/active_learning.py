@@ -219,6 +219,23 @@ class _PoolActiveLearner:
         self._print_summary()
         return self.sel_frames, self.final_pool_indices
 
+    @staticmethod
+    def _to_frame_list(forces, counts=None):
+        if isinstance(forces, list):
+            return forces
+        arr = np.asarray(forces)
+        if arr.ndim == 3:
+            return [arr[i] for i in range(arr.shape[0])]
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 3)
+        
+        out, idx = [], 0
+        for n_atoms in np.asarray(counts):
+            n_atoms = int(n_atoms)
+            out.append(arr[idx:idx + n_atoms])
+            idx += n_atoms
+        return out
+
     def _setup_latent_space(self):
         self.G_train = scipy.linalg.solve_triangular(self.L, self.F_train.T, lower=True).T
         self.G_pool  = scipy.linalg.solve_triangular(self.L, self.F_pool.T,  lower=True).T
@@ -237,29 +254,52 @@ class _PoolActiveLearner:
         self.dM_thr = np.quantile(dM_train, 99.0 / 100.0)
 
     def _setup_thresholds(self):
-        self.n_atoms_train = self.forces_train.shape[1]
-        self.n_atoms_pool = self.pool_frames[0].get_positions().shape[0]
+        if isinstance(self.forces_train, list):
+            forces_train_list = self.forces_train
+        else:
+            forces_train_arr = np.asarray(self.forces_train)
+            if forces_train_arr.ndim == 3:
+                forces_train_list = [forces_train_arr[i] for i in range(forces_train_arr.shape[0])]
+            else:
+                n_train = len(self.mu_E_frame_train)
+                n_atoms = forces_train_arr.shape[0] // n_train
+                counts = np.full(n_train, n_atoms, dtype=int)
+                forces_train_list = self._to_frame_list(forces_train_arr, counts=counts)
+        n_atoms_train_all = np.array([f.shape[0] for f in forces_train_list], dtype=int)
+        self.n_atoms_train = int(np.median(n_atoms_train_all))
+
+        n_atoms_pool_all = np.array([len(fr) for fr in self.pool_frames], dtype=int)
+        self.n_atoms_pool = int(np.median(n_atoms_pool_all))
 
         # Energies
-        self.mu_E_atom_train = self.mu_E_frame_train / self.n_atoms_train
-        self.sigma_E_atom_train = self.sigma_energy / self.n_atoms_train
-        self.mu_E_atom_pool = self.mu_E_pool / self.n_atoms_pool
-        self.sigma_E_atom_pool = self.sigma_E_pool / self.n_atoms_pool
+        n_train = len(self.mu_E_frame_train)
+        n_atoms_train = n_atoms_train_all[:n_train]
+
+        sigma_energy_arr = np.asarray(self.sigma_energy).reshape(-1)
+        if sigma_energy_arr.size == n_atoms_train_all.size:
+            self.sigma_E_atom_train = sigma_energy_arr / n_atoms_train_all
+        else:
+            self.sigma_E_atom_train = sigma_energy_arr[:n_train] / n_atoms_train
+
+        self.mu_E_atom_train = self.mu_E_frame_train / n_atoms_train
+        self.mu_E_atom_pool = self.mu_E_pool / n_atoms_pool_all
+        self.sigma_E_atom_pool = self.sigma_E_pool / n_atoms_pool_all
 
         self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5
-        self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / self.n_atoms_pool
-        self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / self.n_atoms_pool
+        self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / n_atoms_pool_all
+        self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / n_atoms_pool_all
 
         # Forces
-        sigma_F_train = self.sigma_force.reshape(self.forces_train.shape[0], self.n_atoms_train, 3)
-        self.sigma_F_train_max = sigma_F_train.max(axis=(1, 2))
-        self.sigma_F_train_mean = np.linalg.norm(sigma_F_train, axis=2).mean(axis=1)
-        self.frame_max_force_train = np.linalg.norm(self.forces_train, axis=2).max(axis=1)
+        sigma_F_train_list = self._to_frame_list(self.sigma_force, n_atoms_train_all)
+        self.sigma_F_train_max = np.array([s.max() for s in sigma_F_train_list])
+        self.sigma_F_train_mean = np.array([np.linalg.norm(s, axis=1).mean() for s in sigma_F_train_list])
+        self.frame_max_force_train = np.array([np.linalg.norm(f, axis=1).max() for f in forces_train_list])
 
-        sigma_F_pool_3d = self.sigma_F_pool.reshape(len(self.pool_frames), self.n_atoms_pool, 3)
-        self.sigma_F_pool_max = sigma_F_pool_3d.max(axis=(1, 2))
-        self.sigma_F_pool_mean = np.linalg.norm(sigma_F_pool_3d, axis=2).mean(axis=1)
-        self.frame_max_force_pool = np.linalg.norm(self.mu_F_pool.reshape(len(self.pool_frames), -1, 3), axis=2).max(axis=1)
+        mu_F_pool_list = self._to_frame_list(self.mu_F_pool, n_atoms_pool_all)
+        sigma_F_pool_list = self._to_frame_list(self.sigma_F_pool, n_atoms_pool_all)
+        self.sigma_F_pool_max = np.array([s.max() for s in sigma_F_pool_list])
+        self.sigma_F_pool_mean = np.array([np.linalg.norm(s, axis=1).mean() for s in sigma_F_pool_list])
+        self.frame_max_force_pool = np.array([np.linalg.norm(f, axis=1).max() for f in mu_F_pool_list])
 
         # Baseline Thresholds
         self.thr_sigma_E_low = np.percentile(self.sigma_E_atom_train, self.percentile_F_low)
@@ -529,7 +569,7 @@ class _PoolActiveLearner:
             # --- 3. Write Train Data Block ---
             fh.write("\n# TRAIN DATASET UNCERTAINTIES\n")
             fh.write("# idx  sigma_E_atom  sigma_F_max  sigma_F_mean  Fmax\n")
-            for t_idx in range(self.forces_train.shape[0]):
+            for t_idx in range(len(self.sigma_E_atom_train)):
                 fh.write(f"{t_idx:<6d} {self.sigma_E_atom_train[t_idx]:.6f} {self.sigma_F_train_max[t_idx]:.6f} "
                          f"{self.sigma_F_train_mean[t_idx]:.6f} {self.frame_max_force_train[t_idx]:.6f}\n")
 

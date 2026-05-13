@@ -154,8 +154,9 @@ class DatasetManager:
         train_mask = np.array([True]*n_train + [False]*n_val, dtype=bool)
         val_mask = np.array([False]*n_train + [True]*n_val, dtype=bool)
 
+        forces_train_list = train_F + val_F
         try:
-            forces_train_arr = np.stack(train_F + val_F, axis=0).astype(float)
+            forces_train_arr = np.stack(forces_train_list, axis=0).astype(float)
         except Exception:
             forces_train_arr = None
 
@@ -163,7 +164,8 @@ class DatasetManager:
 
         return {
             "frames": all_frames, "E_true": np.array(train_E + val_E), "F_true": train_F + val_F,
-            "F_train_arr": forces_train_arr, "train_mask": train_mask, "val_mask": val_mask,
+            "F_train_arr": forces_train_arr, "F_train_list": forces_train_list,
+            "train_mask": train_mask, "val_mask": val_mask,
             "train_idx": np.where(train_mask)[0], "val_idx": np.where(val_mask)[0],
             "val_frames_ref": val_frames
         }
@@ -479,6 +481,21 @@ class EvaluationPipeline:
         sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
         mu_L_pool = np.mean(ens_L_pool, axis=0)
 
+        def _split_flat_forces(frames, flat_forces):
+            if isinstance(flat_forces, list):
+                return flat_forces
+            arr = np.asarray(flat_forces)
+            if arr.ndim == 3:
+                return [arr[i] for i in range(arr.shape[0])]
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 3)
+            out, idx = [], 0
+            for fr in frames:
+                n_atoms = len(fr)
+                out.append(arr[idx:idx + n_atoms])
+                idx += n_atoms
+            return out
+
         # Thinning
         thin_idx = np.arange(len(pool_frames))[::self.eval_cfg.get("pool_stride", 1)]
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
@@ -487,10 +504,10 @@ class EvaluationPipeline:
         sigma_E_pool_thin = sigma_E_pool[thin_idx].astype(float)
         F_train_thin = mean_L_frame[self.ds["train_idx"]].astype(float)
 
-        # Thin the forces (reshape to 3D, slice, then pass)
-        n_atoms_pool = len(pool_frames[0])
-        mu_F_pool_thin = mu_F_pool.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
-        sigma_F_pool_thin = sigma_F_pool.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
+        mu_F_pool_list = _split_flat_forces(pool_frames, mu_F_pool)
+        sigma_F_pool_list = _split_flat_forces(pool_frames, sigma_F_pool)
+        mu_F_pool_thin = [mu_F_pool_list[i] for i in thin_idx]
+        sigma_F_pool_thin = [sigma_F_pool_list[i] for i in thin_idx]
 
         # RDF filtering
         rdf_cache = "rdf_thresholds_cache.npz"
@@ -541,9 +558,12 @@ class EvaluationPipeline:
 
         # Selection
         print("[Pool-AL] Running windowed active learning on thinned pool ...")
+        forces_train = self.ds.get("F_train_arr")
+        if forces_train is None:
+            forces_train = self.ds.get("F_train_list")
         _, sel_rel_thin = adaptive_learning_mig_pool_windowed(
             pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
-            forces_train=self.ds["F_train_arr"], sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
+            forces_train=forces_train, sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
             mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
             mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_thin, rdf_thresholds=rdf_thresholds,
             rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
