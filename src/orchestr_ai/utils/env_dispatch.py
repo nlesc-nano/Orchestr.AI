@@ -28,7 +28,7 @@ class EnvProfile:
 
 def _which_conda() -> Optional[str]:
     # Prefer the conda executable if present
-    return shutil.which("conda")
+    return shutil.which("conda") or shutil.which("micromamba")
 
 
 def _conda_env_prefix_by_name(conda_exe: str) -> Dict[str, str]:
