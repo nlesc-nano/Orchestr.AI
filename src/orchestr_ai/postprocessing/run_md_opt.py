@@ -14,6 +14,7 @@ import traceback
 import torch
 import torch.serialization
 torch.serialization.add_safe_globals([slice])
+import torch._inductor.codecache
 from ase.io import read
 
 from orchestr_ai.postprocessing.calculator import setup_neighbor_list

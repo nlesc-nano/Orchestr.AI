@@ -136,7 +136,13 @@ def get_ase_calculator(model, config, device, neighbor_list):
 
         # 2. Return the official calculator using the correct plural 'models' keyword
         # We pass the model inside a list as MACE expects for ensembles or single models.
-        return MACECalculator(models=[model], device=str(device), default_dtype="float32")
+        try:
+            import cuequivariance_torch
+            cueq = True
+        except ImportError:
+            cueq = False
+        
+        return MACECalculator(models=[model], device=str(device), default_dtype="float32", enable_cueq=cueq)
 
     elif framework == "nequip":
         from nequip.ase import NequIPCalculator
