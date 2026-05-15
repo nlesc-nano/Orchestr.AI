@@ -11,7 +11,9 @@ from orchestr_ai.utils.helpers import load_config
 from orchestr_ai.utils.yaml_utils import extract_engine_yaml, validate_input_file, apply_autoddp, _env_world_size
 from orchestr_ai.utils.standardize_output import standardize_output
 from orchestr_ai.utils.yaml_utils import get_dataset_paths_from_yaml
-from orchestr_ai.utils.env_dispatch import EnvProfile, should_dispatch, dispatch_to_engine_env
+# from orchestr_ai.utils.env_dispatch import EnvProfile, should_dispatch, dispatch_to_engine_env
+from orchestr_ai.utils.env_dispatch import maybe_dispatch_to_engine_env
+from orchestr_ai.utils.engine_profiles import get_default_engine_profiles
 try:
     from orchestr_ai.fine_tuning.fine_tune import main as run_schnet_fine_tuning
 except ImportError:
@@ -289,9 +291,6 @@ def patch_and_validate_yaml(yaml_path, platform, xyz_path=None, scratch_dir=None
             yaml.dump(config, f)
         return yaml_path
 
-def _env_label() -> str:
-    return os.path.dirname(os.path.dirname(sys.executable))
-
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO)
@@ -299,36 +298,12 @@ def main():
     platform = (args.engine or config.get("platform", "")).lower()
 
     # --- Env dispatch (single command, multi-env) ---
-    core_env   = os.getenv("ORCHESTRAI_CORE_CONDA_ENV", "orchestr_ai-core")
-    nequip_env = os.getenv("ORCHESTRAI_NEQUIP_CONDA_ENV", "orchestr_ai-nequip")
-    mace_env   = os.getenv("ORCHESTRAI_MACE_CONDA_ENV", "orchestr_ai-mace")
-
-    engine_to_profile = {
-        "schnet":          EnvProfile(conda_env=core_env),
-        "painn":           EnvProfile(conda_env=core_env),
-        "so3net":          EnvProfile(conda_env=core_env),
-        "field_schnet":    EnvProfile(conda_env=core_env),
-        "fusion":          EnvProfile(conda_env=core_env),
-        "nequip":          EnvProfile(conda_env=nequip_env),
-        "allegro":         EnvProfile(conda_env=nequip_env),
-        "mace":            EnvProfile(conda_env=mace_env),
-    }
-    # ---- PRINT CURRENT ENV ----
-    print(f"Running in env prefix: {_env_label()}")
-
-    single_env_mode = os.getenv("ORCHESTRAI_SINGLE_ENV", "0") == "1"
-
-    if not single_env_mode and should_dispatch(platform, engine_to_profile):
-        target = engine_to_profile[platform].conda_env
-        print(f"[Orchestr.AI] Dispatch: engine '{platform}' → env '{target}'")
-        dispatch_to_engine_env(platform, engine_to_profile)
-
-    if single_env_mode:
-        print(f"[Orchestr.AI] Single-env mode enabled; no dispatch for engine '{platform}'")
-
-    print(f"[Orchestr.AI] Engine: {platform} | Env prefix: {_env_label()}")
-    print(f"[Orchestr.AI] Python: {sys.executable}")
-
+    engine_to_profile = get_default_engine_profiles()
+    maybe_dispatch_to_engine_env(
+        engine=platform,
+        module="orchestr_ai.training",
+        engine_to_profile=engine_to_profile,
+    )
 
     all_platforms = ["nequip", "allegro", "mace", "schnet", "painn", "fusion", "so3net", "field_schnet"]
     if platform not in all_platforms:

@@ -18,7 +18,7 @@ from sklearn.isotonic import IsotonicRegression
 
 # === Local Module Imports ===
 from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
-from orchestr_ai.postprocessing.calculator import setup_neighbor_list, evaluate_model
+from orchestr_ai.postprocessing.calculator import evaluate_model
 from orchestr_ai.postprocessing.stats import MLFFStats
 from orchestr_ai.postprocessing.features import compute_features
 from orchestr_ai.postprocessing.uq_metrics_calculator import calculate_uq_metrics
@@ -272,7 +272,18 @@ class EvaluationPipeline:
         self.eval_log = self.eval_cfg.get("eval_log_file", "eval_log.txt")
         open(self.eval_log, "w").close() 
         
-        self.neighbour_list = setup_neighbor_list(config)
+        framework = self.config.get("model_framework", "schnetpack").lower()
+
+        if framework == "allegro":
+            framework = "nequip"
+
+        self.neighbour_list = None
+
+        if framework == "schnetpack":
+            from orchestr_ai.postprocessing.neighbor_list import setup_neighbor_list
+
+            self.neighbour_list = setup_neighbor_list(config)
+
         self.do_plot = self.eval_cfg.get("plot", False)
         
         self.pool_xyz_path = self.eval_cfg.get("unlabeled_pool_path", None)
@@ -316,7 +327,7 @@ class EvaluationPipeline:
         pred_E, pred_F, _, _ = evaluate_model(
             self.ds["frames"], list(self.ds["E_true"]), self.ds["F_true"],
             base_model, self.device, self.eval_cfg.get("batch_size", 32),
-            log_path=self.eval_log, config=self.config, neighbor_list=self.neighbour_list
+            eval_log_file=self.eval_log, config=self.config, neighbor_list=self.neighbour_list
         )
         
         if isinstance(pred_F, np.ndarray) and pred_F.ndim == 3:
