@@ -132,9 +132,7 @@ def get_ase_calculator(model, config, device, neighbor_list):
                     z_table = val
                 break    
 
-        # 2. Return the official calculator using the correct plural 'models' keyword
-        # We pass the model inside a list as MACE expects for ensembles or single models.
-        # return MACECalculator(models=[model], device=str(device), default_dtype="float32")
+        # 2. Return the official calculator using the correct plural 'models' keyword.
         mace_head = config.get("mace_head", None)
 
         kwargs = {
@@ -143,14 +141,12 @@ def get_ase_calculator(model, config, device, neighbor_list):
             "default_dtype": "float32",
         }
 
-        if mace_head is not None:
-            if mace_head in ["singlet", "triplet"]:
-                print(f"[MACE] Using head: {mace_head}")
-                kwargs["head"] = mace_head
-            else:
-                print(f"[MACE WARNING] Invalid mace_head='{mace_head}', using default head.")
+        if isinstance(mace_head, str) and mace_head.strip():
+            mace_head = mace_head.strip()
+            print(f"[MACE] Requested head from config: {mace_head}")
+            kwargs["head"] = mace_head
         else:
-            print("[MACE] No head specified, using default model head.")
+            print("[MACE] No mace_head specified. Using MACE default head.")
 
         return MACECalculator(**kwargs)
 
