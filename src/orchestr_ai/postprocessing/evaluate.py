@@ -15,9 +15,13 @@ import torch.serialization
 torch.serialization.add_safe_globals([slice])
 import matplotlib.pyplot as plt
 from ase.io import read, write
-from sklearn.isotonic import IsotonicRegression
 
 # === Local Module Imports ===
+from orchestr_ai.postprocessing.metrics import (
+    _split_atom_vectors,
+    _force_summary_from_flat,
+    _std_from_sums
+)
 from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
 from orchestr_ai.postprocessing.calculator import evaluate_model
 from orchestr_ai.postprocessing.stats import MLFFStats
@@ -29,54 +33,14 @@ from orchestr_ai.postprocessing.plotting import generate_uq_plots
 from orchestr_ai.postprocessing.active_learning import (
     calibrate_alpha_reg_gcv, 
     adaptive_learning_mig_pool_windowed, 
-    adaptive_learning_ensemble_calibrated
+    adaptive_learning_ensemble_calibrated,
+    UQCalibrator
 )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
     fast_filter_by_rdf_kdtree,
     debug_plot_rdfs
 )
-
-def _split_atom_vectors(flat_vectors, frames):
-    """Split a concatenated atom vector array into one array per frame."""
-    arr = np.asarray(flat_vectors, dtype=float)
-    if arr.ndim == 1:
-        if arr.size % 3 != 0:
-            raise ValueError(f"Expected force components divisible by 3, got shape {arr.shape}")
-        arr = arr.reshape(-1, 3)
-    counts = [len(fr) for fr in frames]
-    if arr.shape[0] != sum(counts):
-        raise ValueError(f"Atom-vector length mismatch: got {arr.shape[0]}, expected {sum(counts)}")
-    splits = np.cumsum(counts)[:-1]
-    return [x.astype(float, copy=False) for x in np.split(arr, splits)]
-
-
-def _force_summary_from_flat(force_vectors, frames):
-    force_frames = _split_atom_vectors(force_vectors, frames)
-    mean_norm = np.array(
-        [
-            np.nanmean(np.linalg.norm(f, axis=1)) if np.asarray(f).size else np.nan
-            for f in force_frames
-        ],
-        dtype=float,
-    )
-    max_norm = np.array(
-        [
-            np.nanmax(np.linalg.norm(f, axis=1)) if np.asarray(f).size else np.nan
-            for f in force_frames
-        ],
-        dtype=float,
-    )
-    return mean_norm, max_norm
-
-
-def _std_from_sums(sum_values, sum_sq_values, n_samples):
-    if n_samples <= 1:
-        return np.zeros_like(sum_values, dtype=float)
-    mean_values = sum_values / n_samples
-    var = (sum_sq_values - n_samples * mean_values**2) / (n_samples - 1)
-    return np.sqrt(np.maximum(var, 0.0))
-
 
 def _parse_bool_like(value, default=False):
     if value is None:
@@ -148,61 +112,6 @@ def _evaluate_model_chunk_worker(payload):
         torch.cuda.empty_cache()
 
     return preds
-
-class UQCalibrator:
-    """Handles Isotonic Regression mapping for Bias and Uncertainty Calibration."""
-    def __init__(self):
-        self.iso_unc = IsotonicRegression(y_min=0.0, out_of_bounds='clip')
-        self.iso_bias = IsotonicRegression(y_min=None, y_max=None, out_of_bounds='clip')
-        self.is_fitted = False
-
-    def fit(self, mu_E_train, sigma_E_train, delta_E_train):
-        print("\n[UQCalibrator] Fitting BIAS and UNCERTAINTY calibrators...")
-        self.iso_bias.fit(mu_E_train, delta_E_train)
-        self.iso_unc.fit(sigma_E_train, np.abs(delta_E_train))
-        self.is_fitted = True
-        print("[UQCalibrator] Fitting complete.")
-
-    def calibrate(self, mu_E_raw, sigma_E_raw):
-        if not self.is_fitted:
-            raise RuntimeError("Calibrator must be fitted before calling calibrate().")
-        bias_correction = self.iso_bias.predict(mu_E_raw)
-        sigma_calibrated = self.iso_unc.predict(sigma_E_raw)
-        mu_E_calibrated = mu_E_raw - bias_correction
-        return mu_E_calibrated, sigma_calibrated, bias_correction
-
-    def plot_diagnostics(self, mu_E_train, sigma_E_train, delta_E_train, out_dir="uq_plots"):
-        if not self.is_fitted: return
-        os.makedirs(out_dir, exist_ok=True)
-        delta_train_abs = np.abs(delta_E_train)
-        
-        # Uncertainty Scatter
-        plt.figure(figsize=(5,4))
-        plt.scatter(sigma_E_train, delta_train_abs, s=8, alpha=0.6, label="train")
-        s_sorted = np.sort(sigma_E_train)
-        plt.plot(s_sorted, self.iso_unc.predict(s_sorted), color="C1", lw=2, label="isotonic f(σ)")
-        plt.plot([s_sorted.min(), s_sorted.max()], [s_sorted.min(), s_sorted.max()], 'k--', lw=1, label="identity")
-        plt.xlabel("ensemble σ (training)")
-        plt.ylabel("|ΔE| (training)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"{out_dir}/calibration_scatter.png", dpi=200)
-        plt.close()
-
-        # Bias Scatter
-        plt.figure(figsize=(5,4))
-        plt.scatter(mu_E_train, delta_E_train, s=8, alpha=0.6, label="train (signed error)")
-        e_sorted = np.sort(mu_E_train)
-        plt.plot(e_sorted, self.iso_bias.predict(e_sorted), color="C1", lw=2, label="isotonic bias f(E)")
-        plt.plot([e_sorted.min(), e_sorted.max()], [0, 0], 'k--', lw=1, label="zero bias")
-        plt.xlabel("Predicted Energy μE (training)")
-        plt.ylabel("Signed Error ΔE (training)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"{out_dir}/bias_calibration_scatter.png", dpi=200)
-        plt.close()
-        print(f"[UQCalibrator] Diagnostic plots saved to {out_dir}/")
-
 
 class DatasetManager:
     """Handles loading, purging, and masking of Train and Validation datasets."""

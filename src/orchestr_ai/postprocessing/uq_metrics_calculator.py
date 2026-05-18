@@ -21,14 +21,9 @@ from scipy.integrate import trapezoid
 from scipy.stats import norm, spearmanr, ks_2samp, normaltest
 
 # ---------------------------------------------------------------------------
-# Logging – configured *once* when the module is imported
+# Logging
 # ---------------------------------------------------------------------------
-_LOGGER = logging.getLogger("uq_metrics")
-if not _LOGGER.handlers:  # avoid duplicate handlers under re‑import
-    _LOGGER.setLevel(logging.INFO)
-    _h = logging.FileHandler("metrics.log", mode="a", encoding="utf‑8")
-    _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-    _LOGGER.addHandler(_h)
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ This module implements:
   2. A highly modular Class-based Pool Active Learner for OOD sampling.
 """
 
+import os
 import time
 import numpy as np
 import scipy.optimize
@@ -20,6 +21,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from itertools import combinations
 from typing import Tuple, List, Optional
+from sklearn.isotonic import IsotonicRegression
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
 
 # =============================================================================
@@ -648,3 +650,57 @@ def adaptive_learning_mig_pool_windowed(*args, **kwargs):
         "sigma_force", "mu_E_frame_train", "mu_E_pool", "sigma_E_pool", "mu_F_pool", 
         "sigma_F_pool", "rdf_thresholds"], args)), **kwargs)
     return learner.run()
+
+class UQCalibrator:
+    """Handles Isotonic Regression mapping for Bias and Uncertainty Calibration."""
+    def __init__(self):
+        self.iso_unc = IsotonicRegression(y_min=0.0, out_of_bounds='clip')
+        self.iso_bias = IsotonicRegression(y_min=None, y_max=None, out_of_bounds='clip')
+        self.is_fitted = False
+
+    def fit(self, mu_E_train, sigma_E_train, delta_E_train):
+        print("\n[UQCalibrator] Fitting BIAS and UNCERTAINTY calibrators...")
+        self.iso_bias.fit(mu_E_train, delta_E_train)
+        self.iso_unc.fit(sigma_E_train, np.abs(delta_E_train))
+        self.is_fitted = True
+        print("[UQCalibrator] Fitting complete.")
+
+    def calibrate(self, mu_E_raw, sigma_E_raw):
+        if not self.is_fitted:
+            raise RuntimeError("Calibrator must be fitted before calling calibrate().")
+        bias_correction = self.iso_bias.predict(mu_E_raw)
+        sigma_calibrated = self.iso_unc.predict(sigma_E_raw)
+        mu_E_calibrated = mu_E_raw - bias_correction
+        return mu_E_calibrated, sigma_calibrated, bias_correction
+
+    def plot_diagnostics(self, mu_E_train, sigma_E_train, delta_E_train, out_dir="uq_plots"):
+        if not self.is_fitted: return
+        os.makedirs(out_dir, exist_ok=True)
+        delta_train_abs = np.abs(delta_E_train)
+        
+        # Uncertainty Scatter
+        plt.figure(figsize=(5,4))
+        plt.scatter(sigma_E_train, delta_train_abs, s=8, alpha=0.6, label="train")
+        s_sorted = np.sort(sigma_E_train)
+        plt.plot(s_sorted, self.iso_unc.predict(s_sorted), color="C1", lw=2, label="isotonic f(σ)")
+        plt.plot([s_sorted.min(), s_sorted.max()], [s_sorted.min(), s_sorted.max()], 'k--', lw=1, label="identity")
+        plt.xlabel("ensemble σ (training)")
+        plt.ylabel("|ΔE| (training)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{out_dir}/calibration_scatter.png", dpi=200)
+        plt.close()
+
+        # Bias Scatter
+        plt.figure(figsize=(5,4))
+        plt.scatter(mu_E_train, delta_E_train, s=8, alpha=0.6, label="train (signed error)")
+        e_sorted = np.sort(mu_E_train)
+        plt.plot(e_sorted, self.iso_bias.predict(e_sorted), color="C1", lw=2, label="isotonic bias f(E)")
+        plt.plot([e_sorted.min(), e_sorted.max()], [0, 0], 'k--', lw=1, label="zero bias")
+        plt.xlabel("Predicted Energy μE (training)")
+        plt.ylabel("Signed Error ΔE (training)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{out_dir}/bias_calibration_scatter.png", dpi=200)
+        plt.close()
+        print(f"[UQCalibrator] Diagnostic plots saved to {out_dir}/")
