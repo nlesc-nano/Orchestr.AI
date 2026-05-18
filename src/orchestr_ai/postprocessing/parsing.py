@@ -75,20 +75,42 @@ def save_stacked_xyz_schnetpack(filename, energies, positions, forces, atom_type
     """
     Saves data back out to the same custom XYZ format.
     """
-    num_frames, num_atoms, _ = positions.shape
-    print(f"Saving custom XYZ file to {filename} ({num_frames} frames, {num_atoms} atoms)...")
+    frame_positions = [np.asarray(p, dtype=float) for p in positions]
+    frame_forces = [np.asarray(f, dtype=float) for f in forces]
+    energies = np.asarray(energies, dtype=float)
+
+    if len(frame_positions) != len(frame_forces) or len(frame_positions) != len(energies):
+        raise ValueError("positions, forces, and energies must contain one entry per frame")
+
+    if len(atom_types) > 0 and isinstance(atom_types[0], str):
+        frame_atom_types = [atom_types for _ in frame_positions]
+    else:
+        frame_atom_types = atom_types
+
+    num_frames = len(frame_positions)
+    print(f"Saving custom XYZ file to {filename} ({num_frames} frames)...")
     
     try:
         with open(filename, "w") as f:
             for idx in range(num_frames):
+                num_atoms = frame_positions[idx].shape[0]
+                if frame_forces[idx].shape != frame_positions[idx].shape:
+                    raise ValueError(
+                        f"Frame {idx} force shape {frame_forces[idx].shape} "
+                        f"does not match positions {frame_positions[idx].shape}"
+                    )
+                if len(frame_atom_types[idx]) != num_atoms:
+                    raise ValueError(
+                        f"Frame {idx} has {num_atoms} atoms but "
+                        f"{len(frame_atom_types[idx])} atom labels"
+                    )
                 f.write(f"{num_atoms}\n")
                 f.write(f" {energies[idx]:.8f}\n")
                 for a_idx in range(num_atoms):
-                    atom = atom_types[a_idx]
-                    x, y, z = positions[idx, a_idx]
-                    fx, fy, fz = forces[idx, a_idx]
+                    atom = frame_atom_types[idx][a_idx]
+                    x, y, z = frame_positions[idx][a_idx]
+                    fx, fy, fz = frame_forces[idx][a_idx]
                     f.write(f"{atom:<3s} {x:15.8f} {y:15.8f} {z:15.8f} {fx:15.8f} {fy:15.8f} {fz:15.8f}\n")
         print(f"File saved: {filename}")
     except Exception as e:
         print(f"Error saving to {filename}: {e}")
-

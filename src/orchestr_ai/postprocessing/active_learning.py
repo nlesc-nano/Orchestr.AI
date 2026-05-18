@@ -26,6 +26,46 @@ from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference
 # 1. MATH & LATENT SPACE UTILITIES
 # =============================================================================
 
+def _as_frame_arrays(values, *, frame_counts=None, name="values") -> List[np.ndarray]:
+    """Return per-frame arrays, accepting either a list or a concatenated array."""
+    if values is None:
+        raise ValueError(f"{name} is required")
+
+    if isinstance(values, (list, tuple)):
+        return [np.asarray(v, dtype=float) for v in values]
+
+    arr = np.asarray(values, dtype=float)
+    if frame_counts is None:
+        if arr.ndim < 3:
+            raise ValueError(f"{name} needs frame_counts when passed as a concatenated array")
+        return [np.asarray(v, dtype=float) for v in arr]
+
+    if arr.ndim == 1:
+        if arr.size % 3 != 0:
+            raise ValueError(f"{name} component array must be divisible by 3")
+        arr = arr.reshape(-1, 3)
+    if arr.shape[0] != int(np.sum(frame_counts)):
+        raise ValueError(f"{name} length mismatch: got {arr.shape[0]}, expected {int(np.sum(frame_counts))}")
+
+    splits = np.cumsum(frame_counts)[:-1]
+    return [np.asarray(v, dtype=float) for v in np.split(arr, splits)]
+
+
+def _frame_counts_from_arrays(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.asarray(a).shape[0] for a in arrays], dtype=float)
+
+
+def _frame_force_max(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.nanmax(np.linalg.norm(a, axis=1)) if np.asarray(a).size else np.nan for a in arrays], dtype=float)
+
+
+def _frame_sigma_max(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.nanmax(np.linalg.norm(a, axis=1)) if np.asarray(a).size else np.nan for a in arrays], dtype=float)
+
+
+def _frame_sigma_mean_norm(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.nanmean(np.linalg.norm(a, axis=1)) if np.asarray(a).size else np.nan for a in arrays], dtype=float)
+
 def calibrate_alpha_reg_gcv(
     F_eval: np.ndarray,
     y: np.ndarray,
@@ -126,6 +166,10 @@ def adaptive_learning_ensemble_calibrated(
     
     eps = 1e-9
     train_idx, eval_idx = np.where(~eval_mask)[0], np.where(eval_mask)[0]
+    atom_counts = np.array([len(fr) for fr in all_frames], dtype=float)
+    if np.any(atom_counts <= 0):
+        raise ValueError("All frames must contain at least one atom for active learning")
+    delta_E_atom = np.asarray(delta_E_frame, dtype=float) / atom_counts
     
     # 1. RDF Filter
     if reference_frames:
@@ -136,7 +180,7 @@ def adaptive_learning_ensemble_calibrated(
         realistic_mask = np.ones(len(eval_idx), dtype=bool)
 
     # 2. Latent space calculations
-    alpha_sq, lam_opt, terms_lat, G_all, L_E = calibrate_alpha_reg_gcv(mean_l_al, delta_E_frame)
+    alpha_sq, lam_opt, terms_lat, G_all, L_E = calibrate_alpha_reg_gcv(mean_l_al, delta_E_atom)
     G_train, G_eval_E = G_all[train_idx], G_all[eval_idx]
 
     # 3. Setup force RMSEs
@@ -150,7 +194,7 @@ def adaptive_learning_ensemble_calibrated(
 
     rmse_F_eval = rmse_F_pf_max[eval_idx]
     rmse_Fmean_eval = rmse_F_pf_mean[eval_idx]
-    delta_E_eval = np.abs(delta_E_frame[eval_idx])
+    delta_E_eval = np.abs(delta_E_atom[eval_idx])
 
     # 4. Normalization and Ranking
     z_sigma = (delta_E_eval - delta_E_eval.mean()) / (delta_E_eval.std() + eps)
@@ -237,29 +281,69 @@ class _PoolActiveLearner:
         self.dM_thr = np.quantile(dM_train, 99.0 / 100.0)
 
     def _setup_thresholds(self):
-        self.n_atoms_train = self.forces_train.shape[1]
-        self.n_atoms_pool = self.pool_frames[0].get_positions().shape[0]
+        self.forces_train_frames = _as_frame_arrays(self.forces_train, name="forces_train")
+        self.train_atom_counts = _frame_counts_from_arrays(self.forces_train_frames)
+        self.pool_atom_counts = np.array([len(fr) for fr in self.pool_frames], dtype=float)
+
+        self.sigma_force_frames = _as_frame_arrays(
+            self.sigma_force,
+            frame_counts=self.train_atom_counts.astype(int),
+            name="sigma_force",
+        )
+        has_pool_force_summaries = all(
+            hasattr(self, name)
+            for name in ("sigma_F_pool_mean", "sigma_F_pool_max", "frame_max_force_pool")
+        )
+
+        if has_pool_force_summaries:
+            self.sigma_F_pool_mean = np.asarray(self.sigma_F_pool_mean, dtype=float)
+            self.sigma_F_pool_max = np.asarray(self.sigma_F_pool_max, dtype=float)
+            self.frame_max_force_pool = np.asarray(self.frame_max_force_pool, dtype=float)
+
+            if not (
+                len(self.sigma_F_pool_mean)
+                == len(self.sigma_F_pool_max)
+                == len(self.frame_max_force_pool)
+                == len(self.pool_frames)
+            ):
+                raise ValueError("Pool force summary arrays must contain one value per pool frame")
+        else:
+            self.mu_F_pool_frames = _as_frame_arrays(
+                self.mu_F_pool,
+                frame_counts=self.pool_atom_counts.astype(int),
+                name="mu_F_pool",
+            )
+            self.sigma_F_pool_frames = _as_frame_arrays(
+                self.sigma_F_pool,
+                frame_counts=self.pool_atom_counts.astype(int),
+                name="sigma_F_pool",
+            )
+
+        if len(self.sigma_energy) != len(self.train_atom_counts):
+            raise ValueError(
+                f"sigma_energy must contain one value per training frame; got {len(self.sigma_energy)} "
+                f"for {len(self.train_atom_counts)} training frames"
+            )
 
         # Energies
-        self.mu_E_atom_train = self.mu_E_frame_train / self.n_atoms_train
-        self.sigma_E_atom_train = self.sigma_energy / self.n_atoms_train
-        self.mu_E_atom_pool = self.mu_E_pool / self.n_atoms_pool
-        self.sigma_E_atom_pool = self.sigma_E_pool / self.n_atoms_pool
+        self.mu_E_atom_train = np.asarray(self.mu_E_frame_train, dtype=float) / self.train_atom_counts
+        self.sigma_E_atom_train = np.asarray(self.sigma_energy, dtype=float) / self.train_atom_counts
+        self.mu_E_atom_pool = np.asarray(self.mu_E_pool, dtype=float) / self.pool_atom_counts
+        self.sigma_E_atom_pool = np.asarray(self.sigma_E_pool, dtype=float) / self.pool_atom_counts
 
         self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5
-        self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / self.n_atoms_pool
-        self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / self.n_atoms_pool
+        self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / self.pool_atom_counts
+        self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / self.pool_atom_counts
 
         # Forces
-        sigma_F_train = self.sigma_force.reshape(self.forces_train.shape[0], self.n_atoms_train, 3)
-        self.sigma_F_train_max = sigma_F_train.max(axis=(1, 2))
-        self.sigma_F_train_mean = np.linalg.norm(sigma_F_train, axis=2).mean(axis=1)
-        self.frame_max_force_train = np.linalg.norm(self.forces_train, axis=2).max(axis=1)
+        self.sigma_F_train_max = _frame_sigma_max(self.sigma_force_frames)
+        self.sigma_F_train_mean = _frame_sigma_mean_norm(self.sigma_force_frames)
+        self.frame_max_force_train = _frame_force_max(self.forces_train_frames)
 
-        sigma_F_pool_3d = self.sigma_F_pool.reshape(len(self.pool_frames), self.n_atoms_pool, 3)
-        self.sigma_F_pool_max = sigma_F_pool_3d.max(axis=(1, 2))
-        self.sigma_F_pool_mean = np.linalg.norm(sigma_F_pool_3d, axis=2).mean(axis=1)
-        self.frame_max_force_pool = np.linalg.norm(self.mu_F_pool.reshape(len(self.pool_frames), -1, 3), axis=2).max(axis=1)
+        if not has_pool_force_summaries:
+            self.sigma_F_pool_max = _frame_sigma_max(self.sigma_F_pool_frames)
+            self.sigma_F_pool_mean = _frame_sigma_mean_norm(self.sigma_F_pool_frames)
+            self.frame_max_force_pool = _frame_force_max(self.mu_F_pool_frames)
 
         # Baseline Thresholds
         self.thr_sigma_E_low = np.percentile(self.sigma_E_atom_train, self.percentile_F_low)
@@ -349,7 +433,7 @@ class _PoolActiveLearner:
             self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, 2.0 * self.sigma_F_train_max.max())
             self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, 2.0 * self.sigma_F_train_mean.max())
             self.thr_Fmag_hi_eff = max(self.thr_Fmag, 2.0 * self.frame_max_force_train.max())
-            self.allowed_offset_eff = 2.0 / self.n_atoms_train
+            self.allowed_offset_eff = 2.0 / float(np.nanmedian(self.train_atom_counts))
 
         # Count coverage
         n_hi_E = (self.sigma_E_atom_pool > self.thr_sigma_E_low).sum()
@@ -529,7 +613,7 @@ class _PoolActiveLearner:
             # --- 3. Write Train Data Block ---
             fh.write("\n# TRAIN DATASET UNCERTAINTIES\n")
             fh.write("# idx  sigma_E_atom  sigma_F_max  sigma_F_mean  Fmax\n")
-            for t_idx in range(self.forces_train.shape[0]):
+            for t_idx in range(len(self.forces_train_frames)):
                 fh.write(f"{t_idx:<6d} {self.sigma_E_atom_train[t_idx]:.6f} {self.sigma_F_train_max[t_idx]:.6f} "
                          f"{self.sigma_F_train_mean[t_idx]:.6f} {self.frame_max_force_train[t_idx]:.6f}\n")
 

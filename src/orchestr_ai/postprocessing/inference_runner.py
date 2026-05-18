@@ -6,6 +6,7 @@ import time
 import traceback
 
 import numpy as np
+import torch
 
 
 class InferenceRunner:
@@ -13,10 +14,17 @@ class InferenceRunner:
     Orchestrates batching, timing, logging, and standardized output collection.
     """
 
-    def __init__(self, calculator, batch_size: int, log_file: str | None = None):
+    def __init__(
+        self,
+        calculator,
+        batch_size: int,
+        log_file: str | None = None,
+        clear_cuda_cache: bool = False,
+    ):
         self.calculator = calculator
         self.batch_size = batch_size
         self.log_file = log_file
+        self.clear_cuda_cache = clear_cuda_cache
 
     def run(self, frames, true_energies=None, true_forces=None):
         n_frames = len(frames)
@@ -119,6 +127,10 @@ class InferenceRunner:
                 )
                 all_latent_frame.extend([np.nan] * actual_size)
                 all_latent_atom.extend([np.nan] * actual_size)
+
+            finally:
+                if self.clear_cuda_cache and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             cum_eval_time += time.time() - batch_start_time
             batches_processed += 1

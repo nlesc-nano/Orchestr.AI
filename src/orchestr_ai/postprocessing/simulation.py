@@ -50,6 +50,8 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                 try:
                     if hasattr(model_obj, 'postprocessors'):
                         for pp in model_obj.postprocessors:
+                            add_mean_enabled = bool(getattr(pp, "add_mean", False))
+                            add_atomrefs_enabled = bool(getattr(pp, "add_atomrefs", True))
                             
                             # 1. Aggressively extract mean
                             extracted_mean = 0.0
@@ -59,26 +61,31 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                                 extracted_mean = getattr(pp, 'mean').item()
                             
                             # 2. Flag and process the mean
-                            if abs(extracted_mean) > 1e-8:
+                            if add_mean_enabled and abs(extracted_mean) > 1e-8:
                                 self.mean_offset = extracted_mean
                                 print(f"\n⚠️  FLAG: Non-zero dataset mean offset detected: {self.mean_offset:.6f} eV/atom")
                                 print("    -> The model was trained with 'remove_mean: true'.")
                                 print("    -> For optimal transferability, consider training future")
                                 print("       models with 'remove_mean: false'.\n")
+                            elif abs(extracted_mean) > 1e-8:
+                                self.mean_offset = 0.0
+                                print("\nFLAG: Stored dataset mean detected, but AddOffsets.add_mean is false.")
+                                print("    -> Not applying a size-extensive mean offset during postprocessing.\n")
                             else:
                                 self.mean_offset = 0.0
                                 print("\n✅ FLAG: Mean offset is 0.0 (Trained with 'remove_mean: false').")
                                 print("    -> Model relies purely on isolated atomic energies.\n")
                                 
                             # 3. Extract atomic references
-                            for ref_name in ['atomref', 'z_offsets']:
-                                if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
-                                    ref_val = getattr(pp, ref_name)
-                                    if isinstance(ref_val, torch.Tensor):
-                                        self.atomref = ref_val.detach().cpu().numpy().astype(np.float64).flatten()
-                                    elif hasattr(ref_val, 'weight'):
-                                        self.atomref = ref_val.weight.detach().cpu().numpy().astype(np.float64).flatten()
-                                    print(f"Successfully extracted '{ref_name}' (isolated atomic energies).")
+                            if add_atomrefs_enabled:
+                                for ref_name in ['atomref', 'z_offsets']:
+                                    if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
+                                        ref_val = getattr(pp, ref_name)
+                                        if isinstance(ref_val, torch.Tensor):
+                                            self.atomref = ref_val.detach().cpu().numpy().astype(np.float64).flatten()
+                                        elif hasattr(ref_val, 'weight'):
+                                            self.atomref = ref_val.weight.detach().cpu().numpy().astype(np.float64).flatten()
+                                        print(f"Successfully extracted '{ref_name}' (isolated atomic energies).")
                                     
                         # Disable internal postprocessors 
                         model_obj.postprocessors = torch.nn.ModuleList([])
@@ -617,4 +624,3 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         traceback.print_exc() # Print traceback for VDOS errors
 
     return frequencies_cm
-

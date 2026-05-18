@@ -132,7 +132,7 @@ class MaceCalculator(BaseCalculator):
             ]
 
             latent_frame_list = [
-                np.sum(l, axis=0).astype(np.float64)
+                np.mean(l, axis=0).astype(np.float64)
                 for l in latent_atom_list
             ]
 
