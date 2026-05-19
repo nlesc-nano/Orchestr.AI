@@ -272,40 +272,53 @@ def fast_filter_connectivity_and_arms(frames, ok_mask, local_radius=None, margin
     # --- PASS 3: Apply Filters ---
     n_rejected_fracture = 0
     n_rejected_arm = 0
+    
+    t_start = time.time()
+    if verbose:
+        print(f"[AL] Filtering {n_frames} frames...")
 
     for i, frame in enumerate(frames):
-        if ok_mask[i]:
-            pos = frame.get_positions()
-            tree = cKDTree(pos)
+        if not ok_mask[i]:
+            continue
 
-            # Check 1: Graph Connectivity
-            adj_matrix = tree.sparse_distance_matrix(tree, max_allowed_bond)
-            n_components, labels = connected_components(csgraph=adj_matrix, directed=False)
+        if verbose and i > 0 and i % 500 == 0:
+            elapsed = time.time() - t_start
+            print(f"  -> Processed {i}/{n_frames} frames... ({elapsed:.1f}s)")
 
-            if n_components > 1:
-                ok_mask[i] = False
-                n_rejected_fracture += 1
-                if verbose:
-                    unique, counts = np.unique(labels, return_counts=True)
-                    # Convert numpy int64 to standard Python ints for clean printing!
-                    detached_sizes = [int(c) for c in sorted(counts)[:-1]]
-                    print(f"Frame {i:4d} rejected: Cluster fractured! ({n_components} pieces. Chunk sizes: {detached_sizes})")
-                continue
+        pos = frame.get_positions()
+        tree = cKDTree(pos)
 
-            # Check 2: Volumetric Local Density
-            neighbor_counts = [len(n) for n in tree.query_ball_point(pos, r=local_radius)]
-            min_atom_neighbors = min(neighbor_counts)
+        # 1. Connectivity Check (Fracture)
+        # We use sparse distance matrix as a graph adjacency matrix
+        adj_matrix = tree.sparse_distance_matrix(tree, max_allowed_bond)
+        n_components, labels = connected_components(csgraph=adj_matrix, directed=False)
 
-            if min_atom_neighbors < min_allowed_neighbors:
-                ok_mask[i] = False
-                n_rejected_arm += 1
-                if verbose:
-                    print(f"Frame {i:4d} rejected: Unphysical 'arm' detected! "
-                          f"(Min neighbors in {local_radius:.2f} Å is {min_atom_neighbors}, required {min_allowed_neighbors})")
+        if n_components > 1:
+            ok_mask[i] = False
+            n_rejected_fracture += 1
+            continue
+
+        # 2. Local Density Check (Arms)
+        # Vectorized neighbor counting is much faster than Python list comprehensions
+        try:
+            # SciPy 1.10+ optimized path
+            neighbor_counts = tree.query_ball_point(pos, r=local_radius, return_length=True)
+        except TypeError:
+            # Fallback for older SciPy: Use the sparse matrix structure
+            adj_density = tree.sparse_distance_matrix(tree, local_radius)
+            neighbor_counts = adj_density.getnnz(axis=1)
+
+        min_atom_neighbors = np.min(neighbor_counts)
+
+        if min_atom_neighbors < min_allowed_neighbors:
+            ok_mask[i] = False
+            n_rejected_arm += 1
 
     if verbose:
+        total_time = time.time() - t_start
         print(f"[Connectivity/Arm] Cohesion sanity: {ok_mask.sum()}/{n_frames} frames OK. "
-              f"Rejected {n_rejected_fracture} (fractured), {n_rejected_arm} (arms).")
+              f"Rejected {n_rejected_fracture} (fractured), {n_rejected_arm} (arms). "
+              f"Total time: {total_time:.2f}s")
 
     return ok_mask
 
