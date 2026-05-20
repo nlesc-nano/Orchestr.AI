@@ -16,36 +16,41 @@ import torch.serialization
 torch.serialization.add_safe_globals([slice])
 from ase.io import read
 
-from orchestr_ai.postprocessing.calculator import setup_neighbor_list
-from orchestr_ai.postprocessing.simulation import run_md, run_geo_opt, run_vibrational_analysis
-from orchestr_ai.postprocessing.evaluate import run_eval
 from orchestr_ai.utils.helpers import load_config
+from orchestr_ai.utils.env_dispatch import maybe_dispatch_to_engine_env
+from orchestr_ai.utils.engine_profiles import (
+    detect_engine_from_config,
+    get_default_engine_profiles,
+    is_schnetpack_engine,
+    model_framework_from_engine,
+)
 
-# === Setup Logging and Unbuffered Output ===
-sys.path.insert(0, os.getcwd())
-try:
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[logging.StreamHandler(sys.stdout)]
-        )
-    # Reduce verbosity for specific libraries
-    logging.getLogger('matplotlib').setLevel(logging.WARNING)
-    logging.getLogger('pycaret').setLevel(logging.WARNING)
-    logging.getLogger('ase').propagate = False
+def _setup_logging_and_output() -> None:
+    sys.path.insert(0, os.getcwd())
 
-    # Set stdout and stderr to be unbuffered
-    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
-    sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
-except Exception as e:
-    print(f"Warning: Could not set unbuffered output/logging: {e}")
+    try:
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s - %(levelname)s - %(message)s",
+                handlers=[logging.StreamHandler(sys.stdout)],
+            )
 
+        logging.getLogger("matplotlib").setLevel(logging.WARNING)
+        logging.getLogger("pycaret").setLevel(logging.WARNING)
+        logging.getLogger("ase").propagate = False
+
+        sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
+        sys.stderr = os.fdopen(sys.stderr.fileno(), "w", buffering=1)
+
+    except Exception as e:
+        print(f"Warning: Could not set unbuffered output/logging: {e}")
 
 def main():
     """
     Main function to execute MLFF-based simulations or evaluation tasks.
+    Dispatch must happen before importing SchNetPack-dependent modules.
     
     Steps:
     - Load configuration from "config.yaml"
@@ -53,10 +58,10 @@ def main():
     - Load and set up the ML model and neighbor list
     - Execute the task specified by 'run_type': MD, GEO_OPT, VIB, or EVAL
     """
+    _setup_logging_and_output()
+
     logging.info("--- Starting MLFF Simulation/Evaluation ---")
 
-    # --- Load Configuration ---
-    global config  # Global usage assumed by evaluate.py if needed
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     config = load_config(config_path)
 
@@ -64,12 +69,39 @@ def main():
         logging.error("Exiting due to configuration error.")
         sys.exit(1)
 
+    # Detect engine/platform early from config.
+    try:
+        engine = detect_engine_from_config(config)
+    except Exception as e:
+        logging.error(f"Could not detect engine/platform: {e}")
+        sys.exit(1)
+
+    # Normalize model_framework for downstream postprocessing.
+    # Old configs can still use model_framework directly.
+    config.setdefault("model_framework", model_framework_from_engine(engine))
+
+    framework = config.get("model_framework", "schnetpack").lower()
+    if framework == "allegro":
+        framework = "nequip"
+        config["model_framework"] = "nequip"
+
+    # Dispatch before importing calculator/evaluate/simulation.
+    maybe_dispatch_to_engine_env(
+        engine=engine,
+        module="orchestr_ai.postprocessing",
+        engine_to_profile=get_default_engine_profiles(),
+    )
+
     run_type = config.get("run_type", "MD").upper()
     logging.info(f"Run type selected: {run_type}")
+    logging.info(f"Detected engine/platform: {engine}")
+    logging.info(f"Detected model framework: {config.get('model_framework')}")
 
-    # === Evaluation Run ===
+    # Lazy import evaluation only when needed.
     if run_type == "EVAL":
         try:
+            from orchestr_ai.postprocessing.evaluate import run_eval
+
             run_eval(config)
         except Exception as e:
             logging.error("\n--- An error occurred during Evaluation ---")
@@ -79,15 +111,18 @@ def main():
             sys.exit(1)
         return
 
+    # Lazy import simulation only after dispatch.
+    from orchestr_ai.postprocessing.simulation import (
+        run_md,
+        run_geo_opt,
+        run_vibrational_analysis,
+    )
 
-    # === Simulation Setup ===
-    # Load the initial structure file
     initial_xyz = config.get("initial_xyz")
     if not initial_xyz or not os.path.exists(initial_xyz):
         logging.error(f"Initial structure file '{initial_xyz}' not found or specified.")
         sys.exit(1)
 
-    # Load the ML model path
     model_path = config.get("model_path")
     if not model_path or not os.path.exists(model_path):
         logging.error(f"ML Model path '{model_path}' not found or specified.")
@@ -100,26 +135,29 @@ def main():
         logging.error(f"Error reading {initial_xyz}: {e}")
         sys.exit(1)
 
-    # Set up the ML model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
 
+
     try:
         logging.info(f"Loading ML model from {model_path}...")
-        framework = config.get("model_framework", "schnetpack").lower()
 
         if framework == "nequip":
-            # Pass the path directly so NequIP ASE calc can extract metadata
+            # NequIP/Allegro ASE calculator loads from compiled model path.
             model_obj = model_path
-            logging.info("NequIP model path passed to calculator successfully.")
+            logging.info("NequIP/Allegro model path passed to calculator.")
         else:
             best = torch.load(model_path, map_location=device, weights_only=False)
             best = best.to(device=device, dtype=torch.float32)
-            # Modify postprocessors FIRST
+
             if hasattr(best, "postprocessors"):
                 try:
                     from torch import nn
-                    filtered = [pp for pp in getattr(best, "postprocessors") if pp is not None]
+
+                    filtered = [
+                        pp for pp in getattr(best, "postprocessors")
+                        if pp is not None
+                    ]
                     setattr(best, "postprocessors", nn.ModuleList(filtered))
                 except Exception:
                     pass
@@ -127,7 +165,6 @@ def main():
             if hasattr(best, "do_postprocessing"):
                 best.do_postprocessing = True
 
-            # THEN move the entire model (including the new postprocessors) to the device
             best.eval()
             model_obj = best
             logging.info("Model loaded and moved to device successfully.")
@@ -137,20 +174,36 @@ def main():
         logging.error(traceback.format_exc())
         sys.exit(1)
 
-    # Set up the neighbor list based on configuration
-    neighbor_list = setup_neighbor_list(config)
+    # SchNetPack-only neighbor list.
+    neighbor_list = None
+    if is_schnetpack_engine(engine):
+        from orchestr_ai.postprocessing.neighbor_list import setup_neighbor_list
 
-    # === Run Simulation ===
+        neighbor_list = setup_neighbor_list(config)
+        logging.info("SchNetPack neighbor list initialized.")
+    else:
+        logging.info(
+            f"No SchNetPack neighbor list required for engine '{engine}' "
+            f"with framework '{framework}'."
+        )
+
     try:
         if run_type == "MD":
-            run_md(atoms, model_obj, device, neighbor_list, config)
+            run_md(atoms, model_obj, device, config, neighbor_list=neighbor_list)
         elif run_type == "GEO_OPT":
-            run_geo_opt(atoms, model_obj, device, neighbor_list, config)
+            run_geo_opt(atoms, model_obj, device, config, neighbor_list=neighbor_list)
         elif run_type == "VIB":
-            run_vibrational_analysis(atoms, model_obj, device, neighbor_list, config)
+            run_vibrational_analysis(
+                atoms,
+                model_obj,
+                device,
+                config,
+                neighbor_list=neighbor_list,
+            )
         else:
             logging.error(f"Invalid run_type '{run_type}'.")
             sys.exit(1)
+
     except Exception as e:
         logging.error(f"\n--- An error occurred during {run_type} Simulation ---")
         logging.error(f"{type(e).__name__}: {e}")

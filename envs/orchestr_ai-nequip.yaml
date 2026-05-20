@@ -19,3 +19,5 @@ dependencies:
       - openequivariance
       - cuequivariance-torch
       - cuequivariance-ops-torch-cu12
+      - dscribe
+      - scikit-learn

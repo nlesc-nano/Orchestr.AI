@@ -26,11 +26,18 @@ from ase.vibrations import Vibrations
 last_call_time = None
 cumulative_time = 0.0
 
-def get_ase_calculator(model, config, device, neighbor_list):
+def get_ase_calculator(model, config, device, neighbor_list=None):
     """Returns the official ASE calculator for the chosen ML framework."""
     framework = config.get("model_framework", "schnetpack").lower()
 
-    if framework == "schnetpack":
+    if framework in {"schnet", "painn", "so3net", "field_schnet", "fusion"}:
+        framework = "schnetpack"
+        if neighbor_list is None:
+            raise ValueError(
+                "SchNetPack ASE calculator requires neighbor_list, "
+                "but neighbor_list=None was passed."
+            )
+
         from schnetpack.interfaces import SpkCalculator
         from ase.calculators.calculator import all_changes
         import torch
@@ -150,7 +157,7 @@ def get_ase_calculator(model, config, device, neighbor_list):
 
         return MACECalculator(**kwargs)
 
-    elif framework == "nequip":
+    elif framework in {"nequip", "allegro"}:
         from nequip.ase import NequIPCalculator
         from ase.io import read
         try:
@@ -263,7 +270,7 @@ def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file):
 
 # === Simulation Drivers ===
 
-def run_geo_opt(atoms, model_obj, device, neighbor_list, config):
+def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
     """
     Runs geometry optimization using ASE's BFGSLineSearch optimizer.
 
@@ -403,7 +410,7 @@ def print_md_status(
 
 
 
-def run_md(atoms, model_obj, device, neighbor_list, config):
+def run_md(atoms, model_obj, device, config, neighbor_list=None):
     """Top-level MD driver with tidy, non-overlapping callbacks."""
 
     md            = config["md"]
@@ -472,7 +479,7 @@ def run_md(atoms, model_obj, device, neighbor_list, config):
 
 
 
-def run_vibrational_analysis(atoms, model_obj, device, neighbor_list, config):
+def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=None):
     """
     Runs vibrational analysis, including tight geometry optimization and frequency calculation.
 
