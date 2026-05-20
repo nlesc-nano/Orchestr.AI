@@ -6,3 +6,5 @@ tensorboardX
 openequivariance
 cuequivariance-torch
 cuequivariance-ops-torch-cu12
+scikit-learn
+dscribe

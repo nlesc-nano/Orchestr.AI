@@ -8,8 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
-
+from typing import Dict, Optional, NoReturn
 
 class EnvDispatchError(RuntimeError):
     pass
@@ -137,12 +136,15 @@ def should_dispatch(engine: str, engine_to_profile: Dict[str, EnvProfile]) -> bo
 def dispatch_to_engine_env(
     engine: str,
     engine_to_profile: Dict[str, EnvProfile],
+    module: str = "orchestr_ai.training",
     extra_args: Optional[list[str]] = None,
-) -> "NoReturn":
+) -> NoReturn:
     """
-    Re-exec `python -m orchestr_ai.training ...` under the correct python.
+    Re-exec `python -m <module> ...` under the correct engine environment.
 
-    You call this early, after parsing args enough to know the engine.
+    Examples:
+      dispatch_to_engine_env("mace", profiles, module="orchestr_ai.training")
+      dispatch_to_engine_env("mace", profiles, module="orchestr_ai.postprocessing")
     """
     profile = engine_to_profile.get(engine)
     if profile is None:
@@ -150,26 +152,63 @@ def dispatch_to_engine_env(
 
     target_python = resolve_python(profile)
 
-    # Re-run the same module under the other env, passing through args.
-    # We preserve the user's args, and optionally allow extra args.
-    argv = [target_python, "-m", "orchestr_ai.training"]
+    argv = [target_python, "-m", module]
     argv += sys.argv[1:]
+
     if extra_args:
         argv += extra_args
 
     env = os.environ.copy()
     env["ORCHESTRAI_DISPATCHED"] = "1"
-    env["ORCHESTRAI_ENGINE"] = engine  # useful for debugging/logging
-
-    # Optional: carry over current working dir and PYTHONPATH
-    # - If Orchestr.AI is installed in both envs (recommended), no PYTHONPATH is needed.
-    # - If in editable mode, still fine.
+    env["ORCHESTRAI_ENGINE"] = engine
+    env["ORCHESTRAI_DISPATCH_MODULE"] = module
 
     try:
-        # Replace current process; no double-logs, no nested lightning processes.
         os.execve(target_python, argv, env)
     except Exception as e:
         raise EnvDispatchError(
             f"Failed to exec into engine env python '{target_python}'. "
             f"Command would have been: {' '.join(argv)}. Error: {e}"
         ) from e
+
+
+def _env_label() -> str:
+    return os.path.dirname(os.path.dirname(sys.executable))
+
+
+def maybe_dispatch_to_engine_env(
+    engine: str,
+    module: str,
+    engine_to_profile: Dict[str, EnvProfile],
+) -> None:
+    """
+    Shared high-level dispatch helper.
+
+    Returns normally if:
+      - ORCHESTRAI_SINGLE_ENV=1
+      - already dispatched
+      - current Python is already the target Python
+
+    Otherwise replaces the current process via os.execve().
+    """
+    single_env_mode = os.getenv("ORCHESTRAI_SINGLE_ENV", "0") == "1"
+
+    print(f"Running in env prefix: {_env_label()}")
+
+    if single_env_mode:
+        print(f"[Orchestr.AI] Single-env mode enabled; no dispatch for engine '{engine}'")
+        print(f"[Orchestr.AI] Engine: {engine} | Env prefix: {_env_label()}")
+        print(f"[Orchestr.AI] Python: {sys.executable}")
+        return
+
+    if should_dispatch(engine, engine_to_profile):
+        target = engine_to_profile[engine].conda_env or engine_to_profile[engine].python_path
+        print(f"[Orchestr.AI] Dispatch: engine '{engine}' → env '{target}'")
+        dispatch_to_engine_env(
+            engine=engine,
+            engine_to_profile=engine_to_profile,
+            module=module,
+        )
+
+    print(f"[Orchestr.AI] Engine: {engine} | Env prefix: {_env_label()}")
+    print(f"[Orchestr.AI] Python: {sys.executable}")
