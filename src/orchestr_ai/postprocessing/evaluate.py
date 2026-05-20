@@ -34,7 +34,8 @@ from orchestr_ai.postprocessing.active_learning import (
     calibrate_alpha_reg_gcv, 
     adaptive_learning_mig_pool_windowed, 
     adaptive_learning_ensemble_calibrated,
-    UQCalibrator
+    UQCalibrator,
+    compute_soap_features
 )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
@@ -86,15 +87,38 @@ def _load_eval_model(model_path, framework, device):
     return torch.load(model_path, map_location=device, weights_only=False)
 
 
+_WORKER_GPU_ID = None
+_RESIDENT_MODELS = {}
+
+
+def _init_persistent_worker(gpu_queue):
+    global _WORKER_GPU_ID, _RESIDENT_MODELS
+    try:
+        _WORKER_GPU_ID = gpu_queue.get()
+        _RESIDENT_MODELS = {}
+        import torch
+        device = torch.device(f"cuda:{_WORKER_GPU_ID}")
+        torch.cuda.set_device(device)
+        print(f"[Persistent Worker] Initialized worker process on GPU {_WORKER_GPU_ID}")
+    except Exception as e:
+        print(f"[Persistent Worker] Error during worker initialization: {e}")
+
+
 def _evaluate_model_chunk_worker(payload):
     model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id = payload
+    
+    global _WORKER_GPU_ID, _RESIDENT_MODELS
+    if _WORKER_GPU_ID is not None:
+        gpu_id = _WORKER_GPU_ID
+
     device = torch.device(f"cuda:{gpu_id}")
     torch.cuda.set_device(device)
 
-    if hasattr(torch.cuda, "empty_cache"):
-        torch.cuda.empty_cache()
+    if model_path not in _RESIDENT_MODELS:
+        print(f"[Worker GPU {gpu_id}] Loading model into GPU memory: {os.path.basename(model_path)}")
+        _RESIDENT_MODELS[model_path] = _load_eval_model(model_path, framework, device)
 
-    model_obj = _load_eval_model(model_path, framework, device)
+    model_obj = _RESIDENT_MODELS[model_path]
     preds = evaluate_model(
         frames=frames,
         true_energies=true_E,
@@ -106,10 +130,6 @@ def _evaluate_model_chunk_worker(payload):
         config=config,
         neighbor_list=None,
     )
-
-    del model_obj
-    if hasattr(torch.cuda, "empty_cache"):
-        torch.cuda.empty_cache()
 
     return preds
 
@@ -237,6 +257,7 @@ class EnsembleRunner:
         true_E=None,
         true_F=None,
         log_file=None,
+        pool=None,
     ):
         gpu_ids = _configured_gpu_ids(self.eval_cfg)
         if len(gpu_ids) <= 1:
@@ -278,9 +299,12 @@ class EnsembleRunner:
                 )
             )
 
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=len(payloads)) as pool:
+        if pool is not None:
             chunk_results = pool.map(_evaluate_model_chunk_worker, payloads)
+        else:
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(processes=len(payloads)) as pool_temp:
+                chunk_results = pool_temp.map(_evaluate_model_chunk_worker, payloads)
 
         energy_pred = [None] * n_frames
         forces_pred = [None] * n_frames
@@ -311,33 +335,57 @@ class EnsembleRunner:
 
         model_paths_to_run = self._model_paths()
 
-        # --- 2. Load and evaluate the found models ---
-        for m_idx, model_path in enumerate(model_paths_to_run):
-            print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
-
-            if self._multi_gpu_enabled():
-                preds = self._evaluate_model_multi_gpu(
-                    model_path,
-                    frames,
-                    true_E=true_E,
-                    true_F=true_F,
-                )
-            else:
-                preds = self._evaluate_model_single_gpu(
-                    model_path,
-                    frames,
-                    true_E=true_E,
-                    true_F=true_F,
+        # Initialize persistent worker pool if multi-GPU is enabled
+        pool = None
+        if self._multi_gpu_enabled() and len(model_paths_to_run) > 0:
+            gpu_ids = _configured_gpu_ids(self.eval_cfg)
+            if len(gpu_ids) > 1:
+                ctx = mp.get_context("spawn")
+                gpu_queue = ctx.SimpleQueue()
+                for gid in gpu_ids:
+                    gpu_queue.put(gid)
+                
+                print(f"[EnsembleRunner] Spawning persistent worker pool with {len(gpu_ids)} GPU(s): {gpu_ids}")
+                pool = ctx.Pool(
+                    processes=len(gpu_ids),
+                    initializer=_init_persistent_worker,
+                    initargs=(gpu_queue,)
                 )
 
-            if preds is None:
-                continue
+        try:
+            # --- 2. Load and evaluate the found models ---
+            for m_idx, model_path in enumerate(model_paths_to_run):
+                print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
 
-            preds_E, preds_F, preds_L_frame, preds_L_atom = preds
-            ens_E.append(preds_E)
-            ens_F.append(preds_F)
-            ens_L_frame.append(preds_L_frame)
-            ens_L_atom.append(preds_L_atom)
+                if self._multi_gpu_enabled():
+                    preds = self._evaluate_model_multi_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                        pool=pool,
+                    )
+                else:
+                    preds = self._evaluate_model_single_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                    )
+
+                if preds is None:
+                    continue
+
+                preds_E, preds_F, preds_L_frame, preds_L_atom = preds
+                ens_E.append(preds_E)
+                ens_F.append(preds_F)
+                ens_L_frame.append(preds_L_frame)
+                ens_L_atom.append(preds_L_atom)
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+                print("[EnsembleRunner] Persistent worker pool closed successfully.")
 
         # If no models were successfully evaluated, return empty lists to trigger the ValueError upstream
         if not ens_E:
@@ -373,49 +421,73 @@ class EnsembleRunner:
         sum_L = sum_L2 = None
         n_models_done = 0
 
-        for m_idx, model_path in enumerate(model_paths_to_run):
-            print(f"  -> Aggregating Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
-
-            if self._multi_gpu_enabled():
-                preds = self._evaluate_model_multi_gpu(
-                    model_path,
-                    frames,
-                    true_E=true_E,
-                    true_F=true_F,
+        # Initialize persistent worker pool if multi-GPU is enabled
+        pool = None
+        if self._multi_gpu_enabled() and len(model_paths_to_run) > 0:
+            gpu_ids = _configured_gpu_ids(self.eval_cfg)
+            if len(gpu_ids) > 1:
+                ctx = mp.get_context("spawn")
+                gpu_queue = ctx.SimpleQueue()
+                for gid in gpu_ids:
+                    gpu_queue.put(gid)
+                
+                print(f"[EnsembleRunner] Spawning persistent worker pool with {len(gpu_ids)} GPU(s): {gpu_ids}")
+                pool = ctx.Pool(
+                    processes=len(gpu_ids),
+                    initializer=_init_persistent_worker,
+                    initargs=(gpu_queue,)
                 )
-            else:
-                preds = self._evaluate_model_single_gpu(
-                    model_path,
-                    frames,
-                    true_E=true_E,
-                    true_F=true_F,
-                )
 
-            if preds is None:
-                continue
+        try:
+            for m_idx, model_path in enumerate(model_paths_to_run):
+                print(f"  -> Aggregating Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
 
-            preds_E, preds_F, preds_L_frame, _ = preds
-            e = np.asarray(preds_E, dtype=float)
-            f = np.concatenate(preds_F, axis=0).astype(float, copy=False)
-            l_frame = np.asarray(preds_L_frame, dtype=float)
+                if self._multi_gpu_enabled():
+                    preds = self._evaluate_model_multi_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                        pool=pool,
+                    )
+                else:
+                    preds = self._evaluate_model_single_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                    )
 
-            if sum_E is None:
-                sum_E = np.zeros_like(e, dtype=float)
-                sum_E2 = np.zeros_like(e, dtype=float)
-                sum_F = np.zeros_like(f, dtype=float)
-                sum_F2 = np.zeros_like(f, dtype=float)
-                sum_L = np.zeros_like(l_frame, dtype=float)
-                sum_L2 = np.zeros_like(l_frame, dtype=float)
+                if preds is None:
+                    continue
 
-            sum_E += e
-            sum_E2 += e**2
-            sum_F += f
-            sum_F2 += f**2
-            sum_L += l_frame
-            sum_L2 += l_frame**2
-            n_models_done += 1
+                preds_E, preds_F, preds_L_frame, _ = preds
+                e = np.asarray(preds_E, dtype=float)
+                f = np.concatenate(preds_F, axis=0).astype(float, copy=False)
+                l_frame = np.asarray(preds_L_frame, dtype=float)
 
-            del preds, preds_E, preds_F, preds_L_frame, e, f, l_frame
+                if sum_E is None:
+                    sum_E = np.zeros_like(e, dtype=float)
+                    sum_E2 = np.zeros_like(e, dtype=float)
+                    sum_F = np.zeros_like(f, dtype=float)
+                    sum_F2 = np.zeros_like(f, dtype=float)
+                    sum_L = np.zeros_like(l_frame, dtype=float)
+                    sum_L2 = np.zeros_like(l_frame, dtype=float)
+
+                sum_E += e
+                sum_E2 += e**2
+                sum_F += f
+                sum_F2 += f**2
+                sum_L += l_frame
+                sum_L2 += l_frame**2
+                n_models_done += 1
+
+                del preds, preds_E, preds_F, preds_L_frame, e, f, l_frame
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+                print("[EnsembleRunner] Persistent worker pool closed successfully.")
 
         if n_models_done == 0:
             raise ValueError("No ensemble models were successfully evaluated.")
@@ -541,11 +613,25 @@ class EvaluationPipeline:
         if "ensemble" in self.uq_methods:
             stats_ens, mean_L_frame, sigma_comp, sigma_E_raw = self._run_ensemble_labeled()
             
+            # --- Model-Independent SOAP Active Learning Integration ---
+            use_soap = self.eval_cfg.get("use_soap", True)
+            soap_species = None
+            if use_soap:
+                print("\n[Active Learning] Computing model-independent SOAP descriptors for active learning latent space...")
+                soap_all, soap_species = compute_soap_features(
+                    self.ds["frames"],
+                    r_cut=self.eval_cfg.get("soap_rcut", 4.0),
+                    n_max=self.eval_cfg.get("soap_nmax", 4),
+                    l_max=self.eval_cfg.get("soap_lmax", 4),
+                )
+                if soap_all is not None:
+                    mean_L_frame = soap_all
+            
             if self.al_val_flag and self.al_val_flag.lower() == "influence":
                 self._run_validation_al(stats_ens, mean_L_frame, sigma_comp)
                 
             if self.pool_xyz_path and os.path.exists(self.pool_xyz_path):
-                self._run_pool_al(stats_ens, mean_L_frame, sigma_E_raw, sigma_comp)
+                self._run_pool_al(stats_ens, mean_L_frame, sigma_E_raw, sigma_comp, soap_species=soap_species)
 
         print("Evaluation Pipeline Completed.")
 
@@ -683,7 +769,7 @@ class EvaluationPipeline:
         else:
             print("[Val-AL] No validation frames selected.")
 
-    def _run_pool_al(self, stats_ens, mean_L_frame, sigma_E_raw, sigma_comp):
+    def _run_pool_al(self, stats_ens, mean_L_frame, sigma_E_raw, sigma_comp, soap_species=None):
         """Active Learning on the unlabelled out-of-distribution pool."""
         print(f"\n[Pool-AL] Parsing unlabeled pool from {self.pool_xyz_path}")
         pool_frames = read(self.pool_xyz_path, index=":", format="extxyz")
@@ -723,10 +809,52 @@ class EvaluationPipeline:
             sigma_F_pool_max = pool_light["sigma_F_max"]
             frame_max_force_pool = pool_light["frame_max_force"]
 
-        # Thinning
-        thin_idx = np.arange(len(pool_frames))[::self.eval_cfg.get("pool_stride", 1)]
+        # Thinning (Adaptive Striding Option)
+        adaptive_striding = self.eval_cfg.get("adaptive_striding", False)
+        if adaptive_striding:
+            coarse_stride = self.eval_cfg.get("coarse_stride", 20)
+            fine_stride = self.eval_cfg.get("fine_stride", 2)
+            unc_threshold = self.eval_cfg.get("adaptive_uncertainty_threshold", None)
+            
+            if unc_threshold is None:
+                # Use 30th percentile of pool force uncertainties as a transition threshold
+                unc_threshold = float(np.percentile(sigma_F_pool_mean, 30))
+                print(f"[Pool-AL] Adaptive striding transition threshold determined from pool: {unc_threshold:.5f} eV/Å")
+            else:
+                print(f"[Pool-AL] User-defined adaptive striding threshold: {unc_threshold:.5f} eV/Å")
+                
+            thin_idx_list = []
+            curr_i = 0
+            n_pool = len(pool_frames)
+            while curr_i < n_pool:
+                thin_idx_list.append(curr_i)
+                # Check average force uncertainty at current frame
+                unc = sigma_F_pool_mean[curr_i]
+                if unc > unc_threshold:
+                    curr_i += fine_stride
+                else:
+                    curr_i += coarse_stride
+            thin_idx = np.array(thin_idx_list, dtype=int)
+            print(f"[Pool-AL] Adaptive striding thinned pool from {n_pool} to {len(thin_idx)} frames.")
+        else:
+            thin_idx = np.arange(len(pool_frames))[::self.eval_cfg.get("pool_stride", 1)]
+
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
         F_pool_thin = mu_L_pool[thin_idx].astype(float)
+
+        # --- Compute SOAP for thinned pool frames ---
+        if soap_species is not None:
+            print("[Pool-AL] Computing model-independent SOAP descriptors for thinned pool frames...")
+            soap_pool_thin, _ = compute_soap_features(
+                pool_frames_thin,
+                species=soap_species,
+                r_cut=self.eval_cfg.get("soap_rcut", 4.0),
+                n_max=self.eval_cfg.get("soap_nmax", 4),
+                l_max=self.eval_cfg.get("soap_lmax", 4),
+            )
+            if soap_pool_thin is not None:
+                F_pool_thin = soap_pool_thin
+
         mu_E_pool_thin = mu_E_pool[thin_idx].astype(float)
         sigma_E_pool_thin = sigma_E_pool[thin_idx].astype(float)
         F_train_thin = mean_L_frame[self.ds["train_idx"]].astype(float)
@@ -789,6 +917,7 @@ class EvaluationPipeline:
         sigma_force_frames = _split_atom_vectors(sigma_comp, self.ds["frames"])
         train_forces = [self.ds["F_true"][i] for i in self.ds["train_idx"]]
         sigma_force_train = [sigma_force_frames[i] for i in self.ds["train_idx"]]
+        train_frames = [self.ds["frames"][i] for i in self.ds["train_idx"]]
 
         # Selection
         print("[Pool-AL] Running windowed active learning on thinned pool ...")
@@ -799,6 +928,7 @@ class EvaluationPipeline:
             rdf_thresholds=rdf_thresholds,
             sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
             frame_max_force_pool=frame_max_force_pool_thin,
+            train_frames=train_frames,
             rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
             window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
             percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),

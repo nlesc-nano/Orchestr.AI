@@ -337,32 +337,85 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     log_int       = md.get("log_interval",     5)
     xyz_int       = md.get("xyz_print_interval", 50)
     T0            = md.get("temperature_K",    300.0)
-    use_langevin  = md.get("use_langevin",     True)
     traj_file     = md.get("trajectory_file_md")
     log_file      = md.get("log_file")
 
     # -----------------------------------------------------------------
-    #  calculator + starting velocities
+    #  calculator + starting velocities (preventing zero kinetic energy)
     # -----------------------------------------------------------------
     calc = get_ase_calculator(model_obj, config, device, neighbor_list)
     atoms.calc = calc
-    MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
+
+    heating_steps = md.get("heating_steps", 0)
+    T_start = md.get("heating_T_start", 10.0)
+
+    if heating_steps > 0:
+        print(f"Heating initialized: starting at {T_start} K, ramping to {T0} K over {heating_steps} steps.")
+        MaxwellBoltzmannDistribution(atoms, temperature_K=T_start)
+    else:
+        print(f"No heating ramp: starting at target temperature {T0} K.")
+        MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
 
     # -----------------------------------------------------------------
-    #  choose integrator
+    #  choose integrator (thermostat)
     # -----------------------------------------------------------------
-    if use_langevin:
-        gamma_fs      = md.get("friction_coefficient", 0.01)
+    thermostat = md.get("thermostat", "langevin").lower()
+    if "thermostat" not in md and "use_langevin" in md:
+        thermostat = "langevin" if md.get("use_langevin") else "verlet"
+
+    if thermostat in {"bussi", "csvr"}:
+        from ase.md.bussi import Bussi
+        taut_fs = md.get("taut_fs", 100.0)
+        dyn = Bussi(
+            atoms,
+            timestep      = dt_fs * units.fs,
+            temperature_K = T0,
+            taut          = taut_fs * units.fs,
+        )
+        dyn.temperature_K = T0
+        gamma_fs = 0.0  # not Langevin, no friction logging
+        thermostat_desc = f"Bussi/CSVR τ = {taut_fs} fs"
+    elif thermostat == "langevin":
+        gamma_fs = md.get("friction_coefficient", 0.01)
         dyn = Langevin(
             atoms,
-            timestep   = dt_fs * units.fs,
+            timestep      = dt_fs * units.fs,
             temperature_K = T0,
-            friction   = gamma_fs,
+            friction      = gamma_fs,
         )
+        dyn.temperature_K = T0
+        thermostat_desc = f"Langevin γ = {gamma_fs}"
     else:
         from ase.md.verlet import VelocityVerlet
         dyn = VelocityVerlet(atoms, timestep = dt_fs * units.fs)
-        gamma_fs = 0.0                                 # for logging
+        dyn.temperature_K = np.nan
+        gamma_fs = 0.0
+        thermostat_desc = "VelocityVerlet"
+
+    # -----------------------------------------------------------------
+    #  temperature heating ramp callback
+    # -----------------------------------------------------------------
+    if heating_steps > 0:
+        def ramp_callback():
+            step = dyn.get_number_of_steps()
+            if step <= heating_steps:
+                current_T = T_start + (T0 - T_start) * (step / heating_steps)
+            else:
+                current_T = T0
+
+            # Set temperature on thermostat
+            if hasattr(dyn, "set_temperature"):
+                dyn.set_temperature(temperature_K=current_T)
+            elif hasattr(dyn, "temp"):
+                dyn.temp = current_T * units.kB
+                if hasattr(dyn, "ndof"):
+                    dyn.target_kinetic_energy = 0.5 * dyn.temp * dyn.ndof
+            
+            dyn.temperature_K = current_T
+
+        dyn.attach(ramp_callback, interval=1)
+        # Execute once at step 0 to ensure initialization starts at T_start
+        ramp_callback()
 
     # -----------------------------------------------------------------
     #  callbacks
@@ -391,7 +444,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     # -----------------------------------------------------------------
     #  run!
     # -----------------------------------------------------------------
-    print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {('Langevin γ = %.5f' % gamma_fs) if use_langevin else 'VelocityVerlet'}")
+    print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
     dyn.run(nsteps)
     print("MD finished.")
 

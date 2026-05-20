@@ -24,6 +24,62 @@ from typing import Tuple, List, Optional
 from sklearn.isotonic import IsotonicRegression
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
 
+def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_max=4, l_max=4):
+    """
+    Computes averaged SOAP descriptors for a list of ASE Atoms objects.
+    
+    Parameters:
+        frames (list): List of ASE Atoms objects.
+        train_frames (list, optional): List of training ASE Atoms objects to gather chemical symbols.
+        species (list, optional): Predefined list of species (chemical symbols).
+        r_cut (float): Cutoff radius in Angstrom. Default 4.0.
+        n_max (int): Number of radial basis functions. Default 4.
+        l_max (int): Maximum degree of spherical harmonics. Default 4.
+        
+    Returns:
+        tuple: (features_array, species_list) or (None, None) on failure.
+    """
+    try:
+        from dscribe.descriptors import SOAP
+        
+        # 1. Determine chemical species if not provided
+        if species is None:
+            species_set = set()
+            for fr in frames:
+                species_set.update(fr.get_chemical_symbols())
+            if train_frames is not None:
+                for fr in train_frames:
+                    species_set.update(fr.get_chemical_symbols())
+            species = sorted(list(species_set))
+            
+        print(f"[SOAP] Computing descriptors for species: {species} (rcut={r_cut}, nmax={n_max}, lmax={l_max})")
+        
+        # 2. Construct SOAP descriptor
+        soap = SOAP(
+            species=species,
+            r_cut=r_cut,
+            n_max=n_max,
+            l_max=l_max,
+            periodic=False,     # Quantum dots in vacuum
+            average="outer",    # Average SOAP over all atoms in the frame to get a per-frame descriptor
+            sparse=False
+        )
+        
+        # 3. Create SOAP vectors (use multi-processing if many frames)
+        n_jobs = -1 if len(frames) > 5 else 1
+        features = soap.create(frames, n_jobs=n_jobs)
+        
+        # Make sure it's 2D array
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+            
+        return features, species
+    except Exception as e:
+        print(f"[SOAP] Warning: Failed to compute SOAP descriptors. Falling back to default latents. Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
+
 # =============================================================================
 # 1. MATH & LATENT SPACE UTILITIES
 # =============================================================================
