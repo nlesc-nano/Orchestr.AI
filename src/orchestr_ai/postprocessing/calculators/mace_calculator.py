@@ -13,7 +13,7 @@ class MaceCalculator(BaseCalculator):
     Wrapper for MACE models.
     """
 
-    def __init__(self, model, device, cutoff=12.0):
+    def __init__(self, model, device, cutoff=12.0, head=None):
         self.model = model
         self.device = device
         self.cutoff = cutoff
@@ -24,6 +24,26 @@ class MaceCalculator(BaseCalculator):
 
         self._prepare_z_table()
         self._detect_cuequivariance()
+
+        # Handle MACE heads dynamically for multi-head models
+        try:
+            self.available_heads = self.model.heads
+        except AttributeError:
+            self.available_heads = ["Default"]
+
+        if head is not None:
+            self.head = head
+        elif len(self.available_heads) == 1:
+            self.head = self.available_heads[0]
+        else:
+            default_heads = [h for h in self.available_heads if h.lower() == "default"]
+            if default_heads:
+                self.head = default_heads[0]
+            else:
+                self.head = self.available_heads[0]
+
+        print(f"MACE: Using head '{self.head}' out of available heads {self.available_heads}")
+
 
     def _prepare_z_table(self):
         try:
@@ -86,12 +106,16 @@ class MaceCalculator(BaseCalculator):
         data_list = []
 
         for atoms in frames:
-            atoms_config = config_from_atoms(atoms)
+            atoms_config = config_from_atoms(
+                atoms,
+                head_name=self.head,
+            )
 
             data = AtomicData.from_config(
                 atoms_config,
                 z_table=self.z_table,
                 cutoff=self.cutoff,
+                heads=self.available_heads,
             )
 
             data_list.append(data)

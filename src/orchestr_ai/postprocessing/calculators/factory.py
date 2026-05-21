@@ -59,12 +59,15 @@ def create_calculator(
         )
 
         cutoff = config.get("cutoff", 12.0)
+        mace_head = config.get("mace_head", None)
 
         return MaceCalculator(
             model=model_obj,
             device=device,
             cutoff=cutoff,
+            head=mace_head,
         )
+
 
     if framework == "nequip":
         from orchestr_ai.postprocessing.calculators.nequip_calculator import (
