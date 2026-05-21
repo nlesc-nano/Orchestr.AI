@@ -91,9 +91,16 @@ class UQCalibrator:
         print(f"[UQCalibrator] Diagnostic plots saved to {out_dir}/")
 
 
+DEFAULT_MACE_HEADS_MAP = {
+    "singlet": {"energy_key": "E_singlet", "forces_key": "f_singlet"},
+    "triplet": {"energy_key": "E_triplet", "forces_key": "f_triplet"}
+}
+
+
 class DatasetManager:
     """Handles loading, purging, and masking of Train and Validation datasets."""
     def __init__(self, config):
+        self.config = config
         self.eval_cfg = config.get("eval", {})
         self.train_path = self.eval_cfg.get("training_data")
         self.eval_path = self.eval_cfg.get("eval_input_xyz")
@@ -102,12 +109,41 @@ class DatasetManager:
         print("\n--- Setting up Datasets ---")
         assert self.eval_path and os.path.exists(self.eval_path), f"Eval file not found: {self.eval_path}"
         
-        val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval")
+        # Retrieve configuration-driven mappings or fallbacks
+        mace_heads_map = self.eval_cfg.get("mace_heads", DEFAULT_MACE_HEADS_MAP)
+        if "mace_heads" in self.config:
+            mace_heads_map = self.config["mace_heads"]
+            
+        mace_head = self.config.get("mace_head", None)
+        
+        energy_key = None
+        forces_key = None
+        if mace_head:
+            head_config = mace_heads_map.get(mace_head, {})
+            energy_key = head_config.get("energy_key", f"E_{mace_head}")
+            forces_key = head_config.get("forces_key", f"f_{mace_head}")
+            
+        # Singlet and triplet keys for multi-head comparison logging
+        singlet_cfg = mace_heads_map.get("singlet", {})
+        s_e_key = singlet_cfg.get("energy_key", "E_singlet")
+        s_f_key = singlet_cfg.get("forces_key", "f_singlet")
+        
+        triplet_cfg = mace_heads_map.get("triplet", {})
+        t_e_key = triplet_cfg.get("energy_key", "E_triplet")
+        t_f_key = triplet_cfg.get("forces_key", "f_triplet")
+        
+        val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval", energy_key=energy_key, forces_key=forces_key)
+        val_E_singlet, _, _ = parse_extxyz(self.eval_path, "eval_singlet", energy_key=s_e_key, forces_key=s_f_key)
+        val_E_triplet, _, _ = parse_extxyz(self.eval_path, "eval_triplet", energy_key=t_e_key, forces_key=t_f_key)
+        
         val_frames = read(self.eval_path, index=":", format="extxyz")
         
         train_frames, train_E, train_F, train_pos = [], [], [], []
+        train_E_singlet, train_E_triplet = [], []
         if self.train_path and os.path.exists(self.train_path):
-            train_E, train_F, train_pos = parse_extxyz(self.train_path, "training_data")
+            train_E, train_F, train_pos = parse_extxyz(self.train_path, "training_data", energy_key=energy_key, forces_key=forces_key)
+            train_E_singlet, _, _ = parse_extxyz(self.train_path, "training_singlet", energy_key=s_e_key, forces_key=s_f_key)
+            train_E_triplet, _, _ = parse_extxyz(self.train_path, "training_triplet", energy_key=t_e_key, forces_key=t_f_key)
             train_frames = read(self.train_path, index=":", format="extxyz")
             
             # Redundancy Purge
@@ -115,10 +151,10 @@ class DatasetManager:
             energy_tol, pos_tol = 0.0001, 0.0001
             for i, (e_eval, p_eval) in enumerate(zip(val_E, val_pos)):
                 is_redundant = False
-                e_eval_rounded = round(e_eval, 5)
+                e_eval_rounded = round(e_eval, 5) if not np.isnan(e_eval) else np.nan
                 for j, (e_train, p_train) in enumerate(zip(train_E, train_pos)):
-                    e_train_rounded = round(e_train, 5)
-                    if abs(e_eval_rounded - e_train_rounded) < energy_tol:
+                    e_train_rounded = round(e_train, 5) if not np.isnan(e_train) else np.nan
+                    if not np.isnan(e_eval_rounded) and not np.isnan(e_train_rounded) and abs(e_eval_rounded - e_train_rounded) < energy_tol:
                         if p_eval.shape[0] >= 3 and p_train.shape[0] >= 3:
                             if np.allclose(p_eval[:3], p_train[:3], atol=pos_tol):
                                 print(f"Redundant structure found: Eval frame {i} is redundant with Training frame {j}.")
@@ -129,6 +165,10 @@ class DatasetManager:
             val_frames = [f for f, k in zip(val_frames, eval_mask) if k]
             val_E = [e for e, k in zip(val_E, eval_mask) if k]
             val_F = [f for f, k in zip(val_F, eval_mask) if k]
+            if val_E_singlet:
+                val_E_singlet = [e for e, k in zip(val_E_singlet, eval_mask) if k]
+            if val_E_triplet:
+                val_E_triplet = [e for e, k in zip(val_E_triplet, eval_mask) if k]
             print(f"Validation frames after purge: {len(val_frames)}")
 
         all_frames = train_frames + val_frames
@@ -147,7 +187,9 @@ class DatasetManager:
             "frames": all_frames, "E_true": np.array(train_E + val_E), "F_true": train_F + val_F,
             "F_train_arr": forces_train_arr, "train_mask": train_mask, "val_mask": val_mask,
             "train_idx": np.where(train_mask)[0], "val_idx": np.where(val_mask)[0],
-            "val_frames_ref": val_frames
+            "val_frames_ref": val_frames,
+            "E_singlet_true": np.array(train_E_singlet + val_E_singlet) if (train_E_singlet or val_E_singlet) else None,
+            "E_triplet_true": np.array(train_E_triplet + val_E_triplet) if (train_E_triplet or val_E_triplet) else None,
         }
 
 
@@ -162,7 +204,7 @@ class EnsembleRunner:
         self.n_models = self.eval_cfg.get("ensemble_size", 1)
         self.batch_size = self.eval_cfg.get("batch_size", 32)
 
-    def evaluate(self, frames, true_E=None, true_F=None, cache_file="ensemble_cache.npz"):
+    def evaluate(self, frames, true_E=None, true_F=None, cache_file="ensemble_cache.npz", E_singlet_true=None, E_triplet_true=None):
         if os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading cached predictions from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
@@ -207,7 +249,8 @@ class EnsembleRunner:
             preds_E, preds_F, preds_L_frame, preds_L_atom = evaluate_model(
                 frames=frames, true_energies=true_E, true_forces=true_F,
                 model_obj=model_obj, device=self.device, batch_size=self.batch_size,
-                eval_log_file=None, config=self.config, neighbor_list=self.neighbor_list
+                eval_log_file=None, config=self.config, neighbor_list=self.neighbor_list,
+                E_singlet_true=E_singlet_true, E_triplet_true=E_triplet_true
             )
             ens_E.append(preds_E)
             ens_F.append(preds_F)
@@ -327,7 +370,9 @@ class EvaluationPipeline:
         pred_E, pred_F, _, _ = evaluate_model(
             self.ds["frames"], list(self.ds["E_true"]), self.ds["F_true"],
             base_model, self.device, self.eval_cfg.get("batch_size", 32),
-            eval_log_file=self.eval_log, config=self.config, neighbor_list=self.neighbour_list
+            eval_log_file=self.eval_log, config=self.config, neighbor_list=self.neighbour_list,
+            E_singlet_true=self.ds.get("E_singlet_true"),
+            E_triplet_true=self.ds.get("E_triplet_true"),
         )
         
         if isinstance(pred_F, np.ndarray) and pred_F.ndim == 3:
@@ -351,7 +396,9 @@ class EvaluationPipeline:
         """Runs the ensemble on labeled datasets and computes UQ metrics."""
         runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
         ens_E_sel, ens_F_list, ens_L_frame_sel, _ = runner.evaluate(
-            self.ds["frames"], self.ds["E_true"], self.ds["F_true"], cache_file="ensemble.npz"
+            self.ds["frames"], self.ds["E_true"], self.ds["F_true"], cache_file="ensemble.npz",
+            E_singlet_true=self.ds.get("E_singlet_true"),
+            E_triplet_true=self.ds.get("E_triplet_true"),
         )
         
         ens_F_sel = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_list], dtype=float)

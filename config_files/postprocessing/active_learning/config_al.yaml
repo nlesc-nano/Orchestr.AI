@@ -1,68 +1,76 @@
 # config.yaml
 
 # --- 1. Model & System Settings ---
-model_framework: "nequip"     # Options: "schnetpack", "mace", "nequip"
+model_framework: "nequip" # Options: "schnetpack", "mace", "nequip"
 model_path: "./models/best_model6.nequip.pth"
 mace_head: singlet # Options: "singlet", "triplet"
 cutoff: 12.0
 log_file: "simulation.log"
 initial_xyz: "CdSe149.xyz"
 
-run_type: "EVAL"  # Options: "EVAL", "GEO_OPT", "MD", "VIB"
+run_type: "EVAL" # Options: "EVAL", "GEO_OPT", "MD", "VIB"
 
 # --- 2. Evaluation & Active Learning ---
 eval:
-  batch_size: 16  
-  uncertainty: ["ensemble"]  
+  batch_size: 16
+  uncertainty: ["ensemble"]
   ensemble_folder: "./models"
   ensemble_size: 10
-  
+
+  mace_heads:
+    singlet:
+      energy_key: "E_singlet"
+      forces_key: "f_singlet"
+    triplet:
+      energy_key: "E_triplet"
+      forces_key: "f_triplet"
+
   # Data paths
-  training_data: "consolidated_dataset_1000_nequip.xyz" 
+  training_data: "consolidated_dataset_1000_nequip.xyz"
   eval_input_xyz: "dataset_pos_frc_ev.xyz"
   eval_output_file: "output.xyz"
   eval_log_file: "eval_log.txt"
-  
-  plot: False  
+
+  plot: False
 
   # --- Out-of-Distribution Pool AL ---
   unlabeled_pool_path: "md_trajectory.extxyz"
-  active_learning: "influence"  
+  active_learning: "influence"
   budget_max: 50
-  
+
   # Pool processing window & stride
-  pool_stride: 1         # Thin the pool by taking every Nth frame
-  pool_window: 100        # Number of frames per AL evaluation window
-  pool_min_k: 5           # Target number of diverse frames to pick per window
-  rdf_stride: 2           # Subsample validation frames for RDF thresholding
+  pool_stride: 1 # Thin the pool by taking every Nth frame
+  pool_window: 100 # Number of frames per AL evaluation window
+  pool_min_k: 5 # Target number of diverse frames to pick per window
+  rdf_stride: 2 # Subsample validation frames for RDF thresholding
 
   # Percentile bounds (Adaptive Caps & Novelty)
-  percentile_gamma: 100   # Novelty gate (Mahalanobis distance)
-  percentile_F_low: 99.5  # Lower bound for force uncertainty
-  percentile_F_hi: 95     # Adaptive upper cap limit
+  percentile_gamma: 100 # Novelty gate (Mahalanobis distance)
+  percentile_F_low: 99.5 # Lower bound for force uncertainty
+  percentile_F_hi: 95 # Adaptive upper cap limit
 
   # HARD AL Triggers (Literature-style thresholds)
-  thr_sE_atom: 0.001      # min σ(Energy) per atom (eV/atom)
-  thr_sF_mean: 0.075       # min mean σ(Force) (eV/Å)
-  thr_sF_max:  0.150        # min max σ(Force) (eV/Å)
-  thr_Fmax_mult: 1.5      # Max physical force = 1.5 × max |F|_train
+  thr_sE_atom: 0.001 # min σ(Energy) per atom (eV/atom)
+  thr_sF_mean: 0.075 # min mean σ(Force) (eV/Å)
+  thr_sF_max: 0.150 # min max σ(Force) (eV/Å)
+  thr_Fmax_mult: 1.5 # Max physical force = 1.5 × max |F|_train
 
 # --- 3. Molecular Dynamics ---
 md:
   timestep_fs: 1.0
   temperature_K: 300.0
   trajectory_file_md: "md_trajectory.xyz"
-  log_file: "simulation_md.log" 
+  log_file: "simulation_md.log"
   use_langevin: true
   friction_coefficient: 0.01
-  steps: 1000 
-  xyz_print_interval: 10   
-  
+  steps: 1000
+  xyz_print_interval: 10
+
   # Simulated Annealing / Ramping
-  use_ramp: False                    
-  # ramp_temps: [300,350,400,450]  
-  # ramp_steps: 10000                  
-  # plateau_steps: 20000               
+  use_ramp: False
+  # ramp_temps: [300,350,400,450]
+  # ramp_steps: 10000
+  # plateau_steps: 20000
 
 # --- 4. Geometry Optimization ---
 geo_opt:
