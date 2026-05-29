@@ -35,11 +35,11 @@ class InferenceRunner:
             f"(Batch Size: {self.batch_size})..."
         )
 
-        # Check if the calculator is a multi-head MACE calculator with singlet/triplet heads
+        # Check if the calculator is a multi-head MACE calculator with singlet/triplet heads or singlet/delta heads
         has_multihead = (
             hasattr(self.calculator, "available_heads")
             and "singlet" in self.calculator.available_heads
-            and "triplet" in self.calculator.available_heads
+            and ("triplet" in self.calculator.available_heads or "delta" in self.calculator.available_heads)
         )
 
         for batch_start in range(0, n_frames, self.batch_size):
@@ -53,50 +53,82 @@ class InferenceRunner:
                 t0_prep = time.time()
                 
                 if has_multihead:
-                    # Run singlet
-                    orig_head = self.calculator.head
-                    self.calculator.head = "singlet"
-                    inputs_s = self.calculator.prepare_batch(batch_frames)
-                    prep_time = time.time() - t0_prep
-                    
-                    t0_forward = time.time()
-                    energies_s, forces_s, lat_frame_s, lat_atom_s = self.calculator.forward(
-                        inputs_s,
-                        n_atoms_list,
-                    )
-                    forward_time_s = time.time() - t0_forward
-                    
-                    # Run triplet
-                    t0_prep_t = time.time()
-                    self.calculator.head = "triplet"
-                    inputs_t = self.calculator.prepare_batch(batch_frames)
-                    prep_time_t = time.time() - t0_prep_t
-                    
-                    t0_forward_t = time.time()
-                    energies_t, forces_t, lat_frame_t, lat_atom_t = self.calculator.forward(
-                        inputs_t,
-                        n_atoms_list,
-                    )
-                    forward_time_t = time.time() - t0_forward_t
-                    
-                    # Restore original head
-                    self.calculator.head = orig_head
-                    
-                    # Compute prep and forward times for stats
-                    prep_time = (prep_time + prep_time_t) / 2.0
-                    forward_time = (forward_time_s + forward_time_t) / 2.0
-                    
-                    # Set current batch predictions for the requested/original head
-                    if orig_head == "singlet":
-                        energies = energies_s
-                        forces_list = forces_s
-                        lat_frame = lat_frame_s
-                        lat_atom = lat_atom_s
+                    if hasattr(self.calculator, "k_E"):
+                        # Auto-scaled reconstruction mode:
+                        # Prepare the joint batch (batch_base, batch_delta)
+                        inputs = self.calculator.prepare_batch(batch_frames)
+                        prep_time = time.time() - t0_prep
+                        
+                        t0_forward = time.time()
+                        energies, forces_list, lat_frame, lat_atom = self.calculator.forward(
+                            inputs,
+                            n_atoms_list,
+                        )
+                        forward_time = time.time() - t0_forward
+                        
+                        # Retrieve singlet and triplet reconstructed predictions
+                        energies_s = self.calculator.last_E_singlet
+                        forces_s = self.calculator.last_F_singlet
+                        energies_t = energies
+                        forces_t = forces_list
+                        lat_frame_s = lat_frame
+                        lat_atom_s = lat_atom
+                        lat_frame_t = lat_frame
+                        lat_atom_t = lat_atom
+                        
+                        # Use base_head config settings
+                        orig_head = self.calculator.head
+                        if orig_head == self.calculator.base_head:
+                            energies = energies_s
+                            forces_list = forces_s
+                        else:
+                            energies = energies_t
+                            forces_list = forces_t
                     else:
-                        energies = energies_t
-                        forces_list = forces_t
-                        lat_frame = lat_frame_t
-                        lat_atom = lat_atom_t
+                        # Original direct singlet/triplet mode:
+                        orig_head = self.calculator.head
+                        self.calculator.head = "singlet"
+                        inputs_s = self.calculator.prepare_batch(batch_frames)
+                        prep_time = time.time() - t0_prep
+                        
+                        t0_forward = time.time()
+                        energies_s, forces_s, lat_frame_s, lat_atom_s = self.calculator.forward(
+                            inputs_s,
+                            n_atoms_list,
+                        )
+                        forward_time_s = time.time() - t0_forward
+                        
+                        # Run triplet
+                        t0_prep_t = time.time()
+                        self.calculator.head = "triplet"
+                        inputs_t = self.calculator.prepare_batch(batch_frames)
+                        prep_time_t = time.time() - t0_prep_t
+                        
+                        t0_forward_t = time.time()
+                        energies_t, forces_t, lat_frame_t, lat_atom_t = self.calculator.forward(
+                            inputs_t,
+                            n_atoms_list,
+                        )
+                        forward_time_t = time.time() - t0_forward_t
+                        
+                        # Restore original head
+                        self.calculator.head = orig_head
+                        
+                        # Compute prep and forward times for stats
+                        prep_time = (prep_time + prep_time_t) / 2.0
+                        forward_time = (forward_time_s + forward_time_t) / 2.0
+                        
+                        # Set current batch predictions for the requested/original head
+                        if orig_head == "singlet":
+                            energies = energies_s
+                            forces_list = forces_s
+                            lat_frame = lat_frame_s
+                            lat_atom = lat_atom_s
+                        else:
+                            energies = energies_t
+                            forces_list = forces_t
+                            lat_frame = lat_frame_t
+                            lat_atom = lat_atom_t
                 else:
                     inputs = self.calculator.prepare_batch(batch_frames)
                     prep_time = time.time() - t0_prep

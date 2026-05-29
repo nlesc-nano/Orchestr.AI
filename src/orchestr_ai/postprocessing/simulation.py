@@ -141,6 +141,22 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
 
         # 2. Return the official calculator using the correct plural 'models' keyword.
         mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        if mace_head == "triplet_reconstructed":
+            from orchestr_ai.postprocessing.calculators.mace_calculator import (
+                ReconstructedMACECalculator,
+            )
+            scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+            if not scale_metadata_path:
+                scale_metadata_path = "mace_scale_metadata.json"
+
+            return ReconstructedMACECalculator(
+                model=model,
+                device=device,
+                scale_metadata_path=scale_metadata_path,
+            )
 
         kwargs = {
             "models": [model],
@@ -148,8 +164,7 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
             "default_dtype": "float32",
         }
 
-        if isinstance(mace_head, str) and mace_head.strip():
-            mace_head = mace_head.strip()
+        if mace_head:
             print(f"[MACE] Requested head from config: {mace_head}")
             kwargs["head"] = mace_head
         else:

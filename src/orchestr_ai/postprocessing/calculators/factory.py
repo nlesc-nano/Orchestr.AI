@@ -54,19 +54,34 @@ def create_calculator(
         )
 
     if framework == "mace":
-        from orchestr_ai.postprocessing.calculators.mace_calculator import (
-            MaceCalculator,
-        )
-
         cutoff = config.get("cutoff", 12.0)
         mace_head = config.get("mace_head", None)
 
-        return MaceCalculator(
-            model=model_obj,
-            device=device,
-            cutoff=cutoff,
-            head=mace_head,
-        )
+        if mace_head == "triplet_reconstructed":
+            from orchestr_ai.postprocessing.calculators.mace_calculator import (
+                AutoScaledReconstructedMaceCalculator,
+            )
+            # Retrieve scale metadata path (check both options for consistency)
+            scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+            if not scale_metadata_path:
+                scale_metadata_path = "mace_scale_metadata.json"
+
+            return AutoScaledReconstructedMaceCalculator(
+                model=model_obj,
+                device=device,
+                cutoff=cutoff,
+                scale_metadata_path=scale_metadata_path,
+            )
+        else:
+            from orchestr_ai.postprocessing.calculators.mace_calculator import (
+                MaceCalculator,
+            )
+            return MaceCalculator(
+                model=model_obj,
+                device=device,
+                cutoff=cutoff,
+                head=mace_head,
+            )
 
 
     if framework == "nequip":

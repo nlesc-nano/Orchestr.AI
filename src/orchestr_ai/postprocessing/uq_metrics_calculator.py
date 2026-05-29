@@ -376,6 +376,9 @@ def run_uq_metrics(
     # ========= DEBUG DIAGNOSTICS BEFORE CALIBRATION =========
     def _show_stats(name, arr):
         arrf = np.asarray(arr, dtype=float)
+        if arrf.size == 0:
+            print(f"{name}: n=0, min=nan, med=nan, mean=nan, max=nan")
+            return
         print(f"{name}: n={arrf.size}, min={np.nanmin(arrf):g}, "
               f"p0.1={np.nanpercentile(arrf,0.1):g}, p1={np.nanpercentile(arrf,1):g}, "
               f"p10={np.nanpercentile(arrf,10):g}, med={np.nanmedian(arrf):g}, "
@@ -616,7 +619,10 @@ def run_uq_metrics(
 
     # ------------ LOGGING TO FILE & TERMINAL PRINTING -------------------
     ence_F_vals = [m_raw_F["ENCE_raw"], m_var_F["ENCE_calVAR"], m_iso_F["ENCE_calISO"]]
-    best_F_idx = int(np.argmin(ence_F_vals))
+    if np.isnan(ence_F_vals).all():
+        best_F_idx = 0
+    else:
+        best_F_idx = int(np.nanargmin(ence_F_vals))
     
     banner = (
         f"\n=== UQ EVALUATION ({split.upper()}) ===\n"
@@ -645,7 +651,10 @@ def run_uq_metrics(
 
     if delta_e is not None:
         ence_E_vals = [m_raw_E["ENCE_raw_E"], m_var_E["ENCE_calVAR_E"], m_iso_E["ENCE_calISO_E"]]
-        best_E_idx = int(np.argmin(ence_E_vals))
+        if np.isnan(ence_E_vals).all():
+            best_E_idx = 0
+        else:
+            best_E_idx = int(np.nanargmin(ence_E_vals))
         energy_raw_verdict = qualitative_label(m_raw_E['ENCE_raw_E'], "ENCE_raw_E")
 
         if energy_raw_verdict == "good":
@@ -739,7 +748,7 @@ def run_uq_metrics(
             # Forces
             delta_comp=delta_c,
             sigma_comp_uncal=sigma_c,
-            sigma_comp_cal_var=sigma_c_cal_var,
+            sigma_comp_cal_var=sigma_c_cal_var, 
             sigma_comp_cal_iso=sigma_c_cal_iso,
             # Energies
             delta_energy=delta_e,

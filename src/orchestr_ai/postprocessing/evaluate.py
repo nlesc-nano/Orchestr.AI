@@ -93,7 +93,8 @@ class UQCalibrator:
 
 DEFAULT_MACE_HEADS_MAP = {
     "singlet": {"energy_key": "E_singlet", "forces_key": "f_singlet"},
-    "triplet": {"energy_key": "E_triplet", "forces_key": "f_triplet"}
+    "triplet": {"energy_key": "E_triplet", "forces_key": "f_triplet"},
+    "triplet_reconstructed": {"energy_key": "E_triplet", "forces_key": "f_triplet"}
 }
 
 
@@ -109,10 +110,14 @@ class DatasetManager:
         print("\n--- Setting up Datasets ---")
         assert self.eval_path and os.path.exists(self.eval_path), f"Eval file not found: {self.eval_path}"
         
-        # Retrieve configuration-driven mappings or fallbacks
-        mace_heads_map = self.eval_cfg.get("mace_heads", DEFAULT_MACE_HEADS_MAP)
-        if "mace_heads" in self.config:
-            mace_heads_map = self.config["mace_heads"]
+        # Retrieve configuration-driven mappings or fallbacks, ensuring DEFAULT_MACE_HEADS_MAP is preserved as fallback keys
+        mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
+        custom_heads = self.eval_cfg.get("mace_heads", self.config.get("mace_heads", {}))
+        for head_name, head_cfg in custom_heads.items():
+            if head_name not in mace_heads_map:
+                mace_heads_map[head_name] = {}
+            mace_heads_map[head_name].update(head_cfg)
+
             
         mace_head = self.config.get("mace_head", None)
         
@@ -131,19 +136,19 @@ class DatasetManager:
         triplet_cfg = mace_heads_map.get("triplet", {})
         t_e_key = triplet_cfg.get("energy_key", "E_triplet")
         t_f_key = triplet_cfg.get("forces_key", "f_triplet")
-        
         val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval", energy_key=energy_key, forces_key=forces_key)
-        val_E_singlet, _, _ = parse_extxyz(self.eval_path, "eval_singlet", energy_key=s_e_key, forces_key=s_f_key)
-        val_E_triplet, _, _ = parse_extxyz(self.eval_path, "eval_triplet", energy_key=t_e_key, forces_key=t_f_key)
+        val_E_singlet, val_F_singlet, _ = parse_extxyz(self.eval_path, "eval_singlet", energy_key=s_e_key, forces_key=s_f_key)
+        val_E_triplet, val_F_triplet, _ = parse_extxyz(self.eval_path, "eval_triplet", energy_key=t_e_key, forces_key=t_f_key)
         
         val_frames = read(self.eval_path, index=":", format="extxyz")
         
         train_frames, train_E, train_F, train_pos = [], [], [], []
         train_E_singlet, train_E_triplet = [], []
+        train_F_singlet, train_F_triplet = [], []
         if self.train_path and os.path.exists(self.train_path):
             train_E, train_F, train_pos = parse_extxyz(self.train_path, "training_data", energy_key=energy_key, forces_key=forces_key)
-            train_E_singlet, _, _ = parse_extxyz(self.train_path, "training_singlet", energy_key=s_e_key, forces_key=s_f_key)
-            train_E_triplet, _, _ = parse_extxyz(self.train_path, "training_triplet", energy_key=t_e_key, forces_key=t_f_key)
+            train_E_singlet, train_F_singlet, _ = parse_extxyz(self.train_path, "training_singlet", energy_key=s_e_key, forces_key=s_f_key)
+            train_E_triplet, train_F_triplet, _ = parse_extxyz(self.train_path, "training_triplet", energy_key=t_e_key, forces_key=t_f_key)
             train_frames = read(self.train_path, index=":", format="extxyz")
             
             # Redundancy Purge
@@ -165,10 +170,14 @@ class DatasetManager:
             val_frames = [f for f, k in zip(val_frames, eval_mask) if k]
             val_E = [e for e, k in zip(val_E, eval_mask) if k]
             val_F = [f for f, k in zip(val_F, eval_mask) if k]
-            if val_E_singlet:
+            if val_E_singlet and len(val_E_singlet) == len(eval_mask):
                 val_E_singlet = [e for e, k in zip(val_E_singlet, eval_mask) if k]
-            if val_E_triplet:
+            if val_F_singlet and len(val_F_singlet) == len(eval_mask):
+                val_F_singlet = [f for f, k in zip(val_F_singlet, eval_mask) if k]
+            if val_E_triplet and len(val_E_triplet) == len(eval_mask):
                 val_E_triplet = [e for e, k in zip(val_E_triplet, eval_mask) if k]
+            if val_F_triplet and len(val_F_triplet) == len(eval_mask):
+                val_F_triplet = [f for f, k in zip(val_F_triplet, eval_mask) if k]
             print(f"Validation frames after purge: {len(val_frames)}")
 
         all_frames = train_frames + val_frames
@@ -189,7 +198,9 @@ class DatasetManager:
             "train_idx": np.where(train_mask)[0], "val_idx": np.where(val_mask)[0],
             "val_frames_ref": val_frames,
             "E_singlet_true": np.array(train_E_singlet + val_E_singlet) if (train_E_singlet or val_E_singlet) else None,
+            "F_singlet_true": train_F_singlet + val_F_singlet if (train_F_singlet or val_F_singlet) else None,
             "E_triplet_true": np.array(train_E_triplet + val_E_triplet) if (train_E_triplet or val_E_triplet) else None,
+            "F_triplet_true": train_F_triplet + val_F_triplet if (train_F_triplet or val_F_triplet) else None,
         }
 
 
@@ -331,6 +342,10 @@ class EvaluationPipeline:
         
         self.pool_xyz_path = self.eval_cfg.get("unlabeled_pool_path", None)
         self.al_val_flag = None if self.pool_xyz_path else self.eval_cfg.get("active_learning", None)
+        
+        self.stats_ens_other = None
+        self.sigma_comp_other = None
+        self.sigma_E_raw_other = None
 
     def run(self):
         # 1. Load Data
@@ -439,6 +454,90 @@ class EvaluationPipeline:
             generate_uq_plots(metrics_train["npz_path"], "Train", "error_model", calibration="var")
             generate_uq_plots(metrics_eval["npz_path"], "Eval", "error_model", calibration="var")
 
+        # --- Evaluate and save UQ metrics/plots for other heads if dual_head_or is active ---
+        try:
+            al_multihead_mode = self.eval_cfg.get("al_multihead_mode", "reconstructed").lower()
+            model_fw = self.config.get("model_framework", "").lower()
+            if model_fw == "mace" and al_multihead_mode == "dual_head_or":
+                mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
+                custom_heads = self.eval_cfg.get("mace_heads", self.config.get("mace_heads", {}))
+                for head_name, head_cfg in custom_heads.items():
+                    if head_name not in mace_heads_map:
+                        mace_heads_map[head_name] = {}
+                    mace_heads_map[head_name].update(head_cfg)
+                
+                has_multihead = (
+                    "singlet" in mace_heads_map
+                    and any(k in mace_heads_map for k in ["triplet", "triplet_reconstructed", "delta"])
+                )
+                if has_multihead:
+                    orig_mace_head = self.config.get("mace_head")
+                    if orig_mace_head == "singlet":
+                        other_head = "triplet_reconstructed" if "triplet_reconstructed" in mace_heads_map else "triplet"
+                    else:
+                        other_head = "singlet"
+                    
+                    print(f"\n[Ensemble-UQ] Evaluating secondary head '{other_head}' on labeled splits...")
+                    self.config["mace_head"] = other_head
+                    
+                    if other_head == "singlet":
+                        other_E_true = self.ds.get("E_singlet_true")
+                        other_F_true = self.ds.get("F_singlet_true")
+                    else:
+                        other_E_true = self.ds.get("E_triplet_true")
+                        other_F_true = self.ds.get("F_triplet_true")
+                    
+                    if other_E_true is None:
+                        other_E_true = self.ds["E_true"]
+                    if other_F_true is None:
+                        other_F_true = self.ds["F_true"]
+                        
+                    runner_other = EnsembleRunner(self.config, self.device, self.neighbour_list)
+                    ens_E_other, ens_F_list_other, _, _ = runner_other.evaluate(
+                        self.ds["frames"], other_E_true, other_F_true, cache_file=f"ensemble_{other_head}.npz",
+                        E_singlet_true=self.ds.get("E_singlet_true"),
+                        E_triplet_true=self.ds.get("E_triplet_true"),
+                    )
+                    
+                    self.config["mace_head"] = orig_mace_head
+                    
+                    if len(ens_E_other) > 0 and len(ens_F_list_other) > 0:
+                        ens_F_other = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_list_other], dtype=float)
+                        mu_E_frame_other = np.mean(ens_E_other, axis=0)
+                        std_E_frame_other = np.std(ens_E_other, axis=0, ddof=0)
+                        sigma_E_raw_other = np.std(ens_E_other, axis=0, ddof=1)
+                        mu_F_comp_other = np.mean(ens_F_other, axis=0)
+                        sigma_F_flat_other = np.std(ens_F_other, axis=0, ddof=1)
+                        std_F_comp_other = sigma_F_flat_other.flatten()
+                        
+                        mf_list_other, idx = [], 0
+                        for fr in self.ds["frames"]:
+                            mf_list_other.append(mu_F_comp_other[idx:idx+len(fr)])
+                            idx += len(fr)
+                        stats_ens_other = MLFFStats(other_E_true, mu_E_frame_other, other_F_true, mf_list_other, self.ds["train_mask"], self.ds["val_mask"])
+                        
+                        sigma_comp_other = sigma_F_flat_other.flatten()
+                        sigma_atom_other = np.linalg.norm(sigma_comp_other.reshape(-1, 3), axis=1)
+                        
+                        self.stats_ens_other = stats_ens_other
+                        self.sigma_comp_other = sigma_comp_other
+                        self.sigma_E_raw_other = sigma_E_raw_other
+                        
+                        metrics_train_other = calculate_uq_metrics(
+                            stats_ens_other, sigma_comp_other, sigma_atom_other, sigma_E_raw_other,
+                            "Train", f"ensemble_{other_head}", self.eval_log
+                        )
+                        metrics_eval_other = calculate_uq_metrics(
+                            stats_ens_other, sigma_comp_other, sigma_atom_other, sigma_E_raw_other,
+                            "Eval", f"ensemble_{other_head}", self.eval_log
+                        )
+                        
+                        if self.do_plot:
+                            generate_uq_plots(metrics_train_other["npz_path"], "Train", f"error_model_{other_head}", calibration="var")
+                            generate_uq_plots(metrics_eval_other["npz_path"], "Eval", f"error_model_{other_head}", calibration="var")
+        except Exception as e:
+            print(f"[Ensemble-UQ] WARNING: Failed to compute UQ metrics/plots for secondary head: {e}")
+
         return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw
 
     def _run_validation_al(self, stats_ens, mean_L_frame, sigma_comp):
@@ -478,6 +577,54 @@ class EvaluationPipeline:
         sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
         mu_L_pool = np.mean(ens_L_pool, axis=0)
 
+        # Store original head uncertainties for diagnostic separation
+        sigma_E_pool_orig = sigma_E_pool.copy()
+        sigma_F_pool_orig = sigma_F_pool.copy()
+        sigma_E_pool_other = None
+        sigma_F_pool_other = None
+        mu_E_pool_other = None
+        orig_mace_head = self.config.get("mace_head", "triplet_reconstructed")
+        other_head = None
+
+        # Handle multi-head OR active learning if enabled
+        al_multihead_mode = self.eval_cfg.get("al_multihead_mode", "reconstructed").lower()
+        model_fw = self.config.get("model_framework", "").lower()
+        has_multihead = False
+        mace_heads_map = {}
+        if model_fw == "mace":
+            mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
+            custom_heads = self.eval_cfg.get("mace_heads", self.config.get("mace_heads", {}))
+            for head_name, head_cfg in custom_heads.items():
+                if head_name not in mace_heads_map:
+                    mace_heads_map[head_name] = {}
+                mace_heads_map[head_name].update(head_cfg)
+            has_multihead = (
+                "singlet" in mace_heads_map
+                and any(k in mace_heads_map for k in ["triplet", "triplet_reconstructed", "delta"])
+            )
+
+        if has_multihead and al_multihead_mode == "dual_head_or":
+            if orig_mace_head == "singlet":
+                other_head = "triplet_reconstructed" if "triplet_reconstructed" in mace_heads_map else "triplet"
+            else:
+                other_head = "singlet"
+
+            print(f"[Pool-AL] Dual-head Active Learning enabled. Evaluating other head '{other_head}'...")
+            self.config["mace_head"] = other_head
+            
+            runner_s = EnsembleRunner(self.config, self.device, self.neighbour_list)
+            ens_E_pool_s, ens_F_pool_list_s, _, _ = runner_s.evaluate(pool_frames, cache_file=f"ensemble_unlabel_{other_head}.npz")
+            
+            self.config["mace_head"] = orig_mace_head
+            
+            if len(ens_E_pool_s) > 0 and len(ens_F_pool_list_s) > 0:
+                ens_F_pool_s = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_pool_list_s], dtype=float)
+                sigma_E_pool_other = np.std(ens_E_pool_s, axis=0, ddof=1)
+                sigma_F_pool_other = np.std(ens_F_pool_s, axis=0, ddof=1)
+                mu_E_pool_other = np.mean(ens_E_pool_s, axis=0)
+                
+                print(f"[Pool-AL] Successfully evaluated original head '{orig_mace_head}' and other head '{other_head}' uncertainties.")
+
         # Thinning
         thin_idx = np.arange(len(pool_frames))[::self.eval_cfg.get("pool_stride", 1)]
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
@@ -490,6 +637,15 @@ class EvaluationPipeline:
         n_atoms_pool = len(pool_frames[0])
         mu_F_pool_thin = mu_F_pool.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
         sigma_F_pool_thin = sigma_F_pool.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
+
+        sigma_E_pool_orig_thin = sigma_E_pool_orig[thin_idx].astype(float)
+        sigma_F_pool_orig_thin = sigma_F_pool_orig.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
+
+        sigma_E_pool_other_thin = None
+        sigma_F_pool_other_thin = None
+        if sigma_E_pool_other is not None:
+            sigma_E_pool_other_thin = sigma_E_pool_other[thin_idx].astype(float)
+            sigma_F_pool_other_thin = sigma_F_pool_other.reshape(len(pool_frames), n_atoms_pool, 3)[thin_idx]
 
         # RDF filtering
         rdf_cache = "rdf_thresholds_cache.npz"
@@ -510,7 +666,7 @@ class EvaluationPipeline:
 
         # Energy Trace Logging
         import scipy.spatial.distance
-        df = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool})
+        df = pd.DataFrame({"mu": mu_E_pool, "sigma": sigma_E_pool_orig})
         sm = df.rolling(50, center=True, min_periods=1).mean()
         bad_mask = np.zeros(len(mu_E_pool), dtype=bool)
         
@@ -540,21 +696,113 @@ class EvaluationPipeline:
 
         # Selection
         print("[Pool-AL] Running windowed active learning on thinned pool ...")
-        _, sel_rel_thin = adaptive_learning_mig_pool_windowed(
-            pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
-            forces_train=self.ds["F_train_arr"], sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
-            mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
-            mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_thin, rdf_thresholds=rdf_thresholds,
-            rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
-            window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
-            percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),
-            percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
-            percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
-            hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
-            hard_sigma_F_mean_min=self.eval_cfg.get("thr_sF_mean", 0.1),
-            hard_sigma_F_max_min=self.eval_cfg.get("thr_sF_max", 0.1),
-            hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5)
-        )
+        
+        # Helper to write head-specific selection files
+        def save_selected_frames(filename, sel_rel_indices, sigma_E_source, head_name):
+            sel_global_idx = thin_idx[sel_rel_indices]
+            if len(sel_global_idx) > 0:
+                with open(filename, "w") as fh:
+                    for orig_idx in sel_global_idx:
+                        atoms = pool_frames[orig_idx]
+                        if head_name == orig_mace_head:
+                            e_raw = float(mu_E_pool[orig_idx])
+                        elif mu_E_pool_other is not None:
+                            e_raw = float(mu_E_pool_other[orig_idx])
+                        else:
+                            e_raw = float(mu_E_pool[orig_idx])
+                        s_raw = float(sigma_E_source[orig_idx])
+                        comment = f"frame={orig_idx}, head={head_name}, e_pred_raw={e_raw:.6f}, s_raw={s_raw:.6f}"
+                        write(fh, atoms, format="xyz", comment=comment)
+                print(f"[Pool-AL] Saved {len(sel_global_idx)} pool frames to '{filename}'.")
+
+        sel_rel_thin_orig = []
+        sel_rel_thin_other = []
+
+        # Diagnostic separate runs for each head if in dual_head_or mode
+        if has_multihead and al_multihead_mode == "dual_head_or":
+            # 1. Run for original/primary head only
+            try:
+                print(f"[Pool-AL] Running diagnostic selection for primary head '{orig_mace_head}'...")
+                _, sel_rel_thin_orig = adaptive_learning_mig_pool_windowed(
+                    pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
+                    forces_train=self.ds["F_train_arr"], sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
+                    mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_orig_thin,
+                    mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_orig_thin, rdf_thresholds=rdf_thresholds,
+                    rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
+                    window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
+                    percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),
+                    percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
+                    percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
+                    hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
+                    hard_sigma_F_mean_min=self.eval_cfg.get("thr_sF_mean", 0.1),
+                    hard_sigma_F_max_min=self.eval_cfg.get("thr_sF_max", 0.1),
+                    hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
+                    base=f"al_pool_{orig_mace_head}"
+                )
+                save_selected_frames(f"to_DFT_labelling_from_pool_{orig_mace_head}.xyz", sel_rel_thin_orig, sigma_E_pool_orig, orig_mace_head)
+            except Exception as e:
+                print(f"[Pool-AL] WARNING: Failed to run separate AL diagnostic for head '{orig_mace_head}': {e}")
+
+            # 2. Run for secondary head only
+            if sigma_E_pool_other_thin is not None and self.stats_ens_other is not None and self.sigma_E_raw_other is not None and self.sigma_comp_other is not None:
+                try:
+                    print(f"[Pool-AL] Running diagnostic selection for secondary head '{other_head}'...")
+                    good_rows_other = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(self.stats_ens_other.delta_E_frame[self.ds["train_idx"]])
+                    alpha_sq_other, _, _, _, L_chol_other = calibrate_alpha_reg_gcv(F_train_thin[good_rows_other], self.stats_ens_other.delta_E_frame[self.ds["train_idx"]][good_rows_other])
+                    mu_E_train_other = self.stats_ens_other.pred_energies[self.ds["train_idx"]]
+                    
+                    _, sel_rel_thin_other = adaptive_learning_mig_pool_windowed(
+                        pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq_other, L_chol_other,
+                        forces_train=self.ds["F_train_arr"], sigma_energy=self.sigma_E_raw_other, sigma_force=self.sigma_comp_other,
+                        mu_E_frame_train=mu_E_train_other, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_other_thin,
+                        mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_other_thin, rdf_thresholds=rdf_thresholds,
+                        rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
+                        window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
+                        percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),
+                        percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
+                        percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
+                        hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
+                        hard_sigma_F_mean_min=self.eval_cfg.get("thr_sF_mean", 0.1),
+                        hard_sigma_F_max_min=self.eval_cfg.get("thr_sF_max", 0.1),
+                        hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
+                        base=f"al_pool_{other_head}"
+                    )
+                    save_selected_frames(f"to_DFT_labelling_from_pool_{other_head}.xyz", sel_rel_thin_other, sigma_E_pool_other, other_head)
+                except Exception as e:
+                    print(f"[Pool-AL] WARNING: Failed to run separate AL diagnostic for head '{other_head}': {e}")
+
+            # Merge choices
+            merge_selections = self.eval_cfg.get("merge_al_selections", True)
+            if merge_selections:
+                sel_rel_thin = sorted(list(set(sel_rel_thin_orig) | set(sel_rel_thin_other)))
+                print(f"[Pool-AL] Merging selections: Union of {orig_mace_head} and {other_head} contains {len(sel_rel_thin)} unique frames.")
+            else:
+                sel_rel_thin = sel_rel_thin_orig
+                print(f"[Pool-AL] merge_al_selections is False. Final selection set to primary head selector pass ({len(sel_rel_thin)} frames).")
+
+        else:
+            # Single-head fallback
+            try:
+                _, sel_rel_thin_orig = adaptive_learning_mig_pool_windowed(
+                    pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
+                    forces_train=self.ds["F_train_arr"], sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
+                    mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
+                    mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_thin, rdf_thresholds=rdf_thresholds,
+                    rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
+                    window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
+                    percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),
+                    percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
+                    percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
+                    hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
+                    hard_sigma_F_mean_min=self.eval_cfg.get("thr_sF_mean", 0.1),
+                    hard_sigma_F_max_min=self.eval_cfg.get("thr_sF_max", 0.1),
+                    hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5)
+                )
+                save_selected_frames(f"to_DFT_labelling_from_pool_{orig_mace_head}.xyz", sel_rel_thin_orig, sigma_E_pool, orig_mace_head)
+                sel_rel_thin = sel_rel_thin_orig
+            except Exception as e:
+                print(f"[Pool-AL] WARNING: Failed to run single head selection pass: {e}")
+                sel_rel_thin = []
 
         # Output
         sel_global_idx = thin_idx[sel_rel_thin]
@@ -562,10 +810,23 @@ class EvaluationPipeline:
             with open("to_DFT_labelling_from_pool.xyz", "w") as fh:
                 for orig_idx in sel_global_idx:
                     atoms = pool_frames[orig_idx]
-                    e_raw, s_raw = float(mu_E_pool[orig_idx]), float(sigma_E_pool[orig_idx])
-                    _, s_cal_arr, bias_corr_arr = calibrator.calibrate(np.array([e_raw]), np.array([s_raw]))
-                    e_cal, s_cal = e_raw - float(bias_corr_arr[0]), float(s_cal_arr[0])
-                    comment = f"frame={orig_idx}, e_pred_raw={e_raw:.6f}, s_raw={s_raw:.6f}, bias_corr={-float(bias_corr_arr[0]):.6f}, s_calibrated={s_cal:.6f}, BALLPARK=[{e_cal - s_cal:.6f}, {e_cal + s_cal:.6f}]"
+                    if has_multihead and al_multihead_mode == "dual_head_or":
+                        if orig_mace_head == "singlet":
+                            e_singlet = float(mu_E_pool[orig_idx])
+                            s_singlet = float(sigma_E_pool_orig[orig_idx])
+                            e_triplet = float(mu_E_pool_other[orig_idx]) if mu_E_pool_other is not None else 0.0
+                            s_triplet = float(sigma_E_pool_other[orig_idx]) if sigma_E_pool_other is not None else 0.0
+                        else:
+                            e_triplet = float(mu_E_pool[orig_idx])
+                            s_triplet = float(sigma_E_pool_orig[orig_idx])
+                            e_singlet = float(mu_E_pool_other[orig_idx]) if mu_E_pool_other is not None else 0.0
+                            s_singlet = float(sigma_E_pool_other[orig_idx]) if sigma_E_pool_other is not None else 0.0
+                        comment = f"frame={orig_idx}, e_singlet={e_singlet:.4f}, s_singlet={s_singlet:.4f}, e_triplet={e_triplet:.4f}, s_triplet={s_triplet:.4f}"
+                    else:
+                        e_raw, s_raw = float(mu_E_pool[orig_idx]), float(sigma_E_pool[orig_idx])
+                        _, s_cal_arr, bias_corr_arr = calibrator.calibrate(np.array([e_raw]), np.array([s_raw]))
+                        e_cal, s_cal = e_raw - float(bias_corr_arr[0]), float(s_cal_arr[0])
+                        comment = f"frame={orig_idx}, e_pred_raw={e_raw:.6f}, s_raw={s_raw:.6f}, bias_corr={-float(bias_corr_arr[0]):.6f}, s_calibrated={s_cal:.6f}, BALLPARK=[{e_cal - s_cal:.6f}, {e_cal + s_cal:.6f}]"
                     write(fh, atoms, format="xyz", comment=comment)
             print(f"[Pool-AL] Saved {len(sel_global_idx)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
 

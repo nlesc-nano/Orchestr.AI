@@ -3,7 +3,8 @@
 # --- 1. Model & System Settings ---
 model_framework: "nequip" # Options: "schnetpack", "mace", "nequip"
 model_path: "./models/best_model6.nequip.pth"
-mace_head: singlet # Options: "singlet", "triplet"
+mace_head: singlet # Options: "singlet", "triplet", "triplet_reconstructed"
+scale_metadata_path: "mace_scale_metadata.json" # Required only when mace_head is triplet_reconstructed
 cutoff: 12.0
 log_file: "simulation.log"
 initial_xyz: "CdSe149.xyz"
@@ -16,6 +17,7 @@ eval:
   uncertainty: ["ensemble"]
   ensemble_folder: "./models"
   ensemble_size: 10
+  al_multihead_mode: "dual_head_or" # Options: "reconstructed" (Option A), "dual_head_or" (Option B)
 
   mace_heads:
     singlet:
@@ -37,6 +39,7 @@ eval:
   unlabeled_pool_path: "md_trajectory.extxyz"
   active_learning: "influence"
   budget_max: 50
+  merge_al_selections: true
 
   # Pool processing window & stride
   pool_stride: 1 # Thin the pool by taking every Nth frame
