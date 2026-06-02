@@ -36,7 +36,7 @@ eval:
   rdf_stride: 2           # Subsample validation frames for RDF thresholding
 
   # Percentile bounds (Adaptive Caps & Novelty)
-  percentile_gamma: 100   # Novelty gate (Mahalanobis distance)
+  percentile_gamma: 99    # GP leverage γ gate in whitened latent space (98-99 recommended)
   percentile_F_low: 99.5  # Lower bound for force uncertainty
   percentile_F_hi: 95     # Adaptive upper cap limit
 
@@ -45,6 +45,26 @@ eval:
   thr_sF_mean: 0.075       # min mean σ(Force) (eV/Å)
   thr_sF_max:  0.150        # min max σ(Force) (eV/Å)
   thr_Fmax_mult: 1.5      # Max physical force = 1.5 × max |F|_train
+
+  # Large-pool triage (700-atom MD): relax per-atom max σ(F) floor vs mean/energy σ
+  large_cluster_threshold: 300   # median pool atoms above this → apply surface_relax_factor
+  surface_relax_factor: 1.5      # multiply thr_sF_max only (surface spikes); omit for auto
+  stratify_train_by_size: true   # mixed train: percentiles from size-matched train subset
+  size_split_atoms: 300          # same as large_cluster_threshold
+
+  # Calibrated σ for pool selection (fit on train via uq_metrics, apply before gates)
+  use_calibrated_selection: true
+  selection_calibration: "var"   # "var" or "iso" (var then isotonic)
+  calibration_min_spearman: 0.4
+  calibration_max_ence: 0.20
+  calibration_picp95_tol: 0.08
+  calibration_support_upper_mult: 1.25
+  calibration_support_force_mult: 1.5
+  hard_floors_from_calibrated_train: true
+
+  # Reference slope validation (consecutive ΔE/atom on labeled train/eval)
+  reference_slope_validation: true
+  slope_validation_min_frames: 2
 
 # --- 3. Molecular Dynamics ---
 md:

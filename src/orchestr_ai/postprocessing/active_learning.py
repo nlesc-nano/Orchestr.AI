@@ -20,9 +20,11 @@ from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from itertools import combinations
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 from sklearn.isotonic import IsotonicRegression
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
+
+_GAUSSIAN_SIGMA_TO_ABS = float(np.sqrt(2.0 / np.pi))
 
 def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_max=4, l_max=4):
     """
@@ -303,6 +305,7 @@ class _PoolActiveLearner:
         
         self.n_uncertain_total = 0
         self.n_gamma_gate_total = 0
+        self.n_ood_risk_total = 0
 
     def run(self):
         print(f"\n[AL] --- PoolActiveLearner Orchestrator ---")
@@ -342,6 +345,46 @@ class _PoolActiveLearner:
         self.forces_train_frames = _as_frame_arrays(self.forces_train, name="forces_train")
         self.train_atom_counts = _frame_counts_from_arrays(self.forces_train_frames)
         self.pool_atom_counts = np.array([len(fr) for fr in self.pool_frames], dtype=float)
+        self.calibration_in_support = np.asarray(
+            getattr(self, "calibration_in_support", np.ones(len(self.pool_frames), dtype=bool)),
+            dtype=bool,
+        )
+        self.ood_risk_mask = np.asarray(
+            getattr(self, "ood_risk_mask", ~self.calibration_in_support),
+            dtype=bool,
+        )
+        self.expected_abs_E_atom = np.asarray(
+            getattr(self, "expected_abs_E_atom", np.full(len(self.pool_frames), np.nan)),
+            dtype=float,
+        )
+        self.expected_abs_F_mean = np.asarray(
+            getattr(self, "expected_abs_F_mean", np.full(len(self.pool_frames), np.nan)),
+            dtype=float,
+        )
+        self.expected_abs_F_max = np.asarray(
+            getattr(self, "expected_abs_F_max", np.full(len(self.pool_frames), np.nan)),
+            dtype=float,
+        )
+        if not (
+            len(self.calibration_in_support)
+            == len(self.ood_risk_mask)
+            == len(self.expected_abs_E_atom)
+            == len(self.expected_abs_F_mean)
+            == len(self.expected_abs_F_max)
+            == len(self.pool_frames)
+        ):
+            raise ValueError("Calibration diagnostic arrays must contain one value per pool frame")
+        self.n_atoms_pool = int(np.median(self.pool_atom_counts))
+        self.large_cluster_threshold = int(getattr(self, "large_cluster_threshold", 300))
+        if getattr(self, "surface_relax_factor", None) is None:
+            self.surface_relax_factor = (
+                1.5 if self.n_atoms_pool > self.large_cluster_threshold else 1.0
+            )
+        print(
+            f"[AL] Pool size: median n_atoms={self.n_atoms_pool}, "
+            f"surface_relax_factor={self.surface_relax_factor} "
+            f"(threshold>{self.large_cluster_threshold})"
+        )
 
         self.sigma_force_frames = _as_frame_arrays(
             self.sigma_force,
@@ -403,12 +446,60 @@ class _PoolActiveLearner:
             self.sigma_F_pool_mean = _frame_sigma_mean_norm(self.sigma_F_pool_frames)
             self.frame_max_force_pool = _frame_force_max(self.mu_F_pool_frames)
 
-        # Baseline Thresholds
-        self.thr_sigma_E_low = np.percentile(self.sigma_E_atom_train, self.percentile_F_low)
-        self.thr_sigma_F = np.percentile(self.sigma_F_train_max, self.percentile_F_low)
-        self.thr_sigma_Fmean = np.percentile(self.sigma_F_train_mean, self.percentile_F_low)
-        self.thr_Fmag = np.percentile(self.frame_max_force_train, self.percentile_F_low)
-        self.train_Fmax_hard_cap = float(self.frame_max_force_train.max()) * float(self.hard_Fmax_train_mult)
+        # Baseline Thresholds (optional stratification by cluster size for mixed train sets)
+        stratify = bool(getattr(self, "stratify_train_by_size", False))
+        size_split = int(getattr(self, "size_split_atoms", self.large_cluster_threshold))
+        train_ref = np.ones(len(self.train_atom_counts), dtype=bool)
+        if stratify:
+            n_large = int((self.train_atom_counts >= size_split).sum())
+            n_small = int((self.train_atom_counts < size_split).sum())
+            if self.n_atoms_pool > size_split and n_large >= 20:
+                train_ref = self.train_atom_counts >= size_split
+                print(
+                    f"[AL] Stratified train thresholds: large subset "
+                    f"({train_ref.sum()} frames, n>={size_split})"
+                )
+            elif self.n_atoms_pool <= size_split and n_small >= 20:
+                train_ref = self.train_atom_counts < size_split
+                print(
+                    f"[AL] Stratified train thresholds: small subset "
+                    f"({train_ref.sum()} frames, n<{size_split})"
+                )
+            else:
+                print(
+                    f"[AL] Stratify requested but insufficient frames "
+                    f"(large={n_large}, small={n_small}); using all train frames."
+                )
+
+        self._train_ref_mask = train_ref
+        e_ref = self.sigma_E_atom_train[train_ref]
+        fmax_ref = self.sigma_F_train_max[train_ref]
+        fmean_ref = self.sigma_F_train_mean[train_ref]
+        fm_ref = self.frame_max_force_train[train_ref]
+
+        self.thr_sigma_E_low = np.percentile(e_ref, self.percentile_F_low)
+        self.thr_sigma_F = np.percentile(fmax_ref, self.percentile_F_low)
+        self.thr_sigma_Fmean = np.percentile(fmean_ref, self.percentile_F_low)
+        self.thr_Fmag = np.percentile(fm_ref, self.percentile_F_low)
+        self.train_Fmax_hard_cap = float(fm_ref.max()) * float(self.hard_Fmax_train_mult)
+
+        if bool(getattr(self, "hard_floors_from_calibrated_train", False)):
+            pct = float(self.percentile_F_low)
+            self.hard_sigma_E_atom_min = float(
+                max(self.hard_sigma_E_atom_min, np.percentile(e_ref, pct))
+            )
+            self.hard_sigma_F_mean_min = float(
+                max(self.hard_sigma_F_mean_min, np.percentile(fmean_ref, pct))
+            )
+            self.hard_sigma_F_max_min = float(
+                max(self.hard_sigma_F_max_min, np.percentile(fmax_ref, pct))
+            )
+            print(
+                "[AL] Hard floors raised from calibrated train percentiles "
+                f"(p{pct}): σE>={self.hard_sigma_E_atom_min:.4g}, "
+                f"σF_mean>={self.hard_sigma_F_mean_min:.4g}, "
+                f"σF_max>={self.hard_sigma_F_max_min:.4g}"
+            )
 
         # Apply RDF Filter (Catches overlaps)
         self.rdf_ok_mask = fast_filter_by_rdf_kdtree(self.pool_frames, self.rdf_thresholds)
@@ -498,7 +589,8 @@ class _PoolActiveLearner:
         n_hi_Fmax = (self.sigma_F_pool_max > self.thr_sigma_F).sum()
         n_hi_Fmean = (self.sigma_F_pool_mean > self.thr_sigma_Fmean).sum()
         n_hi_Fmag = (self.frame_max_force_pool > self.thr_Fmag).sum()
-        self.n_hi_total = n_hi_E + n_hi_Fmax + n_hi_Fmean + n_hi_Fmag
+        n_hi_ood = (self.ood_risk_mask & self.rdf_ok_mask).sum()
+        self.n_hi_total = n_hi_E + n_hi_Fmax + n_hi_Fmean + n_hi_Fmag + n_hi_ood
 
     def _evaluate_windows(self):
         n_pool = len(self.pool_frames)
@@ -546,10 +638,32 @@ class _PoolActiveLearner:
             # ----------------------------------------
 
             # Hard Triggers (Uncertainty minimums - The "Floor")
-            high = [i for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and
-                                          (self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min or
-                                           self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min or
-                                           self.sigma_F_pool_max[i] >= self.hard_sigma_F_max_min)]
+            # Relax per-atom max-force sigma on large clusters so surface spikes do not flood triage.
+            _large_thr = int(getattr(self, "large_cluster_threshold", 300))
+            _srf = float(
+                getattr(
+                    self,
+                    "surface_relax_factor",
+                    1.5 if self.n_atoms_pool > _large_thr else 1.0,
+                )
+            )
+            _thr_fmax = self.hard_sigma_F_max_min * _srf
+            high = [
+                i for i in win_phys
+                if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap
+                and (
+                    self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min
+                    or self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min
+                    or self.sigma_F_pool_max[i] >= _thr_fmax
+                )
+            ]
+            ood_high = [
+                i for i in win_phys
+                if self.ood_risk_mask[i]
+                and self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap
+            ]
+            if ood_high:
+                high = sorted(set(high).union(ood_high))
 
             # Process Window Metrics
             win_all = np.array(win, dtype=int)
@@ -563,6 +677,7 @@ class _PoolActiveLearner:
             cand_mask = np.isin(win_all, high) & keep_gamma_mask
 
             self.n_uncertain_total += len(high)
+            self.n_ood_risk_total += len(ood_high)
             self.n_gamma_gate_total += cand_mask.sum()
 
             cand_idx_local = np.where(cand_mask)[0]
@@ -573,14 +688,29 @@ class _PoolActiveLearner:
                 X_cand = sub_G_all[cand_idx_local]
                 order, gains, _ = d_optimal_full_order(X_cand, self.G_train)
 
-                # Intra-batch diversity
-                dist_mat = np.linalg.norm(X_cand[:, None, :] - X_cand[None, :, :], axis=2)
+                # Intra-batch diversity (column-standardized distances + decay kernel)
+                X_cand_scaled = X_cand.astype(float, copy=True)
+                col_std = X_cand_scaled.std(axis=0)
+                col_std[col_std < 1e-9] = 1.0
+                X_cand_scaled = (X_cand_scaled - X_cand_scaled.mean(axis=0)) / col_std
+                dist_mat = np.linalg.norm(
+                    X_cand_scaled[:, None, :] - X_cand_scaled[None, :, :], axis=2
+                )
+                pos_dists = dist_mat[dist_mat > 0]
+                tau = max(float(np.median(pos_dists)), 1e-9) if pos_dists.size else 1.0
                 remaining = list(range(X_cand.shape[0]))
 
                 while len(selected_local) < self.min_k and remaining:
                     best_score, best_r = -np.inf, None
                     for r in remaining:
-                        score = gains[r] * (1.0 if not selected_local else float(np.min(dist_mat[r, selected_local])))
+                        min_dist = (
+                            1.0
+                            if not selected_local
+                            else float(np.min(dist_mat[r, selected_local]))
+                        )
+                        div_weight = 1.0 if not selected_local else float(1.0 - np.exp(-min_dist / tau))
+                        div_weight = max(div_weight, 1e-6)
+                        score = gains[r] * div_weight
                         if score > best_score:
                             best_score, best_r = score, r
                     selected_local.append(best_r)
@@ -591,7 +721,8 @@ class _PoolActiveLearner:
             # --- NEW INFORMATIVE PRINT LOGGING WITH REJECTION REASONS ---
             print(f"  -> Window [{w0:4d} - {win_end:4d}] | "
                   f"GeomOK: {len(win_good):3d} | PhysOK: {len(win_phys):3d} | "
-                  f"Uncertain: {len(high):3d} | Novel: {cand_mask.sum():3d} | Sel: {len(selected_local):2d}")
+                  f"Uncertain: {len(high):3d} | OOD: {len(ood_high):3d} | "
+                  f"Novel: {cand_mask.sum():3d} | Sel: {len(selected_local):2d}")
             if len(win_good) > len(win_phys):
                 print(f"       Drops: E_hi={drop_E_hi}, CI={drop_CI}, sE_hi={drop_sE_hi}, "
                       f"sFmax_hi={drop_sFmax_hi}, sFmean_hi={drop_sFmean_hi}, Fmag_hi={drop_Fmag_hi}")
@@ -609,6 +740,11 @@ class _PoolActiveLearner:
                     "sigma_E_atom": self.sigma_E_atom_pool[pidx],
                     "sigma_F_max": self.sigma_F_pool_max[pidx],
                     "sigma_F_mean": self.sigma_F_pool_mean[pidx],
+                    "exp_abs_E_atom": self.expected_abs_E_atom[pidx],
+                    "exp_abs_F_mean": self.expected_abs_F_mean[pidx],
+                    "exp_abs_F_max": self.expected_abs_F_max[pidx],
+                    "cal_support": self.calibration_in_support[pidx],
+                    "ood_risk": self.ood_risk_mask[pidx],
                     "Fmax": self.frame_max_force_pool[pidx],
                     "mu_E_atom": self.mu_E_atom_pool[pidx],
                     "selected": pidx in picks_abs
@@ -652,12 +788,14 @@ class _PoolActiveLearner:
             fh.write(f"# hard_sigma_F_mean_min  = {getattr(self, 'hard_sigma_F_mean_min', np.nan):.6f}\n")
             fh.write(f"# hard_sigma_F_max_min   = {getattr(self, 'hard_sigma_F_max_min', np.nan):.6f}\n")
             fh.write(f"# train_Fmax_hard_cap    = {self.train_Fmax_hard_cap:.6f}\n")
+            fh.write(f"# calibration_support_fraction = {float(np.mean(self.calibration_in_support)):.6f}\n")
             fh.write("# ----------------------------------------\n\n")
 
             # --- 2. Write Pool Diagnostics ---
             fh.write(f"{'idx':<8} {'window':>12} {'geom_ok':>8} {'caps_ok':>8} {'force_inf':>10} {'γ_gate':>8} "
                      f"{'gamma0':>12} {'dM':>12} {'Dgain':>14} {'raw_score':>12} {'σE_atom':>12} "
-                     f"{'σF_max':>12} {'σF_mean':>12} {'Fmax':>12} {'selected':>10} {'shortlist':>11}\n")
+                     f"{'σF_max':>12} {'σF_mean':>12} {'Eabs_exp':>12} {'Fabs_mean':>12} "
+                     f"{'cal_ok':>8} {'ood':>6} {'Fmax':>12} {'selected':>10} {'shortlist':>11}\n")
             
             shortlist_set = set(self.final_pool_indices)
             for pidx in sorted(self.all_frame_records.keys()):
@@ -665,7 +803,9 @@ class _PoolActiveLearner:
                 fh.write(f"{pidx:<8d} {R['window']:>12} {int(R['rdf_ok']):>8d} {int(R['pass_caps']):>8d} "
                          f"{int(R['force_inf']):>10d} {int(R['gamma_gate']):>8d} {R['gamma0']:>12.6f} {R['dM']:>12.6f} "
                          f"{R['dgain_train']:>14.6f} {R['raw_score_window']:>12.6f} {R['sigma_E_atom']:>12.6f} "
-                         f"{R['sigma_F_max']:>12.6f} {R['sigma_F_mean']:>12.6f} {R['Fmax']:>12.6f} "
+                         f"{R['sigma_F_max']:>12.6f} {R['sigma_F_mean']:>12.6f} {R['exp_abs_E_atom']:>12.6f} "
+                         f"{R['exp_abs_F_mean']:>12.6f} {int(R['cal_support']):>8d} {int(R['ood_risk']):>6d} "
+                         f"{R['Fmax']:>12.6f} "
                          f"{int(R['selected']):>10d} {int(pidx in shortlist_set):>11d}\n")
 
             # --- 3. Write Train Data Block ---
@@ -683,6 +823,8 @@ class _PoolActiveLearner:
         print(f"\n[AL] Summary:")
         print(f"    Geom OK fraction: {frac_geom:.3f} ({n_ok}/{n_total} frames)")
         print(f"    Hard triggers passed: {self.n_uncertain_total}")
+        print(f"    Calibration OOD triggers: {self.n_ood_risk_total}")
+        print(f"    Calibration in-support fraction: {np.mean(self.calibration_in_support):.3f}")
         print(f"    Shortlisted frames: {len(self.final_pool_indices)}")
 
         # --- NEW: ACTIVE LEARNING STRATEGY WARNING ---
@@ -760,3 +902,171 @@ class UQCalibrator:
         plt.savefig(f"{out_dir}/bias_calibration_scatter.png", dpi=200)
         plt.close()
         print(f"[UQCalibrator] Diagnostic plots saved to {out_dir}/")
+
+
+# =============================================================================
+# 4. UQ CALIBRATION FOR POOL SELECTION & REFERENCE SLOPE VALIDATION
+# =============================================================================
+
+def apply_sigma_comp_calibration(
+    sigma_comp: np.ndarray,
+    calibrators: Optional[Dict[str, Any]],
+    mode: str = "var",
+) -> np.ndarray:
+    """Apply train-fitted force calibrators to flat component uncertainties."""
+    if calibrators is None or sigma_comp is None:
+        return sigma_comp
+    sigma = np.asarray(sigma_comp, dtype=float)
+    cal_var = calibrators.get("cal_var_F")
+    if cal_var is None:
+        return sigma
+    out = cal_var.transform(sigma)
+    if str(mode).lower() == "iso":
+        cal_iso = calibrators.get("cal_iso_F")
+        if cal_iso is not None:
+            out = cal_iso.transform(out)
+    return out
+
+
+def apply_sigma_energy_calibration(
+    sigma_energy: np.ndarray,
+    calibrators: Optional[Dict[str, Any]],
+    mode: str = "var",
+) -> np.ndarray:
+    """Apply train-fitted energy calibrators to per-frame ensemble σ(E)."""
+    if calibrators is None or sigma_energy is None:
+        return sigma_energy
+    sigma = np.asarray(sigma_energy, dtype=float)
+    cal_var = calibrators.get("cal_var_E")
+    if cal_var is None:
+        return sigma
+    out = cal_var.transform(sigma)
+    if str(mode).lower() == "iso":
+        cal_iso = calibrators.get("cal_iso_E")
+        if cal_iso is not None:
+            out = cal_iso.transform(out)
+    return out
+
+
+def calibrate_sigma_force_frames(
+    sigma_force_frames: List[np.ndarray],
+    calibrators: Optional[Dict[str, Any]],
+    mode: str = "var",
+) -> List[np.ndarray]:
+    """Calibrate per-frame force σ arrays (list of (n_atoms, 3))."""
+    if calibrators is None or not sigma_force_frames:
+        return sigma_force_frames
+    flat_parts = [np.asarray(f, dtype=float).reshape(-1) for f in sigma_force_frames]
+    flat = np.concatenate(flat_parts)
+    flat_cal = apply_sigma_comp_calibration(flat, calibrators, mode)
+    splits = np.cumsum([p.size for p in flat_parts])[:-1]
+    chunks = np.split(flat_cal, splits)
+    return [
+        c.reshape(np.asarray(f).shape)
+        for c, f in zip(chunks, sigma_force_frames)
+    ]
+
+
+def scale_pool_force_summaries(
+    sigma_F_mean: np.ndarray,
+    sigma_F_max: np.ndarray,
+    calibrators: Optional[Dict[str, Any]],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Scale pool light-mode σ summaries by train variance-scaling factor."""
+    if calibrators is None:
+        return sigma_F_mean, sigma_F_max
+    cal_var = calibrators.get("cal_var_F")
+    if cal_var is None:
+        return sigma_F_mean, sigma_F_max
+    s = float(getattr(cal_var, "s", 1.0))
+    return np.asarray(sigma_F_mean, float) * s, np.asarray(sigma_F_max, float) * s
+
+
+def calibration_safe_for_selection(
+    metrics_result: Optional[Dict[str, Any]],
+    min_spearman: float = 0.4,
+    max_ence_raw: float = 0.20,
+) -> bool:
+    """Return True if train UQ metrics support using calibrated σ in pool AL."""
+    if not metrics_result:
+        return False
+    m = metrics_result.get("metrics", {})
+    for key in ("Spearman_raw", "Spearman_calVAR", "Spearman_calISO"):
+        sp = m.get(key)
+        if sp is not None and np.isfinite(sp) and sp >= min_spearman:
+            return True
+    ence = m.get("ENCE_raw")
+    if ence is not None and np.isfinite(ence) and ence <= max_ence_raw:
+        return True
+    return False
+
+
+def validate_consecutive_reference_deltas(
+    frames,
+    predicted_energies: np.ndarray,
+    true_energies: np.ndarray,
+    predicted_forces: List[np.ndarray],
+    true_forces: List[np.ndarray],
+    system_tag: str = "cluster",
+):
+    """
+    Validate consecutive-frame intensive energy slopes and force transitions.
+
+    Frames must be time-ordered within a single trajectory; shuffled reference
+    XYZ files produce meaningless consecutive differences.
+    """
+    n_frames = len(frames)
+    if n_frames < 2:
+        print(f"[{system_tag.upper()}] Insufficient frames for consecutive delta validation.")
+        return
+
+    atom_counts = np.array([len(f) for f in frames], dtype=float)
+    avg_atoms = np.mean(atom_counts)
+
+    e_pred_atom = np.asarray(predicted_energies, dtype=float) / atom_counts
+    e_true_atom = np.asarray(true_energies, dtype=float) / atom_counts
+
+    delta_e_true_step = np.diff(e_true_atom)
+    delta_e_pred_step = np.diff(e_pred_atom)
+
+    slope_errors = np.abs(delta_e_true_step - delta_e_pred_step) * 1000.0
+    mae_slope = float(np.mean(slope_errors))
+    max_slope = float(np.max(slope_errors))
+
+    force_mae_list = []
+    for i in range(n_frames - 1):
+        f_true_diff = np.asarray(true_forces[i + 1], dtype=float) - np.asarray(true_forces[i], dtype=float)
+        f_pred_diff = np.asarray(predicted_forces[i + 1], dtype=float) - np.asarray(predicted_forces[i], dtype=float)
+        force_mae_list.append(float(np.mean(np.abs(f_true_diff - f_pred_diff))))
+    mean_force_delta_error = float(np.mean(force_mae_list)) if force_mae_list else float("nan")
+
+    print("\n" + "=" * 70)
+    print(f"REFERENCE SLOPE METRICS VALIDATION: {system_tag.upper()}")
+    print(f"    Total Frames Analyzed : {n_frames} | Average Cluster Size: {avg_atoms:.1f} atoms")
+    print(f"    Consecutive ΔE Slope MAE: {mae_slope:.4f} meV/atom")
+    print(f"    Consecutive ΔE Slope MAX: {max_slope:.4f} meV/atom")
+    print(f"    Force Transition MAE    : {mean_force_delta_error:.4f} eV/Å")
+    print("    STATUS ASSESSMENT       : ", end="")
+    if mae_slope <= 3.0 and mean_force_delta_error <= 0.05:
+        print(
+            "EXCELLENT. Gradient slopes are size-consistent. "
+            "Total energy offsets are benign rigid shifts."
+        )
+    elif mae_slope <= 8.0:
+        print(
+            "ACCEPTABLE. Suitable for structural dynamics, "
+            "but watch out for localized surface drift."
+        )
+    else:
+        print(
+            "POOR GENERALIZATION. The model is misinterpreting structural transitions "
+            "at this scale. SWA or dataset balancing required."
+        )
+    print("=" * 70 + "\n")
+
+    out_path = f"reference_slope_validation_{system_tag}.txt"
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(f"# System: {system_tag}\n")
+        fh.write("atoms_mean,mae_slope_meVA,max_slope_meVA,mae_force_eVAng\n")
+        fh.write(f"{avg_atoms},{mae_slope},{max_slope},{mean_force_delta_error}\n")
+    print(f"[{system_tag.upper()}] Wrote slope summary to {out_path}")

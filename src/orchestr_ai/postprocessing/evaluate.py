@@ -31,11 +31,16 @@ from orchestr_ai.postprocessing.mlff_plotting import plot_mlff_stats
 from orchestr_ai.postprocessing.plotting import generate_uq_plots
 # Active Learning & Geometry Sanity
 from orchestr_ai.postprocessing.active_learning import (
-    calibrate_alpha_reg_gcv, 
-    adaptive_learning_mig_pool_windowed, 
+    calibrate_alpha_reg_gcv,
+    adaptive_learning_mig_pool_windowed,
     adaptive_learning_ensemble_calibrated,
     UQCalibrator,
-    compute_soap_features
+    compute_soap_features,
+    apply_sigma_comp_calibration,
+    apply_sigma_energy_calibration,
+    calibrate_sigma_force_frames,
+    scale_pool_force_summaries,
+    validate_consecutive_reference_deltas,
 )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
@@ -51,6 +56,74 @@ def _parse_bool_like(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "auto"}
     return bool(value)
+
+
+_GAUSSIAN_SIGMA_TO_ABS = float(np.sqrt(2.0 / np.pi))
+
+
+def _metric_accepts_calibration(metrics_result, *, prefix, mode, min_spearman, max_ence, picp_tol):
+    """Validate train-fitted calibration on eval metrics before pool use."""
+    if not metrics_result:
+        return False
+    metrics = metrics_result.get("metrics", {})
+    suffix = "" if prefix == "force" else "_E"
+    label = "calVAR" if mode == "var" else "calISO"
+    ence = metrics.get(f"ENCE_{label}{suffix}")
+    picp95 = metrics.get(f"PICP95_{label}{suffix}")
+    spearman = metrics.get(f"Spearman_{label}{suffix}")
+    checks = [
+        ence is not None and np.isfinite(ence) and ence <= max_ence,
+        picp95 is not None and np.isfinite(picp95) and abs(picp95 - 0.95) <= picp_tol,
+        spearman is not None and np.isfinite(spearman) and spearman >= min_spearman,
+    ]
+    return all(checks)
+
+
+def _build_calibration_policy(eval_cfg, metrics_eval, *, pool_cache_mode):
+    requested = str(eval_cfg.get("selection_calibration", "var")).lower()
+    if requested not in {"var", "iso"}:
+        requested = "var"
+    min_sp = float(eval_cfg.get("calibration_min_spearman", 0.4))
+    max_ence = float(eval_cfg.get("calibration_max_ence", 0.20))
+    picp_tol = float(eval_cfg.get("calibration_picp95_tol", 0.08))
+    force_mode = requested
+    if requested == "iso" and pool_cache_mode == "light":
+        print("[Pool-AL] Light pool cache cannot apply component-wise isotonic force calibration; using VAR for forces.")
+        force_mode = "var"
+
+    accepted = {
+        "force_mode": force_mode if _metric_accepts_calibration(
+            metrics_eval, prefix="force", mode=force_mode, min_spearman=min_sp,
+            max_ence=max_ence, picp_tol=picp_tol
+        ) else None,
+        "energy_mode": requested if _metric_accepts_calibration(
+            metrics_eval, prefix="energy", mode=requested, min_spearman=min_sp,
+            max_ence=max_ence, picp_tol=picp_tol
+        ) else None,
+    }
+    print(
+        "[Pool-AL] Eval-gated calibration policy: "
+        f"force={accepted['force_mode'] or 'raw'}, energy={accepted['energy_mode'] or 'raw'}"
+    )
+    return accepted
+
+
+def _range_with_margin(values, *, lo_pct=0.5, hi_pct=99.5, upper_mult=1.25):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return -np.inf, np.inf
+    lo = float(np.percentile(arr, lo_pct))
+    hi = float(np.percentile(arr, hi_pct))
+    if hi >= 0:
+        hi *= upper_mult
+    return lo, hi
+
+
+def _in_range(values, bounds):
+    lo, hi = bounds
+    arr = np.asarray(values, dtype=float)
+    return np.isfinite(arr) & (arr >= lo) & (arr <= hi)
 
 
 def _configured_gpu_ids(eval_cfg):
@@ -611,7 +684,9 @@ class EvaluationPipeline:
             
         # 3. Evaluate Ensemble & Run Active Learning
         if "ensemble" in self.uq_methods:
-            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw = self._run_ensemble_labeled()
+            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_train, metrics_eval = (
+                self._run_ensemble_labeled()
+            )
             
             # --- Model-Independent SOAP Active Learning Integration ---
             use_soap = self.eval_cfg.get("use_soap", True)
@@ -631,7 +706,16 @@ class EvaluationPipeline:
                 self._run_validation_al(stats_ens, mean_L_frame, sigma_comp)
                 
             if self.pool_xyz_path and os.path.exists(self.pool_xyz_path):
-                self._run_pool_al(stats_ens, mean_L_frame, sigma_E_raw, sigma_comp, soap_species=soap_species)
+                self._run_pool_al(
+                    stats_ens,
+                    mean_L_frame,
+                    sigma_E_raw,
+                    sigma_comp,
+                    soap_species=soap_species,
+                    uq_calibrators=uq_calibrators,
+                    metrics_train=metrics_train,
+                    metrics_eval=metrics_eval,
+                )
 
         print("Evaluation Pipeline Completed.")
 
@@ -739,14 +823,75 @@ class EvaluationPipeline:
         if self.do_plot:
             plot_ensemble_histograms(mu_E_frame, std_E_frame, mu_F_comp, std_F_comp)
 
-        metrics_train = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom, sigma_E_raw, "Train", "ensemble", self.eval_log)
-        metrics_eval  = calculate_uq_metrics(stats_ens, sigma_comp, sigma_atom, sigma_E_raw, "Eval", "ensemble", self.eval_log)
-        
+        metrics_train = calculate_uq_metrics(
+            stats_ens,
+            sigma_comp,
+            sigma_atom,
+            sigma_E_raw,
+            "Train",
+            "ensemble",
+            self.eval_log,
+            energy_per_atom=True,
+        )
+        uq_calibrators = metrics_train.get("calibrators", {})
+        metrics_eval = calculate_uq_metrics(
+            stats_ens,
+            sigma_comp,
+            sigma_atom,
+            sigma_E_raw,
+            "Eval",
+            "ensemble",
+            self.eval_log,
+            calibrators=uq_calibrators,
+            energy_per_atom=True,
+        )
+
         if self.do_plot:
             generate_uq_plots(metrics_train["npz_path"], "Train", "error_model", calibration="var")
             generate_uq_plots(metrics_eval["npz_path"], "Eval", "error_model", calibration="var")
 
-        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw
+        self._run_reference_slope_validation(stats_ens)
+
+        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_train, metrics_eval
+
+    def _run_reference_slope_validation(self, stats_ens):
+        """Consecutive ΔE/force transition checks on labeled train/eval (by size class)."""
+        if not _parse_bool_like(self.eval_cfg.get("reference_slope_validation"), False):
+            return
+
+        size_thr = int(self.eval_cfg.get("size_split_atoms", 300))
+        min_frames = int(self.eval_cfg.get("slope_validation_min_frames", 2))
+        pred_forces = stats_ens.pred_forces
+        true_forces = stats_ens.true_forces
+        pred_E = stats_ens.pred_energies
+        true_E = stats_ens.true_energies
+        atom_counts = stats_ens.atom_counts
+
+        splits = [
+            ("train_all", self.ds["train_mask"], None),
+            ("eval_all", self.ds["val_mask"], None),
+            ("train_small", self.ds["train_mask"], atom_counts < size_thr),
+            ("train_large", self.ds["train_mask"], atom_counts >= size_thr),
+            ("eval_small", self.ds["val_mask"], atom_counts < size_thr),
+            ("eval_large", self.ds["val_mask"], atom_counts >= size_thr),
+        ]
+
+        for tag, frame_mask, size_cond in splits:
+            if size_cond is not None:
+                idx = np.where(frame_mask & size_cond)[0]
+            else:
+                idx = np.where(frame_mask)[0]
+            if len(idx) < min_frames:
+                print(f"[SlopeVal] Skipping {tag}: only {len(idx)} frames.")
+                continue
+            validate_consecutive_reference_deltas(
+                [self.ds["frames"][i] for i in idx],
+                pred_E[idx],
+                true_E[idx],
+                [pred_forces[i] for i in idx],
+                [true_forces[i] for i in idx],
+                system_tag=tag,
+            )
 
     def _run_validation_al(self, stats_ens, mean_L_frame, sigma_comp):
         """Active Learning on the validation set."""
@@ -769,7 +914,17 @@ class EvaluationPipeline:
         else:
             print("[Val-AL] No validation frames selected.")
 
-    def _run_pool_al(self, stats_ens, mean_L_frame, sigma_E_raw, sigma_comp, soap_species=None):
+    def _run_pool_al(
+        self,
+        stats_ens,
+        mean_L_frame,
+        sigma_E_raw,
+        sigma_comp,
+        soap_species=None,
+        uq_calibrators=None,
+        metrics_train=None,
+        metrics_eval=None,
+    ):
         """Active Learning on the unlabelled out-of-distribution pool."""
         print(f"\n[Pool-AL] Parsing unlabeled pool from {self.pool_xyz_path}")
         pool_frames = read(self.pool_xyz_path, index=":", format="extxyz")
@@ -808,6 +963,9 @@ class EvaluationPipeline:
             sigma_F_pool_mean = pool_light["sigma_F_mean"]
             sigma_F_pool_max = pool_light["sigma_F_max"]
             frame_max_force_pool = pool_light["frame_max_force"]
+            sigma_F_pool = None
+
+        pool_has_full_sigma = pool_cache_mode in ("raw", "stats")
 
         # Thinning (Adaptive Striding Option)
         adaptive_striding = self.eval_cfg.get("adaptive_striding", False)
@@ -862,6 +1020,130 @@ class EvaluationPipeline:
         sigma_F_pool_max_thin = sigma_F_pool_max[thin_idx].astype(float)
         frame_max_force_pool_thin = frame_max_force_pool[thin_idx].astype(float)
 
+        use_cal = _parse_bool_like(self.eval_cfg.get("use_calibrated_selection"), True)
+        calibration_policy = {"force_mode": None, "energy_mode": None}
+        if use_cal and uq_calibrators:
+            calibration_policy = _build_calibration_policy(
+                self.eval_cfg, metrics_eval, pool_cache_mode=pool_cache_mode
+            )
+        elif use_cal:
+            print("[Pool-AL] Calibrated selection requested but no train-fitted calibrators are available.")
+
+        train_idx = self.ds["train_idx"]
+        train_atom_counts = np.array([len(self.ds["frames"][i]) for i in train_idx], dtype=float)
+        pool_atom_counts_thin = np.array([len(fr) for fr in pool_frames_thin], dtype=float)
+        sigma_E_train_atom_raw = sigma_E_raw[train_idx] / train_atom_counts
+        sigma_E_pool_atom_raw = sigma_E_pool_thin / pool_atom_counts_thin
+        sigma_force_frames_all = _split_atom_vectors(sigma_comp, self.ds["frames"])
+        sigma_force_train = [sigma_force_frames_all[i] for i in train_idx]
+        sigma_F_train_mean_raw = np.array([
+            np.nanmean(np.linalg.norm(f, axis=1)) for f in sigma_force_train
+        ], dtype=float)
+        sigma_F_train_max_raw = np.array([
+            np.nanmax(np.linalg.norm(f, axis=1)) for f in sigma_force_train
+        ], dtype=float)
+        frame_max_force_train_raw = np.array([
+            np.nanmax(np.linalg.norm(self.ds["F_true"][i], axis=1)) for i in train_idx
+        ], dtype=float)
+
+        support_mult = float(self.eval_cfg.get("calibration_support_upper_mult", 1.25))
+        train_count_min = float(np.nanmin(train_atom_counts))
+        train_count_max = float(np.nanmax(train_atom_counts))
+        support_E = _in_range(
+            sigma_E_pool_atom_raw,
+            _range_with_margin(sigma_E_train_atom_raw, upper_mult=support_mult),
+        )
+        support_Fmean = _in_range(
+            sigma_F_pool_mean_thin,
+            _range_with_margin(sigma_F_train_mean_raw, upper_mult=support_mult),
+        )
+        support_Fmax = _in_range(
+            sigma_F_pool_max_thin,
+            _range_with_margin(sigma_F_train_max_raw, upper_mult=support_mult),
+        )
+        support_count = (pool_atom_counts_thin >= train_count_min) & (pool_atom_counts_thin <= train_count_max)
+        support_Fphys = frame_max_force_pool_thin <= (
+            np.nanmax(frame_max_force_train_raw) * float(self.eval_cfg.get("calibration_support_force_mult", 1.5))
+        )
+        calibration_in_support = support_E & support_Fmean & support_Fmax & support_count & support_Fphys
+        ood_risk_mask = ~calibration_in_support
+        print(
+            "[Pool-AL] Calibration support on thinned pool: "
+            f"{int(calibration_in_support.sum())}/{len(calibration_in_support)} in-domain "
+            f"({np.mean(calibration_in_support):.3f})."
+        )
+        print(
+            "[Pool-AL] Calibration support failures: "
+            f"sigma_E={int((~support_E).sum())}, "
+            f"sigma_F_mean={int((~support_Fmean).sum())}, "
+            f"sigma_F_max={int((~support_Fmax).sum())}, "
+            f"atom_count={int((~support_count).sum())}, "
+            f"force_magnitude={int((~support_Fphys).sum())}."
+        )
+
+        sigma_energy_train = sigma_E_raw[train_idx]
+        expected_abs_E_atom = sigma_E_pool_atom_raw * _GAUSSIAN_SIGMA_TO_ABS
+        expected_abs_F_mean = sigma_F_pool_mean_thin * _GAUSSIAN_SIGMA_TO_ABS
+        expected_abs_F_max = sigma_F_pool_max_thin * _GAUSSIAN_SIGMA_TO_ABS
+
+        energy_mode = calibration_policy["energy_mode"]
+        force_mode = calibration_policy["force_mode"]
+
+        if energy_mode:
+            print(f"[Pool-AL] Applying eval-accepted '{energy_mode}' energy calibration in per-atom units.")
+            sigma_energy_train_atom = apply_sigma_energy_calibration(
+                sigma_E_train_atom_raw, uq_calibrators, energy_mode
+            )
+            sigma_energy_train = sigma_energy_train_atom * train_atom_counts
+            sigma_E_pool_atom_cal = apply_sigma_energy_calibration(
+                sigma_E_pool_atom_raw, uq_calibrators, energy_mode
+            )
+            if energy_mode == "iso":
+                sigma_E_pool_atom_var = apply_sigma_energy_calibration(
+                    sigma_E_pool_atom_raw, uq_calibrators, "var"
+                )
+                sigma_E_pool_atom_cal = np.where(
+                    calibration_in_support, sigma_E_pool_atom_cal, sigma_E_pool_atom_var
+                )
+            sigma_E_pool_thin = sigma_E_pool_atom_cal * pool_atom_counts_thin
+            expected_abs_E_atom = sigma_E_pool_atom_cal * _GAUSSIAN_SIGMA_TO_ABS
+
+        if force_mode:
+            print(f"[Pool-AL] Applying eval-accepted '{force_mode}' force calibration.")
+            sigma_force_train = calibrate_sigma_force_frames(
+                sigma_force_train, uq_calibrators, force_mode
+            )
+            if pool_has_full_sigma:
+                sigma_F_pool_shape = np.asarray(sigma_F_pool).shape
+                sigma_F_pool_flat = np.asarray(sigma_F_pool, dtype=float).reshape(-1)
+                sigma_F_pool_var = apply_sigma_comp_calibration(
+                    sigma_F_pool_flat, uq_calibrators, "var"
+                )
+                if force_mode == "iso":
+                    sigma_F_pool_iso = apply_sigma_comp_calibration(
+                        sigma_F_pool_flat, uq_calibrators, "iso"
+                    )
+                    pool_counts = np.array([len(fr) for fr in pool_frames], dtype=int)
+                    frame_ids = np.repeat(np.arange(len(pool_frames)), pool_counts * 3)
+                    thin_support_global = np.zeros(len(pool_frames), dtype=bool)
+                    thin_support_global[thin_idx] = calibration_in_support
+                    component_support = thin_support_global[frame_ids]
+                    sigma_F_pool = np.where(component_support, sigma_F_pool_iso, sigma_F_pool_var)
+                else:
+                    sigma_F_pool = sigma_F_pool_var
+                sigma_F_pool = sigma_F_pool.reshape(sigma_F_pool_shape)
+                sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(
+                    sigma_F_pool, pool_frames
+                )
+                sigma_F_pool_mean_thin = sigma_F_pool_mean[thin_idx].astype(float)
+                sigma_F_pool_max_thin = sigma_F_pool_max[thin_idx].astype(float)
+            else:
+                sigma_F_pool_mean_thin, sigma_F_pool_max_thin = scale_pool_force_summaries(
+                    sigma_F_pool_mean_thin, sigma_F_pool_max_thin, uq_calibrators
+                )
+            expected_abs_F_mean = sigma_F_pool_mean_thin * _GAUSSIAN_SIGMA_TO_ABS
+            expected_abs_F_max = sigma_F_pool_max_thin * _GAUSSIAN_SIGMA_TO_ABS
+
         # RDF filtering
         rdf_cache = "rdf_thresholds_cache.npz"
         if os.path.exists(rdf_cache):
@@ -900,56 +1182,88 @@ class EvaluationPipeline:
         np.savez_compressed("pool_energy_trace.npz", steps=np.arange(len(mu_E_pool)), mu=sm["mu"].values, sigma=sm["sigma"].values, bad=bad_mask)
 
         # Calibrations
-        good_rows = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[self.ds["train_idx"]])
+        good_rows = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[train_idx])
         print(f"[Pool-AL] Extracted {good_rows.sum()} valid training frames for GP calibration.")
-        train_atom_counts = np.array([len(self.ds["frames"][i]) for i in self.ds["train_idx"]], dtype=float)
-        train_delta_E_atom = stats_ens.delta_E_frame[self.ds["train_idx"]] / train_atom_counts
+        if int(good_rows.sum()) < 2:
+            raise ValueError("Pool AL needs at least two finite training latent rows for GP calibration")
+        train_delta_E_atom = stats_ens.delta_E_frame[train_idx] / train_atom_counts
         alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_train_thin[good_rows], train_delta_E_atom[good_rows])
 
         calibrator = UQCalibrator()
-        mu_E_train = stats_ens.pred_energies[self.ds["train_idx"]]
+        mu_E_train = stats_ens.pred_energies[train_idx]
         mu_E_train_atom = mu_E_train / train_atom_counts
-        sigma_E_train_atom = sigma_E_raw[self.ds["train_idx"]] / train_atom_counts
+        sigma_E_train_atom = sigma_E_raw[train_idx] / train_atom_counts
         calibrator.fit(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
         if self.do_plot:
             calibrator.plot_diagnostics(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
 
-        sigma_force_frames = _split_atom_vectors(sigma_comp, self.ds["frames"])
-        train_forces = [self.ds["F_true"][i] for i in self.ds["train_idx"]]
-        sigma_force_train = [sigma_force_frames[i] for i in self.ds["train_idx"]]
-        train_frames = [self.ds["frames"][i] for i in self.ds["train_idx"]]
+        train_forces = [self.ds["F_true"][i] for i in train_idx]
+        train_frames = [self.ds["frames"][i] for i in train_idx]
 
         # Selection
         print("[Pool-AL] Running windowed active learning on thinned pool ...")
         _, sel_rel_thin = adaptive_learning_mig_pool_windowed(
             pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
-            forces_train=train_forces, sigma_energy=sigma_E_raw[self.ds["train_idx"]], sigma_force=sigma_force_train,
+            forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
             mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
             rdf_thresholds=rdf_thresholds,
             sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
             frame_max_force_pool=frame_max_force_pool_thin,
+            calibration_in_support=calibration_in_support,
+            ood_risk_mask=ood_risk_mask,
+            expected_abs_E_atom=expected_abs_E_atom,
+            expected_abs_F_mean=expected_abs_F_mean,
+            expected_abs_F_max=expected_abs_F_max,
             train_frames=train_frames,
             rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
             window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
-            percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),
+            percentile_gamma=self.eval_cfg.get("percentile_gamma", 99),
             percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
             percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
             hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
             hard_sigma_F_mean_min=self.eval_cfg.get("thr_sF_mean", 0.1),
             hard_sigma_F_max_min=self.eval_cfg.get("thr_sF_max", 0.1),
-            hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5)
+            hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
+            large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
+            surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
+            stratify_train_by_size=_parse_bool_like(
+                self.eval_cfg.get("stratify_train_by_size"), True
+            ),
+            size_split_atoms=self.eval_cfg.get(
+                "size_split_atoms", self.eval_cfg.get("large_cluster_threshold", 300)
+            ),
+            hard_floors_from_calibrated_train=_parse_bool_like(
+                self.eval_cfg.get("hard_floors_from_calibrated_train"), bool(force_mode or energy_mode)
+            ),
         )
 
         # Output
         sel_global_idx = thin_idx[sel_rel_thin]
         if len(sel_global_idx) > 0:
+            thin_lookup = {int(orig): int(rel) for rel, orig in enumerate(thin_idx)}
             with open("to_DFT_labelling_from_pool.xyz", "w") as fh:
                 for orig_idx in sel_global_idx:
                     atoms = pool_frames[orig_idx]
+                    rel_idx = thin_lookup[int(orig_idx)]
                     e_raw, s_raw = float(mu_E_pool[orig_idx]), float(sigma_E_pool[orig_idx])
-                    _, s_cal_arr, bias_corr_arr = calibrator.calibrate(np.array([e_raw]), np.array([s_raw]))
-                    e_cal, s_cal = e_raw - float(bias_corr_arr[0]), float(s_cal_arr[0])
-                    comment = f"frame={orig_idx}, e_pred_raw={e_raw:.6f}, s_raw={s_raw:.6f}, bias_corr={-float(bias_corr_arr[0]):.6f}, s_calibrated={s_cal:.6f}, BALLPARK=[{e_cal - s_cal:.6f}, {e_cal + s_cal:.6f}]"
+                    n_atoms = float(len(atoms))
+                    e_atom_raw = e_raw / n_atoms
+                    s_atom_raw = s_raw / n_atoms
+                    _, _, bias_corr_arr = calibrator.calibrate(
+                        np.array([e_atom_raw]), np.array([s_atom_raw])
+                    )
+                    e_atom_cal = e_atom_raw - float(bias_corr_arr[0])
+                    exp_abs_e_atom = float(expected_abs_E_atom[rel_idx])
+                    comment = (
+                        f"frame={orig_idx}, e_pred_raw={e_raw:.6f}, "
+                        f"e_pred_atom={e_atom_raw:.8f}, sigma_E_atom_raw={s_atom_raw:.8f}, "
+                        f"bias_corr_atom={-float(bias_corr_arr[0]):.8f}, "
+                        f"expected_abs_E_atom={exp_abs_e_atom:.8f}, "
+                        f"expected_abs_F_mean={float(expected_abs_F_mean[rel_idx]):.8f}, "
+                        f"calibration_in_support={int(calibration_in_support[rel_idx])}, "
+                        f"ood_risk={int(ood_risk_mask[rel_idx])}, "
+                        f"BALLPARK_E_atom=[{e_atom_cal - exp_abs_e_atom:.8f}, {e_atom_cal + exp_abs_e_atom:.8f}]"
+                    )
                     write(fh, atoms, format="xyz", comment=comment)
             print(f"[Pool-AL] Saved {len(sel_global_idx)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
 
