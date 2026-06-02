@@ -6,6 +6,7 @@ Refactored in 2025: Fully object-oriented, removing all legacy code.
 """
 
 import os
+import shutil
 import time
 import numpy as np
 import pandas as pd
@@ -233,7 +234,6 @@ class EnsembleRunner:
             return (data["ens_E"], data["ens_F"], data["ens_L_frame"], ens_L_atom_cached)
 
         print(f"\n[EnsembleRunner] Inference for {len(frames)} frames. Scanning for models...")
-        ens_E, ens_F, ens_L_frame, ens_L_atom = [], [], [], []
 
         # --- 1. Dynamically scan for models based on extensions ---
         valid_extensions = (".pth", ".pt", ".nequip.pth", ".model")
@@ -250,10 +250,19 @@ class EnsembleRunner:
         model_paths_to_run = found_models[:self.n_models]
         
         if not model_paths_to_run:
-             print(f"[EnsembleRunner] WARNING: No models found in {self.ensemble_folder} with extensions {valid_extensions}")
+            print(f"[EnsembleRunner] WARNING: No models found in {self.ensemble_folder} with extensions {valid_extensions}")
 
         # --- 2. Load and evaluate the found models ---
+        parts_dir = cache_file.replace(".npz", "_parts")
+        os.makedirs(parts_dir, exist_ok=True)
+        cached = {int(f.replace("model_", "").replace(".npz", ""))
+                  for f in os.listdir(parts_dir) if f.startswith("model_")}
+
         for m_idx, model_path in enumerate(model_paths_to_run):
+            if m_idx in cached:
+                print(f"  -> Model {m_idx+1}/{len(model_paths_to_run)}: {os.path.basename(model_path)} [cached, skipping]")
+                continue
+
             print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
             
             try:
@@ -270,27 +279,32 @@ class EnsembleRunner:
                 model_obj=model_obj, device=self.device, batch_size=self.batch_size,
                 eval_log_file=None, config=self.config, neighbor_list=self.neighbor_list
             )
-            ens_E.append(preds_E)
-            ens_F.append(preds_F)
-            ens_L_frame.append(preds_L_frame)
-            ens_L_atom.append(preds_L_atom)
+            np.savez(os.path.join(parts_dir, f"model_{m_idx:04d}.npz"), E=preds_E, F=preds_F, L_frame=preds_L_frame, L_atom=preds_L_atom)
+            del preds_E, preds_F, preds_L_frame, preds_L_atom
 
-        # If no models were successfully evaluated, return empty lists to trigger the ValueError upstream
-        if not ens_E:
+        # --- 3. Assemble final .npz from each model ---
+        part_files = sorted(f for f in os.listdir(parts_dir) if f.endswith(".npz"))
+        if not part_files:
             return np.array([]), np.array([]), np.array([]), np.array([])
 
-        ens_E = np.array(ens_E)
-        ens_F = np.array(ens_F, dtype=object)
-        ens_L_frame = np.array(ens_L_frame)
-        ens_L_atom = np.array(ens_L_atom, dtype=object)
+        sample = np.load(os.path.join(parts_dir, part_files[0]), allow_pickle=True)
+        n = len(part_files)
+        ens_E = np.empty((n,) + sample["E"].shape, dtype=sample["E"].dtype)
+        ens_L_frame = np.empty((n,) + sample["L_frame"].shape, dtype=sample["L_frame"].dtype)
+        ens_F = np.empty(n, dtype=object)
+        ens_L_atom = np.empty(n, dtype=object)
+
+        for i, pf in enumerate(part_files):
+            data = np.load(os.path.join(parts_dir, pf), allow_pickle=True)
+            ens_E[i] = data["E"]
+            ens_F[i] = data["F"]
+            ens_L_frame[i] = data["L_frame"]
+            ens_L_atom[i] = data["L_atom"]
+            del data
 
         print(f"[EnsembleRunner] Saving uncompressed cache to {cache_file} (omitting atom latents)...")
-        np.savez(
-            cache_file,
-            ens_E=ens_E,
-            ens_F=ens_F,
-            ens_L_frame=ens_L_frame
-        )
+        np.savez(cache_file, ens_E=ens_E, ens_F=ens_F, ens_L_frame=ens_L_frame)
+        shutil.rmtree(parts_dir)
         return ens_E, ens_F, ens_L_frame, ens_L_atom
 
 def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):
