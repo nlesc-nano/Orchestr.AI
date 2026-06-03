@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 import traceback
 
@@ -32,6 +33,7 @@ class InferenceRunner:
         return "cuda out of memory" in msg or "outofmemoryerror" in msg
 
     def _run_batch_recursive(self, batch_frames, n_atoms_list, batch_start, depth=0):
+        inputs = None
         try:
             t0_prep = time.time()
             inputs = self.calculator.prepare_batch(batch_frames)
@@ -47,7 +49,10 @@ class InferenceRunner:
         except Exception as exc:
             if not self._is_cuda_oom(exc) or len(batch_frames) <= 1:
                 raise
+            exc.__traceback__ = None
             if torch.cuda.is_available():
+                del inputs
+                gc.collect()
                 torch.cuda.empty_cache()
             mid = len(batch_frames) // 2
             print(
@@ -169,7 +174,18 @@ class InferenceRunner:
 
             except Exception as e:
                 print(f"Error processing batch {batches_processed}: {e}")
-                traceback.print_exc()
+                if self._is_cuda_oom(e):
+                    e.__traceback__ = None
+                    print(
+                        f"[InferenceRunner] CUDA OOM persisted for frame range "
+                        f"{batch_start}-{batch_start + actual_size - 1}; "
+                        "marking this batch as NaN. Reduce eval.batch_size."
+                    )
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                else:
+                    traceback.print_exc()
 
                 all_energy_pred.extend([np.nan] * actual_size)
                 all_forces_pred.extend(
