@@ -26,6 +26,59 @@ class InferenceRunner:
         self.log_file = log_file
         self.clear_cuda_cache = clear_cuda_cache
 
+    @staticmethod
+    def _is_cuda_oom(exc):
+        msg = str(exc).lower()
+        return "cuda out of memory" in msg or "outofmemoryerror" in msg
+
+    def _run_batch_recursive(self, batch_frames, n_atoms_list, batch_start, depth=0):
+        try:
+            t0_prep = time.time()
+            inputs = self.calculator.prepare_batch(batch_frames)
+            prep_time = time.time() - t0_prep
+
+            t0_forward = time.time()
+            energies, forces_list, lat_frame, lat_atom = self.calculator.forward(
+                inputs,
+                n_atoms_list,
+            )
+            forward_time = time.time() - t0_forward
+            return energies, forces_list, lat_frame, lat_atom, prep_time, forward_time
+        except Exception as exc:
+            if not self._is_cuda_oom(exc) or len(batch_frames) <= 1:
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            mid = len(batch_frames) // 2
+            print(
+                f"[InferenceRunner] CUDA OOM for batch starting at frame {batch_start} "
+                f"(size={len(batch_frames)}). Retrying as {mid}+{len(batch_frames)-mid}."
+            )
+            left = self._run_batch_recursive(
+                batch_frames[:mid],
+                n_atoms_list[:mid],
+                batch_start,
+                depth + 1,
+            )
+            right = self._run_batch_recursive(
+                batch_frames[mid:],
+                n_atoms_list[mid:],
+                batch_start + mid,
+                depth + 1,
+            )
+            energies = np.concatenate([np.asarray(left[0]), np.asarray(right[0])])
+            forces_list = list(left[1]) + list(right[1])
+            lat_frame = list(left[2]) + list(right[2])
+            lat_atom = list(left[3]) + list(right[3])
+            return (
+                energies,
+                forces_list,
+                lat_frame,
+                lat_atom,
+                float(left[4]) + float(right[4]),
+                float(left[5]) + float(right[5]),
+            )
+
     def run(self, frames, true_energies=None, true_forces=None):
         n_frames = len(frames)
 
@@ -51,16 +104,13 @@ class InferenceRunner:
             batch_start_time = time.time()
 
             try:
-                t0_prep = time.time()
-                inputs = self.calculator.prepare_batch(batch_frames)
-                prep_time = time.time() - t0_prep
-
-                t0_forward = time.time()
-                energies, forces_list, lat_frame, lat_atom = self.calculator.forward(
-                    inputs,
-                    n_atoms_list,
+                energies, forces_list, lat_frame, lat_atom, prep_time, forward_time = (
+                    self._run_batch_recursive(
+                        batch_frames,
+                        n_atoms_list,
+                        batch_start,
+                    )
                 )
-                forward_time = time.time() - t0_forward
 
                 all_energy_pred.extend(energies)
                 all_forces_pred.extend(forces_list)

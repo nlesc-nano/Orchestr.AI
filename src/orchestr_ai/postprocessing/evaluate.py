@@ -126,6 +126,36 @@ def _in_range(values, bounds):
     return np.isfinite(arr) & (arr >= lo) & (arr <= hi)
 
 
+def _coerce_frame_latents(latents, n_frames, *, context="latents"):
+    """Return a 2D latent matrix, replacing failed-frame placeholders with NaNs."""
+    latent_list = list(latents) if latents is not None else []
+    if len(latent_list) != n_frames:
+        print(f"[EnsembleRunner] WARNING: {context} length {len(latent_list)} != {n_frames}; padding/truncating.")
+        latent_list = (latent_list + [None] * n_frames)[:n_frames]
+
+    latent_dim = None
+    for item in latent_list:
+        arr = np.asarray(item, dtype=float)
+        if arr.ndim == 1 and arr.size > 0 and np.isfinite(arr).any():
+            latent_dim = int(arr.size)
+            break
+    if latent_dim is None:
+        print(f"[EnsembleRunner] WARNING: No valid {context}; using one NaN latent column.")
+        latent_dim = 1
+
+    out = np.full((n_frames, latent_dim), np.nan, dtype=float)
+    n_bad = 0
+    for i, item in enumerate(latent_list):
+        arr = np.asarray(item, dtype=float)
+        if arr.ndim == 1 and arr.size == latent_dim:
+            out[i] = arr
+        else:
+            n_bad += 1
+    if n_bad:
+        print(f"[EnsembleRunner] WARNING: Replaced {n_bad} malformed {context} rows with NaNs.")
+    return out
+
+
 def _configured_gpu_ids(eval_cfg):
     requested = eval_cfg.get("inference_gpus", eval_cfg.get("devices", None))
     visible = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -187,6 +217,17 @@ def _evaluate_model_chunk_worker(payload):
     device = torch.device(f"cuda:{gpu_id}")
     torch.cuda.set_device(device)
 
+    keep_resident = _parse_bool_like(
+        config.get("eval", {}).get("keep_worker_models_resident", False),
+        default=False,
+    )
+    if not keep_resident:
+        for cached_path in list(_RESIDENT_MODELS.keys()):
+            if cached_path != model_path:
+                del _RESIDENT_MODELS[cached_path]
+        if hasattr(torch.cuda, "empty_cache"):
+            torch.cuda.empty_cache()
+
     if model_path not in _RESIDENT_MODELS:
         print(f"[Worker GPU {gpu_id}] Loading model into GPU memory: {os.path.basename(model_path)}")
         _RESIDENT_MODELS[model_path] = _load_eval_model(model_path, framework, device)
@@ -203,6 +244,11 @@ def _evaluate_model_chunk_worker(payload):
         config=config,
         neighbor_list=None,
     )
+
+    if not keep_resident:
+        del _RESIDENT_MODELS[model_path]
+        if hasattr(torch.cuda, "empty_cache"):
+            torch.cuda.empty_cache()
 
     return preds
 
@@ -466,7 +512,10 @@ class EnsembleRunner:
 
         ens_E = np.array(ens_E)
         ens_F = np.array(ens_F, dtype=object)
-        ens_L_frame = np.array(ens_L_frame)
+        ens_L_frame = np.array([
+            _coerce_frame_latents(lat, len(frames), context=f"raw model {i+1} frame latents")
+            for i, lat in enumerate(ens_L_frame)
+        ])
         ens_L_atom = np.array(ens_L_atom, dtype=object)
 
         print(f"[EnsembleRunner] Saving uncompressed cache to {cache_file} (omitting atom latents)...")
@@ -492,6 +541,7 @@ class EnsembleRunner:
         sum_E = sum_E2 = None
         sum_F = sum_F2 = None
         sum_L = sum_L2 = None
+        count_E = count_F = count_L = None
         n_models_done = 0
 
         # Initialize persistent worker pool if multi-GPU is enabled
@@ -537,7 +587,11 @@ class EnsembleRunner:
                 preds_E, preds_F, preds_L_frame, _ = preds
                 e = np.asarray(preds_E, dtype=float)
                 f = np.concatenate(preds_F, axis=0).astype(float, copy=False)
-                l_frame = np.asarray(preds_L_frame, dtype=float)
+                l_frame = _coerce_frame_latents(
+                    preds_L_frame,
+                    len(frames),
+                    context=f"model {m_idx+1} frame latents",
+                )
 
                 if sum_E is None:
                     sum_E = np.zeros_like(e, dtype=float)
@@ -546,13 +600,22 @@ class EnsembleRunner:
                     sum_F2 = np.zeros_like(f, dtype=float)
                     sum_L = np.zeros_like(l_frame, dtype=float)
                     sum_L2 = np.zeros_like(l_frame, dtype=float)
+                    count_E = np.zeros_like(e, dtype=float)
+                    count_F = np.zeros_like(f, dtype=float)
+                    count_L = np.zeros_like(l_frame, dtype=float)
 
-                sum_E += e
-                sum_E2 += e**2
-                sum_F += f
-                sum_F2 += f**2
-                sum_L += l_frame
-                sum_L2 += l_frame**2
+                e_mask = np.isfinite(e)
+                f_mask = np.isfinite(f)
+                l_mask = np.isfinite(l_frame)
+                sum_E += np.where(e_mask, e, 0.0)
+                sum_E2 += np.where(e_mask, e**2, 0.0)
+                sum_F += np.where(f_mask, f, 0.0)
+                sum_F2 += np.where(f_mask, f**2, 0.0)
+                sum_L += np.where(l_mask, l_frame, 0.0)
+                sum_L2 += np.where(l_mask, l_frame**2, 0.0)
+                count_E += e_mask.astype(float)
+                count_F += f_mask.astype(float)
+                count_L += l_mask.astype(float)
                 n_models_done += 1
 
                 del preds, preds_E, preds_F, preds_L_frame, e, f, l_frame
@@ -565,12 +628,22 @@ class EnsembleRunner:
         if n_models_done == 0:
             raise ValueError("No ensemble models were successfully evaluated.")
 
-        mu_E = sum_E / n_models_done
-        sigma_E = _std_from_sums(sum_E, sum_E2, n_models_done)
-        mu_F = sum_F / n_models_done
-        sigma_F = _std_from_sums(sum_F, sum_F2, n_models_done)
-        mu_L_frame = sum_L / n_models_done
-        sigma_L_frame = _std_from_sums(sum_L, sum_L2, n_models_done)
+        if np.any(count_E < n_models_done) or np.any(count_F < n_models_done) or np.any(count_L < n_models_done):
+            print(
+                "[EnsembleRunner] WARNING: Some model/frame predictions failed; "
+                "aggregate statistics use finite predictions only."
+            )
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu_E = np.where(count_E > 0, sum_E / count_E, np.nan)
+            mu_F = np.where(count_F > 0, sum_F / count_F, np.nan)
+            mu_L_frame = np.where(count_L > 0, sum_L / count_L, np.nan)
+            var_E = np.where(count_E > 1, (sum_E2 - count_E * mu_E**2) / (count_E - 1), 0.0)
+            var_F = np.where(count_F > 1, (sum_F2 - count_F * mu_F**2) / (count_F - 1), 0.0)
+            var_L = np.where(count_L > 1, (sum_L2 - count_L * mu_L_frame**2) / (count_L - 1), 0.0)
+        sigma_E = np.sqrt(np.maximum(var_E, 0.0))
+        sigma_F = np.sqrt(np.maximum(var_F, 0.0))
+        sigma_L_frame = np.sqrt(np.maximum(var_L, 0.0))
         n_atoms_per_frame = np.array([len(fr) for fr in frames], dtype=int)
 
         result = {
