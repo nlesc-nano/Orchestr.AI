@@ -16,12 +16,10 @@ import numpy as np
 import torch
 
 try:
-    from schnetpack.transform import ASENeighborList, CachedNeighborList
+    from schnetpack.transform import ASENeighborList
 except ImportError as e:
     raise ImportError(
-        "SchNetPack is required for SchNetPack-based postprocessing "
-        "because the neighbor-list implementation depends on "
-        "schnetpack.transform.ASENeighborList and CachedNeighborList. "
+        "SchNetPack is required for SchNetPack-based postprocessing. "
         "Use the Orchestr.AI core environment for engines such as "
         "schnet, painn, so3net, field_schnet, and fusion."
     ) from e
@@ -29,15 +27,14 @@ except ImportError as e:
 
 class SmartNeighborList(ASENeighborList):
     """
-    Legacy ASE-based neighbor list with skin-based caching.
-
-    This class extends SchNetPack's ASENeighborList, so it belongs in this
-    SchNetPack-only module.
+    ASE-based neighbor list with displacement-based caching (Verlet list).
+    
+    This is used to accelerate Molecular Dynamics (MD) by only recomputing
+    neighbor indices when atoms have moved beyond the 'skin' distance.
     """
 
-    def __init__(self, cutoff, update_threshold, skin):
+    def __init__(self, cutoff: float, skin: float = 2.0):
         super().__init__(cutoff=cutoff)
-        self.update_threshold = update_threshold
         self.skin = skin
         self.last_positions = None
         self.last_cell = None
@@ -45,19 +42,19 @@ class SmartNeighborList(ASENeighborList):
     def update(self, atoms):
         current_positions = atoms.get_positions()
         current_cell = atoms.get_cell()
-        needs_update = False
 
+        # Always update if cell changes or it's the first call
         if self.last_positions is None or not np.array_equal(current_cell, self.last_cell):
-            needs_update = True
-        else:
-            displacements = current_positions - self.last_positions
-            max_displacement = np.max(np.linalg.norm(displacements, axis=1))
-            total_displacement = np.sum(np.linalg.norm(displacements, axis=1))
+            self.last_positions = current_positions.copy()
+            self.last_cell = current_cell.copy()
+            return super().update(atoms)
 
-            if max_displacement > self.skin or total_displacement > self.update_threshold:
-                needs_update = True
+        # Update only if an atom moved more than half the skin distance
+        # (Standard Verlet list logic: skin/2 per atom)
+        displacements = current_positions - self.last_positions
+        max_displacement = np.max(np.linalg.norm(displacements, axis=1))
 
-        if needs_update:
+        if max_displacement > (self.skin / 2.0):
             self.last_positions = current_positions.copy()
             self.last_cell = current_cell.copy()
             return super().update(atoms)
@@ -68,62 +65,37 @@ class SmartNeighborList(ASENeighborList):
 class NeighborListProvider:
     """
     Provides SchNetPack-compatible neighbor lists.
-
-    This provider is intended only for SchNetPack-based engines.
-    MACE, NequIP, and Allegro should not use this class.
     """
 
-    def __init__(self, config, existing_nl=None):
-        self.backend = config.get("nl_backend", "legacy").lower()
+    def __init__(self, config: dict, existing_nl=None):
+        self.run_type = config.get("run_type", "MD").upper()
+        self.backend = config.get("nl_backend", "ase").lower()
         self.cutoff = config.get("cutoff", 12.0)
-        self.skin = config.get("skin", 2.0)
-        self.update_threshold = config.get("update_threshold", 2.0)
-        self.cache_path = config.get("cache_path", "neighbor_cache")
+        self.skin = config.get("skin", 0.0)  # Default 0 means always recompute
 
         self.ase_nl = existing_nl
 
-        if self.backend == "legacy" and self.ase_nl is None:
-            cache_dir = os.path.dirname(self.cache_path)
-            if cache_dir and not os.path.exists(cache_dir):
-                os.makedirs(cache_dir, exist_ok=True)
+        if self.ase_nl is None:
+            if self.backend == "ase" or self.backend == "legacy":
+                # For EVAL, we strongly recommend skin=0 (always recompute) for trust.
+                # For MD, a skin > 0 is used for performance.
+                if self.skin > 0:
+                    self.ase_nl = SmartNeighborList(cutoff=self.cutoff, skin=self.skin)
+                    print(f"NeighborList: Using SmartNeighborList with skin={self.skin}Å (Performance mode).")
+                else:
+                    self.ase_nl = ASENeighborList(cutoff=self.cutoff)
+                    print(f"NeighborList: Using standard ASENeighborList (Trust/EVAL mode).")
 
-            smart_nl = SmartNeighborList(
-                cutoff=self.cutoff,
-                update_threshold=self.update_threshold,
-                skin=self.skin,
-            )
-
-            self.ase_nl = CachedNeighborList(
-                neighbor_list=smart_nl,
-                cache_path=self.cache_path,
-            )
-
-            print("NeighborList initialized with 'legacy' ASE backend.")
-
-        elif self.backend == "alchemy":
-            print("NeighborList initialized with 'alchemy' backend (matscipy).")
+        if self.backend == "alchemy":
+            print("NeighborList: 'alchemy' backend selected. Note: This requires matscipy.")
 
     def get_ase_nl(self):
         """
         Return the ASE-compatible neighbor list for SchNetPack.
         """
-        if self.backend != "legacy":
-            print(
-                "Warning: Model requested legacy ASE neighbor list, "
-                "but backend is 'alchemy'. Falling back to ASE."
-            )
-
-            smart_nl = SmartNeighborList(
-                cutoff=self.cutoff,
-                update_threshold=self.update_threshold,
-                skin=self.skin,
-            )
-
-            return CachedNeighborList(
-                neighbor_list=smart_nl,
-                cache_path=self.cache_path,
-            )
-
+        if self.ase_nl is None:
+            # Fallback if somehow not initialized
+            return ASENeighborList(cutoff=self.cutoff)
         return self.ase_nl
 
     def compute_alchemy_edges(self, atoms):

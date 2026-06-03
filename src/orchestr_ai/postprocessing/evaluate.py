@@ -8,6 +8,7 @@ Refactored in 2025: Fully object-oriented, removing all legacy code.
 import os
 import shutil
 import time
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
 import torch
@@ -15,9 +16,13 @@ import torch.serialization
 torch.serialization.add_safe_globals([slice])
 import matplotlib.pyplot as plt
 from ase.io import read, write
-from sklearn.isotonic import IsotonicRegression
 
 # === Local Module Imports ===
+from orchestr_ai.postprocessing.metrics import (
+    _split_atom_vectors,
+    _force_summary_from_flat,
+    _std_from_sums
+)
 from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
 from orchestr_ai.postprocessing.calculator import evaluate_model
 from orchestr_ai.postprocessing.stats import MLFFStats
@@ -29,7 +34,9 @@ from orchestr_ai.postprocessing.plotting import generate_uq_plots
 from orchestr_ai.postprocessing.active_learning import (
     calibrate_alpha_reg_gcv, 
     adaptive_learning_mig_pool_windowed, 
-    adaptive_learning_ensemble_calibrated
+    adaptive_learning_ensemble_calibrated,
+    UQCalibrator,
+    compute_soap_features
 )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
@@ -37,60 +44,95 @@ from orchestr_ai.postprocessing.rdf import (
     debug_plot_rdfs
 )
 
-class UQCalibrator:
-    """Handles Isotonic Regression mapping for Bias and Uncertainty Calibration."""
-    def __init__(self):
-        self.iso_unc = IsotonicRegression(y_min=0.0, out_of_bounds='clip')
-        self.iso_bias = IsotonicRegression(y_min=None, y_max=None, out_of_bounds='clip')
-        self.is_fitted = False
+def _parse_bool_like(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "auto"}
+    return bool(value)
 
-    def fit(self, mu_E_train, sigma_E_train, delta_E_train):
-        print("\n[UQCalibrator] Fitting BIAS and UNCERTAINTY calibrators...")
-        self.iso_bias.fit(mu_E_train, delta_E_train)
-        self.iso_unc.fit(sigma_E_train, np.abs(delta_E_train))
-        self.is_fitted = True
-        print("[UQCalibrator] Fitting complete.")
 
-    def calibrate(self, mu_E_raw, sigma_E_raw):
-        if not self.is_fitted:
-            raise RuntimeError("Calibrator must be fitted before calling calibrate().")
-        bias_correction = self.iso_bias.predict(mu_E_raw)
-        sigma_calibrated = self.iso_unc.predict(sigma_E_raw)
-        mu_E_calibrated = mu_E_raw - bias_correction
-        return mu_E_calibrated, sigma_calibrated, bias_correction
+def _configured_gpu_ids(eval_cfg):
+    requested = eval_cfg.get("inference_gpus", eval_cfg.get("devices", None))
+    visible = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
-    def plot_diagnostics(self, mu_E_train, sigma_E_train, delta_E_train, out_dir="uq_plots"):
-        if not self.is_fitted: return
-        os.makedirs(out_dir, exist_ok=True)
-        delta_train_abs = np.abs(delta_E_train)
-        
-        # Uncertainty Scatter
-        plt.figure(figsize=(5,4))
-        plt.scatter(sigma_E_train, delta_train_abs, s=8, alpha=0.6, label="train")
-        s_sorted = np.sort(sigma_E_train)
-        plt.plot(s_sorted, self.iso_unc.predict(s_sorted), color="C1", lw=2, label="isotonic f(σ)")
-        plt.plot([s_sorted.min(), s_sorted.max()], [s_sorted.min(), s_sorted.max()], 'k--', lw=1, label="identity")
-        plt.xlabel("ensemble σ (training)")
-        plt.ylabel("|ΔE| (training)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"{out_dir}/calibration_scatter.png", dpi=200)
-        plt.close()
+    if visible <= 0:
+        return []
 
-        # Bias Scatter
-        plt.figure(figsize=(5,4))
-        plt.scatter(mu_E_train, delta_E_train, s=8, alpha=0.6, label="train (signed error)")
-        e_sorted = np.sort(mu_E_train)
-        plt.plot(e_sorted, self.iso_bias.predict(e_sorted), color="C1", lw=2, label="isotonic bias f(E)")
-        plt.plot([e_sorted.min(), e_sorted.max()], [0, 0], 'k--', lw=1, label="zero bias")
-        plt.xlabel("Predicted Energy μE (training)")
-        plt.ylabel("Signed Error ΔE (training)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"{out_dir}/bias_calibration_scatter.png", dpi=200)
-        plt.close()
-        print(f"[UQCalibrator] Diagnostic plots saved to {out_dir}/")
+    if requested is None or requested == "auto":
+        return list(range(visible))
 
+    if isinstance(requested, int):
+        return list(range(min(requested, visible)))
+
+    if isinstance(requested, str):
+        values = [v.strip() for v in requested.split(",") if v.strip()]
+        if len(values) == 1 and values[0].isdigit():
+            return list(range(min(int(values[0]), visible)))
+        return [int(v) for v in values if int(v) < visible]
+
+    if isinstance(requested, (list, tuple)):
+        return [int(v) for v in requested if int(v) < visible]
+
+    return list(range(visible))
+
+
+def _load_eval_model(model_path, framework, device):
+    framework = (framework or "schnetpack").lower()
+    if framework == "allegro":
+        framework = "nequip"
+    if framework == "nequip":
+        return model_path
+    return torch.load(model_path, map_location=device, weights_only=False)
+
+
+_WORKER_GPU_ID = None
+_RESIDENT_MODELS = {}
+
+
+def _init_persistent_worker(gpu_queue):
+    global _WORKER_GPU_ID, _RESIDENT_MODELS
+    try:
+        _WORKER_GPU_ID = gpu_queue.get()
+        _RESIDENT_MODELS = {}
+        import torch
+        device = torch.device(f"cuda:{_WORKER_GPU_ID}")
+        torch.cuda.set_device(device)
+        print(f"[Persistent Worker] Initialized worker process on GPU {_WORKER_GPU_ID}")
+    except Exception as e:
+        print(f"[Persistent Worker] Error during worker initialization: {e}")
+
+
+def _evaluate_model_chunk_worker(payload):
+    model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id = payload
+    
+    global _WORKER_GPU_ID, _RESIDENT_MODELS
+    if _WORKER_GPU_ID is not None:
+        gpu_id = _WORKER_GPU_ID
+
+    device = torch.device(f"cuda:{gpu_id}")
+    torch.cuda.set_device(device)
+
+    if model_path not in _RESIDENT_MODELS:
+        print(f"[Worker GPU {gpu_id}] Loading model into GPU memory: {os.path.basename(model_path)}")
+        _RESIDENT_MODELS[model_path] = _load_eval_model(model_path, framework, device)
+
+    model_obj = _RESIDENT_MODELS[model_path]
+    preds = evaluate_model(
+        frames=frames,
+        true_energies=true_E,
+        true_forces=true_F,
+        model_obj=model_obj,
+        device=device,
+        batch_size=batch_size,
+        eval_log_file=None,
+        config=config,
+        neighbor_list=None,
+    )
+
+    return preds
 
 class DatasetManager:
     """Handles loading, purging, and masking of Train and Validation datasets."""
@@ -160,12 +202,11 @@ class DatasetManager:
             forces_train_arr = np.stack(forces_train_list, axis=0).astype(float)
         except Exception:
             forces_train_arr = None
-
         print(f"Total labeled frames: {len(all_frames)} (train={n_train}, val={n_val})")
 
         return {
             "frames": all_frames, "E_true": np.array(train_E + val_E), "F_true": train_F + val_F,
-            "F_train_arr": forces_train_arr, "F_train_list": forces_train_list,
+            "F_train_arr": forces_train_arr,
             "train_mask": train_mask, "val_mask": val_mask,
             "train_idx": np.where(train_mask)[0], "val_idx": np.where(val_mask)[0],
             "val_frames_ref": val_frames
@@ -223,6 +264,128 @@ class EnsembleRunner:
         self.ensemble_folder = self.eval_cfg.get("ensemble_folder")
         self.n_models = self.eval_cfg.get("ensemble_size", 1)
         self.batch_size = self.eval_cfg.get("batch_size", 32)
+        self.framework = self.config.get("model_framework", "schnetpack").lower()
+
+    def _model_paths(self):
+        valid_extensions = (".pth", ".pt", ".nequip.pth", ".model")
+        found_models = []
+
+        if os.path.exists(self.ensemble_folder):
+            for filename in sorted(os.listdir(self.ensemble_folder)):
+                if filename.endswith(valid_extensions):
+                    found_models.append(os.path.join(self.ensemble_folder, filename))
+        else:
+            print(f"[EnsembleRunner] ERROR: Ensemble folder '{self.ensemble_folder}' does not exist.")
+
+        model_paths_to_run = found_models[:self.n_models]
+
+        if not model_paths_to_run:
+            print(f"[EnsembleRunner] WARNING: No models found in {self.ensemble_folder} with extensions {valid_extensions}")
+
+        return model_paths_to_run
+
+    def _multi_gpu_enabled(self):
+        flag = self.eval_cfg.get("multi_gpu_inference", "auto")
+        if isinstance(flag, str) and flag.strip().lower() == "auto":
+            return torch.cuda.is_available() and torch.cuda.device_count() > 1
+        return _parse_bool_like(flag, default=False)
+
+    def _evaluate_model_single_gpu(
+        self,
+        model_path,
+        frames,
+        true_E=None,
+        true_F=None,
+        log_file=None,
+    ):
+        try:
+            model_obj = _load_eval_model(model_path, self.framework, self.device)
+        except Exception as e:
+            print(f"     Failed to load {model_path}: {e}")
+            return None
+
+        return evaluate_model(
+            frames=frames,
+            true_energies=true_E,
+            true_forces=true_F,
+            model_obj=model_obj,
+            device=self.device,
+            batch_size=self.batch_size,
+            eval_log_file=log_file,
+            config=self.config,
+            neighbor_list=self.neighbor_list,
+        )
+
+    def _evaluate_model_multi_gpu(
+        self,
+        model_path,
+        frames,
+        true_E=None,
+        true_F=None,
+        log_file=None,
+        pool=None,
+    ):
+        gpu_ids = _configured_gpu_ids(self.eval_cfg)
+        if len(gpu_ids) <= 1:
+            return self._evaluate_model_single_gpu(
+                model_path,
+                frames,
+                true_E,
+                true_F,
+                log_file=log_file,
+            )
+
+        n_frames = len(frames)
+        chunks = [
+            idx
+            for idx in np.array_split(np.arange(n_frames), len(gpu_ids))
+            if len(idx) > 0
+        ]
+
+        print(
+            f"     Multi-GPU inference: {len(chunks)} worker(s), "
+            f"GPUs={gpu_ids[:len(chunks)]}, per-GPU batch_size={self.batch_size}"
+        )
+
+        payloads = []
+        for gpu_id, idx in zip(gpu_ids, chunks):
+            chunk_frames = [frames[i] for i in idx]
+            chunk_true_E = None if true_E is None else np.asarray(true_E)[idx]
+            chunk_true_F = None if true_F is None else [true_F[i] for i in idx]
+            payloads.append(
+                (
+                    model_path,
+                    self.framework,
+                    self.config,
+                    chunk_frames,
+                    chunk_true_E,
+                    chunk_true_F,
+                    self.batch_size,
+                    gpu_id,
+                )
+            )
+
+        if pool is not None:
+            chunk_results = pool.map(_evaluate_model_chunk_worker, payloads)
+        else:
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(processes=len(payloads)) as pool_temp:
+                chunk_results = pool_temp.map(_evaluate_model_chunk_worker, payloads)
+
+        energy_pred = [None] * n_frames
+        forces_pred = [None] * n_frames
+        latent_frame = [None] * n_frames
+        latent_atom = [None] * n_frames
+
+        for idx, result in zip(chunks, chunk_results):
+            e_chunk, f_chunk, lf_chunk, la_chunk = result
+            for local_i, global_i in enumerate(idx):
+                energy_pred[int(global_i)] = e_chunk[local_i]
+                forces_pred[int(global_i)] = f_chunk[local_i]
+                latent_frame[int(global_i)] = lf_chunk[local_i]
+                latent_atom[int(global_i)] = la_chunk[local_i]
+
+        return energy_pred, forces_pred, latent_frame, latent_atom
 
     def evaluate(self, frames, true_E=None, true_F=None, cache_file="ensemble_cache.npz"):
         if os.path.exists(cache_file):
@@ -234,23 +397,7 @@ class EnsembleRunner:
             return (data["ens_E"], data["ens_F"], data["ens_L_frame"], ens_L_atom_cached)
 
         print(f"\n[EnsembleRunner] Inference for {len(frames)} frames. Scanning for models...")
-
-        # --- 1. Dynamically scan for models based on extensions ---
-        valid_extensions = (".pth", ".pt", ".nequip.pth", ".model")
-        found_models = []
-        
-        if os.path.exists(self.ensemble_folder):
-            for filename in sorted(os.listdir(self.ensemble_folder)):
-                if filename.endswith(valid_extensions):
-                    found_models.append(os.path.join(self.ensemble_folder, filename))
-        else:
-            print(f"[EnsembleRunner] ERROR: Ensemble folder '{self.ensemble_folder}' does not exist.")
-            
-        # Limit to the requested ensemble size
-        model_paths_to_run = found_models[:self.n_models]
-        
-        if not model_paths_to_run:
-            print(f"[EnsembleRunner] WARNING: No models found in {self.ensemble_folder} with extensions {valid_extensions}")
+        model_paths_to_run = self._model_paths()
 
         # --- 2. Load and evaluate the found models ---
         parts_dir = cache_file.replace(".npz", "_parts")
@@ -258,29 +405,63 @@ class EnsembleRunner:
         cached = {int(f.replace("model_", "").replace(".npz", ""))
                   for f in os.listdir(parts_dir) if f.startswith("model_")}
 
-        for m_idx, model_path in enumerate(model_paths_to_run):
-            if m_idx in cached:
-                print(f"  -> Model {m_idx+1}/{len(model_paths_to_run)}: {os.path.basename(model_path)} [cached, skipping]")
-                continue
+        pool = None
+        if self._multi_gpu_enabled() and len(model_paths_to_run) > 0:
+            gpu_ids = _configured_gpu_ids(self.eval_cfg)
+            if len(gpu_ids) > 1:
+                ctx = mp.get_context("spawn")
+                gpu_queue = ctx.SimpleQueue()
+                for gid in gpu_ids:
+                    gpu_queue.put(gid)
 
-            print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
-            
-            try:
-                if self.config.get("model_framework", "schnetpack").lower() == "nequip":
-                    model_obj = model_path
+                print(f"[EnsembleRunner] Spawning persistent worker pool with {len(gpu_ids)} GPU(s): {gpu_ids}")
+                pool = ctx.Pool(
+                    processes=len(gpu_ids),
+                    initializer=_init_persistent_worker,
+                    initargs=(gpu_queue,)
+                )
+
+        try:
+            for m_idx, model_path in enumerate(model_paths_to_run):
+                if m_idx in cached:
+                    print(f"  -> Model {m_idx+1}/{len(model_paths_to_run)}: {os.path.basename(model_path)} [cached, skipping]")
+                    continue
+
+                print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+
+                if self._multi_gpu_enabled():
+                    preds = self._evaluate_model_multi_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                        pool=pool,
+                    )
                 else:
-                    model_obj = torch.load(model_path, map_location=self.device, weights_only=False)
-            except Exception as e:
-                print(f"     Failed to load {model_path}: {e}")
-                continue
+                    preds = self._evaluate_model_single_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                    )
 
-            preds_E, preds_F, preds_L_frame, preds_L_atom = evaluate_model(
-                frames=frames, true_energies=true_E, true_forces=true_F,
-                model_obj=model_obj, device=self.device, batch_size=self.batch_size,
-                eval_log_file=None, config=self.config, neighbor_list=self.neighbor_list
-            )
-            np.savez(os.path.join(parts_dir, f"model_{m_idx:04d}.npz"), E=preds_E, F=preds_F, L_frame=preds_L_frame, L_atom=preds_L_atom)
-            del preds_E, preds_F, preds_L_frame, preds_L_atom
+                if preds is None:
+                    continue
+
+                preds_E, preds_F, preds_L_frame, preds_L_atom = preds
+                np.savez(
+                    os.path.join(parts_dir, f"model_{m_idx:04d}.npz"),
+                    E=preds_E,
+                    F=preds_F,
+                    L_frame=preds_L_frame,
+                    L_atom=preds_L_atom,
+                )
+                del preds_E, preds_F, preds_L_frame, preds_L_atom, preds
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+                print("[EnsembleRunner] Persistent worker pool closed successfully.")
 
         # --- 3. Assemble final .npz from each model ---
         part_files = sorted(f for f in os.listdir(parts_dir) if f.endswith(".npz"))
@@ -306,6 +487,144 @@ class EnsembleRunner:
         np.savez(cache_file, ens_E=ens_E, ens_F=ens_F, ens_L_frame=ens_L_frame)
         shutil.rmtree(parts_dir)
         return ens_E, ens_F, ens_L_frame, ens_L_atom
+
+    def evaluate_stats(self, frames, true_E=None, true_F=None, cache_file="ensemble.npz"):
+        if os.path.exists(cache_file):
+            print(f"\n[EnsembleRunner] Loading aggregate cache from {cache_file}...")
+            data = np.load(cache_file, allow_pickle=True)
+            if "cache_format" in data and str(data["cache_format"]) == "ensemble_stats_v1":
+                return {key: data[key] for key in data.files if key != "cache_format"}
+            print("[EnsembleRunner] Existing cache is not aggregate stats; rebuilding.")
+
+        print(f"\n[EnsembleRunner] Aggregate inference for {len(frames)} labeled frames...")
+        model_paths_to_run = self._model_paths()
+
+        sum_E = sum_E2 = None
+        sum_F = sum_F2 = None
+        sum_L = sum_L2 = None
+        n_models_done = 0
+
+        # Initialize persistent worker pool if multi-GPU is enabled
+        pool = None
+        if self._multi_gpu_enabled() and len(model_paths_to_run) > 0:
+            gpu_ids = _configured_gpu_ids(self.eval_cfg)
+            if len(gpu_ids) > 1:
+                ctx = mp.get_context("spawn")
+                gpu_queue = ctx.SimpleQueue()
+                for gid in gpu_ids:
+                    gpu_queue.put(gid)
+                
+                print(f"[EnsembleRunner] Spawning persistent worker pool with {len(gpu_ids)} GPU(s): {gpu_ids}")
+                pool = ctx.Pool(
+                    processes=len(gpu_ids),
+                    initializer=_init_persistent_worker,
+                    initargs=(gpu_queue,)
+                )
+
+        try:
+            for m_idx, model_path in enumerate(model_paths_to_run):
+                print(f"  -> Aggregating Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+
+                if self._multi_gpu_enabled():
+                    preds = self._evaluate_model_multi_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                        pool=pool,
+                    )
+                else:
+                    preds = self._evaluate_model_single_gpu(
+                        model_path,
+                        frames,
+                        true_E=true_E,
+                        true_F=true_F,
+                    )
+
+                if preds is None:
+                    continue
+
+                preds_E, preds_F, preds_L_frame, _ = preds
+                e = np.asarray(preds_E, dtype=float)
+                f = np.concatenate(preds_F, axis=0).astype(float, copy=False)
+                l_frame = np.asarray(preds_L_frame, dtype=float)
+
+                if sum_E is None:
+                    sum_E = np.zeros_like(e, dtype=float)
+                    sum_E2 = np.zeros_like(e, dtype=float)
+                    sum_F = np.zeros_like(f, dtype=float)
+                    sum_F2 = np.zeros_like(f, dtype=float)
+                    sum_L = np.zeros_like(l_frame, dtype=float)
+                    sum_L2 = np.zeros_like(l_frame, dtype=float)
+
+                sum_E += e
+                sum_E2 += e**2
+                sum_F += f
+                sum_F2 += f**2
+                sum_L += l_frame
+                sum_L2 += l_frame**2
+                n_models_done += 1
+
+                del preds, preds_E, preds_F, preds_L_frame, e, f, l_frame
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+                print("[EnsembleRunner] Persistent worker pool closed successfully.")
+
+        if n_models_done == 0:
+            raise ValueError("No ensemble models were successfully evaluated.")
+
+        mu_E = sum_E / n_models_done
+        sigma_E = _std_from_sums(sum_E, sum_E2, n_models_done)
+        mu_F = sum_F / n_models_done
+        sigma_F = _std_from_sums(sum_F, sum_F2, n_models_done)
+        mu_L_frame = sum_L / n_models_done
+        sigma_L_frame = _std_from_sums(sum_L, sum_L2, n_models_done)
+        n_atoms_per_frame = np.array([len(fr) for fr in frames], dtype=int)
+
+        result = {
+            "n_models": np.array(n_models_done, dtype=int),
+            "mu_E": mu_E,
+            "sigma_E": sigma_E,
+            "mu_F": mu_F,
+            "sigma_F": sigma_F,
+            "mu_L_frame": mu_L_frame,
+            "sigma_L_frame": sigma_L_frame,
+            "n_atoms_per_frame": n_atoms_per_frame,
+        }
+
+        print(f"[EnsembleRunner] Saving aggregate cache to {cache_file}...")
+        np.savez_compressed(cache_file, cache_format="ensemble_stats_v1", **result)
+        return result
+
+    def evaluate_pool_light(self, frames, cache_file="ensemble_unlabel.npz"):
+        if os.path.exists(cache_file):
+            print(f"\n[EnsembleRunner] Loading light pool cache from {cache_file}...")
+            data = np.load(cache_file, allow_pickle=True)
+            if "cache_format" in data and str(data["cache_format"]) == "ensemble_pool_light_v1":
+                return {key: data[key] for key in data.files if key != "cache_format"}
+            print("[EnsembleRunner] Existing pool cache is not light format; rebuilding.")
+
+        print(f"\n[EnsembleRunner] Light aggregate inference for {len(frames)} pool frames...")
+        stats = self.evaluate_stats(frames, cache_file=cache_file)
+        sigma_F_mean, sigma_F_max = _force_summary_from_flat(stats["sigma_F"], frames)
+        _, frame_max_force = _force_summary_from_flat(stats["mu_F"], frames)
+
+        result = {
+            "n_models": stats["n_models"],
+            "mu_E": stats["mu_E"],
+            "sigma_E": stats["sigma_E"],
+            "mu_L_frame": stats["mu_L_frame"],
+            "sigma_F_mean": sigma_F_mean,
+            "sigma_F_max": sigma_F_max,
+            "frame_max_force": frame_max_force,
+            "n_atoms_per_frame": stats["n_atoms_per_frame"],
+        }
+
+        print(f"[EnsembleRunner] Saving light pool cache to {cache_file}...")
+        np.savez_compressed(cache_file, cache_format="ensemble_pool_light_v1", **result)
+        return result
 
 def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):
     os.makedirs(out_dir, exist_ok=True)
@@ -377,11 +696,25 @@ class EvaluationPipeline:
         if "ensemble" in self.uq_methods:
             stats_ens, mean_L_frame, sigma_comp, sigma_E_raw = self._run_ensemble_labeled()
             
+            # --- Model-Independent SOAP Active Learning Integration ---
+            use_soap = self.eval_cfg.get("use_soap", True)
+            soap_species = None
+            if use_soap:
+                print("\n[Active Learning] Computing model-independent SOAP descriptors for active learning latent space...")
+                soap_all, soap_species = compute_soap_features(
+                    self.ds["frames"],
+                    r_cut=self.eval_cfg.get("soap_rcut", 4.0),
+                    n_max=self.eval_cfg.get("soap_nmax", 4),
+                    l_max=self.eval_cfg.get("soap_lmax", 4),
+                )
+                if soap_all is not None:
+                    mean_L_frame = soap_all
+            
             if self.al_val_flag and self.al_val_flag.lower() == "influence":
                 self._run_validation_al(stats_ens, mean_L_frame, sigma_comp)
                 
             if self.pool_xyz_path and os.path.exists(self.pool_xyz_path):
-                self._run_pool_al(stats_ens, mean_L_frame, sigma_E_raw, sigma_comp)
+                self._run_pool_al(stats_ens, mean_L_frame, sigma_E_raw, sigma_comp, soap_species=soap_species)
 
         print("Evaluation Pipeline Completed.")
 
@@ -392,18 +725,30 @@ class EvaluationPipeline:
             print("Base model not found, skipping base evaluation.")
             return
 
-        framework = self.config.get("model_framework", "schnetpack").lower()
-        if framework == "nequip":
-            base_model = base_path
+        runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
+        if runner._multi_gpu_enabled():
+            preds = runner._evaluate_model_multi_gpu(
+                base_path,
+                self.ds["frames"],
+                true_E=list(self.ds["E_true"]),
+                true_F=self.ds["F_true"],
+                log_file=self.eval_log,
+            )
         else:
-            base_model = _safe_load_model(base_path, device=self.device)
-        print(f"Loaded base model from {base_path}")
-        
-        pred_E, pred_F, _, _ = evaluate_model(
-            self.ds["frames"], list(self.ds["E_true"]), self.ds["F_true"],
-            base_model, self.device, self.eval_cfg.get("batch_size", 32),
-            eval_log_file=self.eval_log, config=self.config, neighbor_list=self.neighbour_list
-        )
+            print(f"Loaded base model from {base_path}")
+            preds = runner._evaluate_model_single_gpu(
+                base_path,
+                self.ds["frames"],
+                true_E=list(self.ds["E_true"]),
+                true_F=self.ds["F_true"],
+                log_file=self.eval_log,
+            )
+
+        if preds is None:
+            print("Base model inference failed, skipping base evaluation.")
+            return
+
+        pred_E, pred_F, _, _ = preds
         
         if isinstance(pred_F, np.ndarray) and pred_F.ndim == 3:
             pf_list, idx = [], 0
@@ -425,23 +770,40 @@ class EvaluationPipeline:
     def _run_ensemble_labeled(self):
         """Runs the ensemble on labeled datasets and computes UQ metrics."""
         runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
-        ens_E_sel, ens_F_list, ens_L_frame_sel, _ = runner.evaluate(
-            self.ds["frames"], self.ds["E_true"], self.ds["F_true"], cache_file="ensemble.npz"
-        )
-        
-        ens_F_sel = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_list], dtype=float)
-        
-        if ens_E_sel.shape[0] < 2:
-            raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
+        cache_mode = str(self.eval_cfg.get("ensemble_cache_mode", "stats")).lower()
 
-        # Compute Stats
-        mu_E_frame = np.mean(ens_E_sel, axis=0)
-        std_E_frame = np.std(ens_E_sel, axis=0, ddof=0)
-        sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
-        mu_F_comp = np.mean(ens_F_sel, axis=0)
-        sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
+        if cache_mode == "raw":
+            ens_E_sel, ens_F_list, ens_L_frame_sel, _ = runner.evaluate(
+                self.ds["frames"], self.ds["E_true"], self.ds["F_true"], cache_file="ensemble.npz"
+            )
+
+            ens_F_sel = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_list], dtype=float)
+
+            if ens_E_sel.shape[0] < 2:
+                raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
+
+            mu_E_frame = np.mean(ens_E_sel, axis=0)
+            std_E_frame = np.std(ens_E_sel, axis=0, ddof=0)
+            sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
+            mu_F_comp = np.mean(ens_F_sel, axis=0)
+            sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
+            mean_L_frame = np.mean(ens_L_frame_sel, axis=0)
+        else:
+            stats_cache = runner.evaluate_stats(
+                self.ds["frames"], self.ds["E_true"], self.ds["F_true"], cache_file="ensemble.npz"
+            )
+
+            if int(stats_cache["n_models"]) < 2:
+                raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
+
+            mu_E_frame = stats_cache["mu_E"]
+            std_E_frame = stats_cache["sigma_E"]
+            sigma_E_raw = stats_cache["sigma_E"]
+            mu_F_comp = stats_cache["mu_F"]
+            sigma_F_flat = stats_cache["sigma_F"]
+            mean_L_frame = stats_cache["mu_L_frame"]
+
         std_F_comp = sigma_F_flat.flatten()
-        mean_L_frame = np.mean(ens_L_frame_sel, axis=0)
 
         # Build Stats Object
         mf_list, idx = [], 0
@@ -480,59 +842,108 @@ class EvaluationPipeline:
         )
 
         if len(sel_idx):
-            val_pos = np.array([self.ds["frames"][i].get_positions() for i in sel_idx])
-            val_forces = np.stack([self.ds["F_true"][i] for i in sel_idx])
+            val_pos = [self.ds["frames"][i].get_positions() for i in sel_idx]
+            val_forces = [self.ds["F_true"][i] for i in sel_idx]
             val_energies = self.ds["E_true"][sel_idx]
-            atom_types = self.ds["frames"][sel_idx[0]].get_chemical_symbols()
+            atom_types = [self.ds["frames"][i].get_chemical_symbols() for i in sel_idx]
             
             save_stacked_xyz_schnetpack("to_label_from_val.xyz", val_energies, val_pos, val_forces, atom_types)
             print(f"[Val-AL] Saved {len(sel_idx)} validation frames to 'to_label_from_val.xyz'.")
         else:
             print("[Val-AL] No validation frames selected.")
 
-    def _run_pool_al(self, stats_ens, mean_L_frame, sigma_E_raw, sigma_comp):
+    def _run_pool_al(self, stats_ens, mean_L_frame, sigma_E_raw, sigma_comp, soap_species=None):
         """Active Learning on the unlabelled out-of-distribution pool."""
         print(f"\n[Pool-AL] Parsing unlabeled pool from {self.pool_xyz_path}")
         pool_frames = read(self.pool_xyz_path, index=":", format="extxyz")
 
         runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
-        ens_E_pool, ens_F_pool_list, ens_L_pool, _ = runner.evaluate(pool_frames, cache_file="ensemble_unlabel.npz")
+        pool_cache_mode = str(self.eval_cfg.get("pool_cache_mode", "light")).lower()
 
-        ens_F_pool = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_pool_list], dtype=float)
+        if pool_cache_mode == "raw":
+            ens_E_pool, ens_F_pool_list, ens_L_pool, _ = runner.evaluate(pool_frames, cache_file="ensemble_unlabel.npz")
 
-        mu_E_pool = np.mean(ens_E_pool, axis=0)
-        sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
-        mu_F_pool = np.mean(ens_F_pool, axis=0)
-        sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
-        mu_L_pool = np.mean(ens_L_pool, axis=0)
+            ens_F_pool = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_pool_list], dtype=float)
 
-        def _split_flat_forces(frames, flat_forces):
-            if isinstance(flat_forces, list):
-                return flat_forces
-            arr = np.asarray(flat_forces)
-            if arr.ndim == 3:
-                return [arr[i] for i in range(arr.shape[0])]
-            if arr.ndim == 1:
-                arr = arr.reshape(-1, 3)
-            out, idx = [], 0
-            for fr in frames:
-                n_atoms = len(fr)
-                out.append(arr[idx:idx + n_atoms])
-                idx += n_atoms
-            return out
+            mu_E_pool = np.mean(ens_E_pool, axis=0)
+            sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
+            mu_F_pool = np.mean(ens_F_pool, axis=0)
+            sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
+            mu_L_pool = np.mean(ens_L_pool, axis=0)
+            sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
+            _, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
+        elif pool_cache_mode == "stats":
+            pool_stats = runner.evaluate_stats(pool_frames, cache_file="ensemble_unlabel.npz")
 
-        # Thinning
-        thin_idx = np.arange(len(pool_frames))[::self.eval_cfg.get("pool_stride", 1)]
+            mu_E_pool = pool_stats["mu_E"]
+            sigma_E_pool = pool_stats["sigma_E"]
+            mu_F_pool = pool_stats["mu_F"]
+            sigma_F_pool = pool_stats["sigma_F"]
+            mu_L_pool = pool_stats["mu_L_frame"]
+            sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
+            _, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
+        else:
+            pool_light = runner.evaluate_pool_light(pool_frames, cache_file="ensemble_unlabel.npz")
+
+            mu_E_pool = pool_light["mu_E"]
+            sigma_E_pool = pool_light["sigma_E"]
+            mu_L_pool = pool_light["mu_L_frame"]
+            sigma_F_pool_mean = pool_light["sigma_F_mean"]
+            sigma_F_pool_max = pool_light["sigma_F_max"]
+            frame_max_force_pool = pool_light["frame_max_force"]
+
+        # Thinning (Adaptive Striding Option)
+        adaptive_striding = self.eval_cfg.get("adaptive_striding", False)
+        if adaptive_striding:
+            coarse_stride = self.eval_cfg.get("coarse_stride", 20)
+            fine_stride = self.eval_cfg.get("fine_stride", 2)
+            unc_threshold = self.eval_cfg.get("adaptive_uncertainty_threshold", None)
+            
+            if unc_threshold is None:
+                # Use 30th percentile of pool force uncertainties as a transition threshold
+                unc_threshold = float(np.percentile(sigma_F_pool_mean, 30))
+                print(f"[Pool-AL] Adaptive striding transition threshold determined from pool: {unc_threshold:.5f} eV/Å")
+            else:
+                print(f"[Pool-AL] User-defined adaptive striding threshold: {unc_threshold:.5f} eV/Å")
+                
+            thin_idx_list = []
+            curr_i = 0
+            n_pool = len(pool_frames)
+            while curr_i < n_pool:
+                thin_idx_list.append(curr_i)
+                # Check average force uncertainty at current frame
+                unc = sigma_F_pool_mean[curr_i]
+                if unc > unc_threshold:
+                    curr_i += fine_stride
+                else:
+                    curr_i += coarse_stride
+            thin_idx = np.array(thin_idx_list, dtype=int)
+            print(f"[Pool-AL] Adaptive striding thinned pool from {n_pool} to {len(thin_idx)} frames.")
+        else:
+            thin_idx = np.arange(len(pool_frames))[::self.eval_cfg.get("pool_stride", 1)]
+
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
         F_pool_thin = mu_L_pool[thin_idx].astype(float)
+
+        # --- Compute SOAP for thinned pool frames ---
+        if soap_species is not None:
+            print("[Pool-AL] Computing model-independent SOAP descriptors for thinned pool frames...")
+            soap_pool_thin, _ = compute_soap_features(
+                pool_frames_thin,
+                species=soap_species,
+                r_cut=self.eval_cfg.get("soap_rcut", 4.0),
+                n_max=self.eval_cfg.get("soap_nmax", 4),
+                l_max=self.eval_cfg.get("soap_lmax", 4),
+            )
+            if soap_pool_thin is not None:
+                F_pool_thin = soap_pool_thin
+
         mu_E_pool_thin = mu_E_pool[thin_idx].astype(float)
         sigma_E_pool_thin = sigma_E_pool[thin_idx].astype(float)
         F_train_thin = mean_L_frame[self.ds["train_idx"]].astype(float)
-
-        mu_F_pool_list = _split_flat_forces(pool_frames, mu_F_pool)
-        sigma_F_pool_list = _split_flat_forces(pool_frames, sigma_F_pool)
-        mu_F_pool_thin = [mu_F_pool_list[i] for i in thin_idx]
-        sigma_F_pool_thin = [sigma_F_pool_list[i] for i in thin_idx]
+        sigma_F_pool_mean_thin = sigma_F_pool_mean[thin_idx].astype(float)
+        sigma_F_pool_max_thin = sigma_F_pool_max[thin_idx].astype(float)
+        frame_max_force_pool_thin = frame_max_force_pool[thin_idx].astype(float)
 
         # RDF filtering
         rdf_cache = "rdf_thresholds_cache.npz"
@@ -574,23 +985,33 @@ class EvaluationPipeline:
         # Calibrations
         good_rows = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[self.ds["train_idx"]])
         print(f"[Pool-AL] Extracted {good_rows.sum()} valid training frames for GP calibration.")
-        alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_train_thin[good_rows], stats_ens.delta_E_frame[self.ds["train_idx"]][good_rows])
+        train_atom_counts = np.array([len(self.ds["frames"][i]) for i in self.ds["train_idx"]], dtype=float)
+        train_delta_E_atom = stats_ens.delta_E_frame[self.ds["train_idx"]] / train_atom_counts
+        alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_train_thin[good_rows], train_delta_E_atom[good_rows])
 
         calibrator = UQCalibrator()
         mu_E_train = stats_ens.pred_energies[self.ds["train_idx"]]
-        calibrator.fit(mu_E_train, sigma_E_raw[self.ds["train_idx"]], stats_ens.delta_E_frame[self.ds["train_idx"]])
-        if self.do_plot: calibrator.plot_diagnostics(mu_E_train, sigma_E_raw[self.ds["train_idx"]], stats_ens.delta_E_frame[self.ds["train_idx"]])
+        mu_E_train_atom = mu_E_train / train_atom_counts
+        sigma_E_train_atom = sigma_E_raw[self.ds["train_idx"]] / train_atom_counts
+        calibrator.fit(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
+        if self.do_plot:
+            calibrator.plot_diagnostics(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
+
+        sigma_force_frames = _split_atom_vectors(sigma_comp, self.ds["frames"])
+        train_forces = [self.ds["F_true"][i] for i in self.ds["train_idx"]]
+        sigma_force_train = [sigma_force_frames[i] for i in self.ds["train_idx"]]
+        train_frames = [self.ds["frames"][i] for i in self.ds["train_idx"]]
 
         # Selection
         print("[Pool-AL] Running windowed active learning on thinned pool ...")
-        forces_train = self.ds.get("F_train_arr")
-        if forces_train is None:
-            forces_train = self.ds.get("F_train_list")
         _, sel_rel_thin = adaptive_learning_mig_pool_windowed(
             pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
-            forces_train=forces_train, sigma_energy=sigma_E_raw, sigma_force=sigma_comp,
+            forces_train=train_forces, sigma_energy=sigma_E_raw[self.ds["train_idx"]], sigma_force=sigma_force_train,
             mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
-            mu_F_pool=mu_F_pool_thin, sigma_F_pool=sigma_F_pool_thin, rdf_thresholds=rdf_thresholds,
+            rdf_thresholds=rdf_thresholds,
+            sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
+            frame_max_force_pool=frame_max_force_pool_thin,
+            train_frames=train_frames,
             rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
             window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
             percentile_gamma=self.eval_cfg.get("percentile_gamma", 100),
@@ -623,4 +1044,3 @@ def run_eval(config):
         return
     pipeline = EvaluationPipeline(config)
     pipeline.run()
-

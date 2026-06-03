@@ -9,6 +9,7 @@ This module implements:
   2. A highly modular Class-based Pool Active Learner for OOD sampling.
 """
 
+import os
 import time
 import numpy as np
 import scipy.optimize
@@ -20,11 +21,108 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from itertools import combinations
 from typing import Tuple, List, Optional
+from sklearn.isotonic import IsotonicRegression
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
+
+def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_max=4, l_max=4):
+    """
+    Computes averaged SOAP descriptors for a list of ASE Atoms objects.
+    
+    Parameters:
+        frames (list): List of ASE Atoms objects.
+        train_frames (list, optional): List of training ASE Atoms objects to gather chemical symbols.
+        species (list, optional): Predefined list of species (chemical symbols).
+        r_cut (float): Cutoff radius in Angstrom. Default 4.0.
+        n_max (int): Number of radial basis functions. Default 4.
+        l_max (int): Maximum degree of spherical harmonics. Default 4.
+        
+    Returns:
+        tuple: (features_array, species_list) or (None, None) on failure.
+    """
+    try:
+        from dscribe.descriptors import SOAP
+        
+        # 1. Determine chemical species if not provided
+        if species is None:
+            species_set = set()
+            for fr in frames:
+                species_set.update(fr.get_chemical_symbols())
+            if train_frames is not None:
+                for fr in train_frames:
+                    species_set.update(fr.get_chemical_symbols())
+            species = sorted(list(species_set))
+            
+        print(f"[SOAP] Computing descriptors for species: {species} (rcut={r_cut}, nmax={n_max}, lmax={l_max})")
+        
+        # 2. Construct SOAP descriptor
+        soap = SOAP(
+            species=species,
+            r_cut=r_cut,
+            n_max=n_max,
+            l_max=l_max,
+            periodic=False,     # Quantum dots in vacuum
+            average="outer",    # Average SOAP over all atoms in the frame to get a per-frame descriptor
+            sparse=False
+        )
+        
+        # 3. Create SOAP vectors (use multi-processing if many frames)
+        n_jobs = -1 if len(frames) > 5 else 1
+        features = soap.create(frames, n_jobs=n_jobs)
+        
+        # Make sure it's 2D array
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+            
+        return features, species
+    except Exception as e:
+        print(f"[SOAP] Warning: Failed to compute SOAP descriptors. Falling back to default latents. Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
 
 # =============================================================================
 # 1. MATH & LATENT SPACE UTILITIES
 # =============================================================================
+
+def _as_frame_arrays(values, *, frame_counts=None, name="values") -> List[np.ndarray]:
+    """Return per-frame arrays, accepting either a list or a concatenated array."""
+    if values is None:
+        raise ValueError(f"{name} is required")
+
+    if isinstance(values, (list, tuple)):
+        return [np.asarray(v, dtype=float) for v in values]
+
+    arr = np.asarray(values, dtype=float)
+    if frame_counts is None:
+        if arr.ndim < 3:
+            raise ValueError(f"{name} needs frame_counts when passed as a concatenated array")
+        return [np.asarray(v, dtype=float) for v in arr]
+
+    if arr.ndim == 1:
+        if arr.size % 3 != 0:
+            raise ValueError(f"{name} component array must be divisible by 3")
+        arr = arr.reshape(-1, 3)
+    if arr.shape[0] != int(np.sum(frame_counts)):
+        raise ValueError(f"{name} length mismatch: got {arr.shape[0]}, expected {int(np.sum(frame_counts))}")
+
+    splits = np.cumsum(frame_counts)[:-1]
+    return [np.asarray(v, dtype=float) for v in np.split(arr, splits)]
+
+
+def _frame_counts_from_arrays(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.asarray(a).shape[0] for a in arrays], dtype=float)
+
+
+def _frame_force_max(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.nanmax(np.linalg.norm(a, axis=1)) if np.asarray(a).size else np.nan for a in arrays], dtype=float)
+
+
+def _frame_sigma_max(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.nanmax(np.linalg.norm(a, axis=1)) if np.asarray(a).size else np.nan for a in arrays], dtype=float)
+
+
+def _frame_sigma_mean_norm(arrays: List[np.ndarray]) -> np.ndarray:
+    return np.array([np.nanmean(np.linalg.norm(a, axis=1)) if np.asarray(a).size else np.nan for a in arrays], dtype=float)
 
 def calibrate_alpha_reg_gcv(
     F_eval: np.ndarray,
@@ -126,6 +224,10 @@ def adaptive_learning_ensemble_calibrated(
     
     eps = 1e-9
     train_idx, eval_idx = np.where(~eval_mask)[0], np.where(eval_mask)[0]
+    atom_counts = np.array([len(fr) for fr in all_frames], dtype=float)
+    if np.any(atom_counts <= 0):
+        raise ValueError("All frames must contain at least one atom for active learning")
+    delta_E_atom = np.asarray(delta_E_frame, dtype=float) / atom_counts
     
     # 1. RDF Filter
     if reference_frames:
@@ -136,7 +238,7 @@ def adaptive_learning_ensemble_calibrated(
         realistic_mask = np.ones(len(eval_idx), dtype=bool)
 
     # 2. Latent space calculations
-    alpha_sq, lam_opt, terms_lat, G_all, L_E = calibrate_alpha_reg_gcv(mean_l_al, delta_E_frame)
+    alpha_sq, lam_opt, terms_lat, G_all, L_E = calibrate_alpha_reg_gcv(mean_l_al, delta_E_atom)
     G_train, G_eval_E = G_all[train_idx], G_all[eval_idx]
 
     # 3. Setup force RMSEs
@@ -150,7 +252,7 @@ def adaptive_learning_ensemble_calibrated(
 
     rmse_F_eval = rmse_F_pf_max[eval_idx]
     rmse_Fmean_eval = rmse_F_pf_mean[eval_idx]
-    delta_E_eval = np.abs(delta_E_frame[eval_idx])
+    delta_E_eval = np.abs(delta_E_atom[eval_idx])
 
     # 4. Normalization and Ranking
     z_sigma = (delta_E_eval - delta_E_eval.mean()) / (delta_E_eval.std() + eps)
@@ -219,23 +321,6 @@ class _PoolActiveLearner:
         self._print_summary()
         return self.sel_frames, self.final_pool_indices
 
-    @staticmethod
-    def _to_frame_list(forces, counts=None):
-        if isinstance(forces, list):
-            return forces
-        arr = np.asarray(forces)
-        if arr.ndim == 3:
-            return [arr[i] for i in range(arr.shape[0])]
-        if arr.ndim == 1:
-            arr = arr.reshape(-1, 3)
-        
-        out, idx = [], 0
-        for n_atoms in np.asarray(counts):
-            n_atoms = int(n_atoms)
-            out.append(arr[idx:idx + n_atoms])
-            idx += n_atoms
-        return out
-
     def _setup_latent_space(self):
         self.G_train = scipy.linalg.solve_triangular(self.L, self.F_train.T, lower=True).T
         self.G_pool  = scipy.linalg.solve_triangular(self.L, self.F_pool.T,  lower=True).T
@@ -254,52 +339,69 @@ class _PoolActiveLearner:
         self.dM_thr = np.quantile(dM_train, 99.0 / 100.0)
 
     def _setup_thresholds(self):
-        if isinstance(self.forces_train, list):
-            forces_train_list = self.forces_train
-        else:
-            forces_train_arr = np.asarray(self.forces_train)
-            if forces_train_arr.ndim == 3:
-                forces_train_list = [forces_train_arr[i] for i in range(forces_train_arr.shape[0])]
-            else:
-                n_train = len(self.mu_E_frame_train)
-                n_atoms = forces_train_arr.shape[0] // n_train
-                counts = np.full(n_train, n_atoms, dtype=int)
-                forces_train_list = self._to_frame_list(forces_train_arr, counts=counts)
-        n_atoms_train_all = np.array([f.shape[0] for f in forces_train_list], dtype=int)
-        self.n_atoms_train = int(np.median(n_atoms_train_all))
+        self.forces_train_frames = _as_frame_arrays(self.forces_train, name="forces_train")
+        self.train_atom_counts = _frame_counts_from_arrays(self.forces_train_frames)
+        self.pool_atom_counts = np.array([len(fr) for fr in self.pool_frames], dtype=float)
 
-        n_atoms_pool_all = np.array([len(fr) for fr in self.pool_frames], dtype=int)
-        self.n_atoms_pool = int(np.median(n_atoms_pool_all))
+        self.sigma_force_frames = _as_frame_arrays(
+            self.sigma_force,
+            frame_counts=self.train_atom_counts.astype(int),
+            name="sigma_force",
+        )
+        has_pool_force_summaries = all(
+            hasattr(self, name)
+            for name in ("sigma_F_pool_mean", "sigma_F_pool_max", "frame_max_force_pool")
+        )
+
+        if has_pool_force_summaries:
+            self.sigma_F_pool_mean = np.asarray(self.sigma_F_pool_mean, dtype=float)
+            self.sigma_F_pool_max = np.asarray(self.sigma_F_pool_max, dtype=float)
+            self.frame_max_force_pool = np.asarray(self.frame_max_force_pool, dtype=float)
+
+            if not (
+                len(self.sigma_F_pool_mean)
+                == len(self.sigma_F_pool_max)
+                == len(self.frame_max_force_pool)
+                == len(self.pool_frames)
+            ):
+                raise ValueError("Pool force summary arrays must contain one value per pool frame")
+        else:
+            self.mu_F_pool_frames = _as_frame_arrays(
+                self.mu_F_pool,
+                frame_counts=self.pool_atom_counts.astype(int),
+                name="mu_F_pool",
+            )
+            self.sigma_F_pool_frames = _as_frame_arrays(
+                self.sigma_F_pool,
+                frame_counts=self.pool_atom_counts.astype(int),
+                name="sigma_F_pool",
+            )
+
+        if len(self.sigma_energy) != len(self.train_atom_counts):
+            raise ValueError(
+                f"sigma_energy must contain one value per training frame; got {len(self.sigma_energy)} "
+                f"for {len(self.train_atom_counts)} training frames"
+            )
 
         # Energies
-        n_train = len(self.mu_E_frame_train)
-        n_atoms_train = n_atoms_train_all[:n_train]
-
-        sigma_energy_arr = np.asarray(self.sigma_energy).reshape(-1)
-        if sigma_energy_arr.size == n_atoms_train_all.size:
-            self.sigma_E_atom_train = sigma_energy_arr / n_atoms_train_all
-        else:
-            self.sigma_E_atom_train = sigma_energy_arr[:n_train] / n_atoms_train
-
-        self.mu_E_atom_train = self.mu_E_frame_train / n_atoms_train
-        self.mu_E_atom_pool = self.mu_E_pool / n_atoms_pool_all
-        self.sigma_E_atom_pool = self.sigma_E_pool / n_atoms_pool_all
+        self.mu_E_atom_train = np.asarray(self.mu_E_frame_train, dtype=float) / self.train_atom_counts
+        self.sigma_E_atom_train = np.asarray(self.sigma_energy, dtype=float) / self.train_atom_counts
+        self.mu_E_atom_pool = np.asarray(self.mu_E_pool, dtype=float) / self.pool_atom_counts
+        self.sigma_E_atom_pool = np.asarray(self.sigma_E_pool, dtype=float) / self.pool_atom_counts
 
         self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5
-        self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / n_atoms_pool_all
-        self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / n_atoms_pool_all
+        self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / self.pool_atom_counts
+        self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / self.pool_atom_counts
 
         # Forces
-        sigma_F_train_list = self._to_frame_list(self.sigma_force, n_atoms_train_all)
-        self.sigma_F_train_max = np.array([s.max() for s in sigma_F_train_list])
-        self.sigma_F_train_mean = np.array([np.linalg.norm(s, axis=1).mean() for s in sigma_F_train_list])
-        self.frame_max_force_train = np.array([np.linalg.norm(f, axis=1).max() for f in forces_train_list])
+        self.sigma_F_train_max = _frame_sigma_max(self.sigma_force_frames)
+        self.sigma_F_train_mean = _frame_sigma_mean_norm(self.sigma_force_frames)
+        self.frame_max_force_train = _frame_force_max(self.forces_train_frames)
 
-        mu_F_pool_list = self._to_frame_list(self.mu_F_pool, n_atoms_pool_all)
-        sigma_F_pool_list = self._to_frame_list(self.sigma_F_pool, n_atoms_pool_all)
-        self.sigma_F_pool_max = np.array([s.max() for s in sigma_F_pool_list])
-        self.sigma_F_pool_mean = np.array([np.linalg.norm(s, axis=1).mean() for s in sigma_F_pool_list])
-        self.frame_max_force_pool = np.array([np.linalg.norm(f, axis=1).max() for f in mu_F_pool_list])
+        if not has_pool_force_summaries:
+            self.sigma_F_pool_max = _frame_sigma_max(self.sigma_F_pool_frames)
+            self.sigma_F_pool_mean = _frame_sigma_mean_norm(self.sigma_F_pool_frames)
+            self.frame_max_force_pool = _frame_force_max(self.mu_F_pool_frames)
 
         # Baseline Thresholds
         self.thr_sigma_E_low = np.percentile(self.sigma_E_atom_train, self.percentile_F_low)
@@ -389,7 +491,7 @@ class _PoolActiveLearner:
             self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, 2.0 * self.sigma_F_train_max.max())
             self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, 2.0 * self.sigma_F_train_mean.max())
             self.thr_Fmag_hi_eff = max(self.thr_Fmag, 2.0 * self.frame_max_force_train.max())
-            self.allowed_offset_eff = 2.0 / self.n_atoms_train
+            self.allowed_offset_eff = 2.0 / float(np.nanmedian(self.train_atom_counts))
 
         # Count coverage
         n_hi_E = (self.sigma_E_atom_pool > self.thr_sigma_E_low).sum()
@@ -569,7 +671,7 @@ class _PoolActiveLearner:
             # --- 3. Write Train Data Block ---
             fh.write("\n# TRAIN DATASET UNCERTAINTIES\n")
             fh.write("# idx  sigma_E_atom  sigma_F_max  sigma_F_mean  Fmax\n")
-            for t_idx in range(len(self.sigma_E_atom_train)):
+            for t_idx in range(len(self.forces_train_frames)):
                 fh.write(f"{t_idx:<6d} {self.sigma_E_atom_train[t_idx]:.6f} {self.sigma_F_train_max[t_idx]:.6f} "
                          f"{self.sigma_F_train_mean[t_idx]:.6f} {self.frame_max_force_train[t_idx]:.6f}\n")
 
@@ -604,3 +706,57 @@ def adaptive_learning_mig_pool_windowed(*args, **kwargs):
         "sigma_force", "mu_E_frame_train", "mu_E_pool", "sigma_E_pool", "mu_F_pool", 
         "sigma_F_pool", "rdf_thresholds"], args)), **kwargs)
     return learner.run()
+
+class UQCalibrator:
+    """Handles Isotonic Regression mapping for Bias and Uncertainty Calibration."""
+    def __init__(self):
+        self.iso_unc = IsotonicRegression(y_min=0.0, out_of_bounds='clip')
+        self.iso_bias = IsotonicRegression(y_min=None, y_max=None, out_of_bounds='clip')
+        self.is_fitted = False
+
+    def fit(self, mu_E_train, sigma_E_train, delta_E_train):
+        print("\n[UQCalibrator] Fitting BIAS and UNCERTAINTY calibrators...")
+        self.iso_bias.fit(mu_E_train, delta_E_train)
+        self.iso_unc.fit(sigma_E_train, np.abs(delta_E_train))
+        self.is_fitted = True
+        print("[UQCalibrator] Fitting complete.")
+
+    def calibrate(self, mu_E_raw, sigma_E_raw):
+        if not self.is_fitted:
+            raise RuntimeError("Calibrator must be fitted before calling calibrate().")
+        bias_correction = self.iso_bias.predict(mu_E_raw)
+        sigma_calibrated = self.iso_unc.predict(sigma_E_raw)
+        mu_E_calibrated = mu_E_raw - bias_correction
+        return mu_E_calibrated, sigma_calibrated, bias_correction
+
+    def plot_diagnostics(self, mu_E_train, sigma_E_train, delta_E_train, out_dir="uq_plots"):
+        if not self.is_fitted: return
+        os.makedirs(out_dir, exist_ok=True)
+        delta_train_abs = np.abs(delta_E_train)
+        
+        # Uncertainty Scatter
+        plt.figure(figsize=(5,4))
+        plt.scatter(sigma_E_train, delta_train_abs, s=8, alpha=0.6, label="train")
+        s_sorted = np.sort(sigma_E_train)
+        plt.plot(s_sorted, self.iso_unc.predict(s_sorted), color="C1", lw=2, label="isotonic f(σ)")
+        plt.plot([s_sorted.min(), s_sorted.max()], [s_sorted.min(), s_sorted.max()], 'k--', lw=1, label="identity")
+        plt.xlabel("ensemble σ (training)")
+        plt.ylabel("|ΔE| (training)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{out_dir}/calibration_scatter.png", dpi=200)
+        plt.close()
+
+        # Bias Scatter
+        plt.figure(figsize=(5,4))
+        plt.scatter(mu_E_train, delta_E_train, s=8, alpha=0.6, label="train (signed error)")
+        e_sorted = np.sort(mu_E_train)
+        plt.plot(e_sorted, self.iso_bias.predict(e_sorted), color="C1", lw=2, label="isotonic bias f(E)")
+        plt.plot([e_sorted.min(), e_sorted.max()], [0, 0], 'k--', lw=1, label="zero bias")
+        plt.xlabel("Predicted Energy μE (training)")
+        plt.ylabel("Signed Error ΔE (training)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{out_dir}/bias_calibration_scatter.png", dpi=200)
+        plt.close()
+        print(f"[UQCalibrator] Diagnostic plots saved to {out_dir}/")

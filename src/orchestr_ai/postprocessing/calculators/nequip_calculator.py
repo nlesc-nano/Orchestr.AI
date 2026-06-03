@@ -63,6 +63,7 @@ class NequipCalculator(BaseCalculator):
                 bins=20,
                 range=(0.0, 10.0),
             )
+            hist = hist.astype(np.float64) / max(1, len(force_magnitudes))
 
             moments = np.array(
                 [
