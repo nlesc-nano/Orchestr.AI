@@ -16,7 +16,6 @@ import traceback # Make sure traceback is imported
 from pathlib import Path
 from ase import units
 from ase.io import write
-from ase.io.extxyz import write_extxyz
 from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.optimize import BFGSLineSearch
@@ -245,28 +244,31 @@ def _log_status_line(log_file, header, fmt, values):
 
 
 def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
-    """Append one extended-XYZ frame (with forces) to *traj_file*."""
+    """Append one extended-XYZ frame with positions, velocities, and forces."""
     if not traj_file:
         return
-    forces = atoms.get_forces()
-    positions = atoms.get_positions()
-    symbols = atoms.get_chemical_symbols()
 
-    with open(traj_file, "a") as fh:
-        fh.write(f"{len(atoms)}\n")
-        fh.write(
-            f"Step = {step}, MD time = {md_time:.2f} fs, "
-            f"T_set = {T_set:.1f} K, Friction = {friction:.6f} fs⁻¹, "
-            f"Epot (eV) = {e_pot:.8f}\n"
-        )
-        for i, sym in enumerate(symbols):
-            x, y, z = positions[i]
-            fx, fy, fz = forces[i]
-            fh.write(
-                f"{sym:<2s} "
-                f"{x:15.8f} {y:15.8f} {z:15.8f} "
-                f"{fx:15.8f} {fy:15.8f} {fz:15.8f}\n"
-            )
+    frame = atoms.copy()
+    velocities = atoms.get_velocities()
+    if velocities is None:
+        velocities = np.full((len(atoms), 3), np.nan, dtype=float)
+
+    frame.set_array("velocities", np.asarray(velocities, dtype=float))
+    frame.set_array("forces", np.asarray(atoms.get_forces(), dtype=float))
+    frame.info.update(
+        {
+            "step": int(step),
+            "time_fs": float(md_time),
+            "temperature_set_K": float(T_set) if np.isfinite(T_set) else np.nan,
+            "friction_fs_inv": float(friction),
+            "energy": float(e_pot),
+        }
+    )
+
+    try:
+        write(traj_file, frame, append=True, format="extxyz")
+    except IOError as exc:
+        print(f"Warning: Failed to write MD trajectory frame {step}: {exc}")
 
 def print_md_status(
     dyn,
