@@ -156,6 +156,37 @@ def _coerce_frame_latents(latents, n_frames, *, context="latents"):
     return out
 
 
+def _multi_gpu_frame_chunks(frames, n_workers, strategy="atom_balanced"):
+    """Return global frame-index chunks for multi-GPU inference."""
+    n_frames = len(frames)
+    if n_workers <= 1:
+        return [np.arange(n_frames, dtype=int)]
+
+    strategy = str(strategy or "atom_balanced").strip().lower()
+    if strategy in {"contiguous", "split", "array_split"}:
+        return [
+            idx.astype(int)
+            for idx in np.array_split(np.arange(n_frames), n_workers)
+            if len(idx) > 0
+        ]
+
+    atom_counts = np.array([max(1, len(fr)) for fr in frames], dtype=float)
+    costs = atom_counts**2
+    chunks = [[] for _ in range(n_workers)]
+    loads = np.zeros(n_workers, dtype=float)
+
+    for frame_idx in np.argsort(costs)[::-1]:
+        worker_idx = int(np.argmin(loads))
+        chunks[worker_idx].append(int(frame_idx))
+        loads[worker_idx] += costs[frame_idx]
+
+    out = []
+    for chunk in chunks:
+        if chunk:
+            out.append(np.array(sorted(chunk), dtype=int))
+    return out
+
+
 def _configured_gpu_ids(eval_cfg):
     requested = eval_cfg.get("inference_gpus", eval_cfg.get("devices", None))
     visible = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -208,7 +239,7 @@ def _init_persistent_worker(gpu_queue):
 
 
 def _evaluate_model_chunk_worker(payload):
-    model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id = payload
+    model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id, frame_indices = payload
     
     global _WORKER_GPU_ID, _RESIDENT_MODELS
     if _WORKER_GPU_ID is not None:
@@ -229,7 +260,14 @@ def _evaluate_model_chunk_worker(payload):
             torch.cuda.empty_cache()
 
     if model_path not in _RESIDENT_MODELS:
-        print(f"[Worker GPU {gpu_id}] Loading model into GPU memory: {os.path.basename(model_path)}")
+        if frame_indices is not None and len(frame_indices):
+            frame_range = f"{int(frame_indices[0])}-{int(frame_indices[-1])}"
+        else:
+            frame_range = "unknown"
+        print(
+            f"[Worker GPU {gpu_id}] Loading model into GPU memory: "
+            f"{os.path.basename(model_path)} | global frames {frame_range}"
+        )
         _RESIDENT_MODELS[model_path] = _load_eval_model(model_path, framework, device)
 
     model_obj = _RESIDENT_MODELS[model_path]
@@ -243,6 +281,7 @@ def _evaluate_model_chunk_worker(payload):
         eval_log_file=None,
         config=config,
         neighbor_list=None,
+        frame_indices=frame_indices,
     )
 
     if not keep_resident:
@@ -350,6 +389,7 @@ class EnsembleRunner:
         true_E=None,
         true_F=None,
         log_file=None,
+        frame_indices=None,
     ):
         try:
             model_obj = _load_eval_model(model_path, self.framework, self.device)
@@ -367,6 +407,7 @@ class EnsembleRunner:
             eval_log_file=log_file,
             config=self.config,
             neighbor_list=self.neighbor_list,
+            frame_indices=frame_indices,
         )
 
     def _evaluate_model_multi_gpu(
@@ -386,18 +427,17 @@ class EnsembleRunner:
                 true_E,
                 true_F,
                 log_file=log_file,
+                frame_indices=np.arange(len(frames), dtype=int),
             )
 
         n_frames = len(frames)
-        chunks = [
-            idx
-            for idx in np.array_split(np.arange(n_frames), len(gpu_ids))
-            if len(idx) > 0
-        ]
+        chunk_strategy = self.eval_cfg.get("multi_gpu_chunk_strategy", "atom_balanced")
+        chunks = _multi_gpu_frame_chunks(frames, len(gpu_ids), strategy=chunk_strategy)
 
         print(
             f"     Multi-GPU inference: {len(chunks)} worker(s), "
-            f"GPUs={gpu_ids[:len(chunks)]}, per-GPU batch_size={self.batch_size}"
+            f"GPUs={gpu_ids[:len(chunks)]}, per-GPU batch_size={self.batch_size}, "
+            f"chunk_strategy={chunk_strategy}"
         )
 
         payloads = []
@@ -405,6 +445,11 @@ class EnsembleRunner:
             chunk_frames = [frames[i] for i in idx]
             chunk_true_E = None if true_E is None else np.asarray(true_E)[idx]
             chunk_true_F = None if true_F is None else [true_F[i] for i in idx]
+            chunk_cost = int(np.sum([max(1, len(frames[i])) ** 2 for i in idx]))
+            print(
+                f"       Planned chunk for GPU {gpu_id}: global frame span "
+                f"{int(idx[0])}-{int(idx[-1])}, n={len(idx)}, cost~{chunk_cost}"
+            )
             payloads.append(
                 (
                     model_path,
@@ -415,6 +460,7 @@ class EnsembleRunner:
                     chunk_true_F,
                     self.batch_size,
                     gpu_id,
+                    idx.astype(int),
                 )
             )
 

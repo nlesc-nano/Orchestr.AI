@@ -12,6 +12,7 @@ run_type: "EVAL"  # Options: "EVAL", "GEO_OPT", "MD", "VIB"
 # --- 2. Evaluation & Active Learning ---
 eval:
   batch_size: 16  
+  multi_gpu_chunk_strategy: "atom_balanced"  # balances GPU chunks by estimated atom-count cost
   uncertainty: ["ensemble"]  
   ensemble_folder: "./models"
   ensemble_size: 10

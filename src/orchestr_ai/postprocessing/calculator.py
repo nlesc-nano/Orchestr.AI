@@ -55,6 +55,7 @@ def evaluate_model(
     eval_log_file,
     config,
     neighbor_list=None,
+    frame_indices=None,
 ):
     """
     Backward-compatible entry point used by evaluate.py.
@@ -81,6 +82,7 @@ def evaluate_model(
             frames=frames,
             true_energies=true_energies,
             true_forces=true_forces,
+            frame_indices=frame_indices,
         )
 
     except Exception as e:

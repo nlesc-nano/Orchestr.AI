@@ -56,7 +56,7 @@ class InferenceRunner:
                 torch.cuda.empty_cache()
             mid = len(batch_frames) // 2
             print(
-                f"[InferenceRunner] CUDA OOM for batch starting at frame {batch_start} "
+                f"[InferenceRunner] CUDA OOM for local batch starting at {batch_start} "
                 f"(size={len(batch_frames)}). Retrying as {mid}+{len(batch_frames)-mid}."
             )
             left = self._run_batch_recursive(
@@ -84,8 +84,14 @@ class InferenceRunner:
                 float(left[5]) + float(right[5]),
             )
 
-    def run(self, frames, true_energies=None, true_forces=None):
+    def run(self, frames, true_energies=None, true_forces=None, frame_indices=None):
         n_frames = len(frames)
+        if frame_indices is None:
+            frame_indices = np.arange(n_frames, dtype=int)
+        else:
+            frame_indices = np.asarray(frame_indices, dtype=int)
+            if len(frame_indices) != n_frames:
+                raise ValueError("frame_indices must contain one entry per frame")
 
         all_energy_pred = []
         all_forces_pred = []
@@ -98,7 +104,9 @@ class InferenceRunner:
 
         print(
             f"Starting generic inference for {n_frames} frames "
-            f"(Batch Size: {self.batch_size})..."
+            f"(Batch Size: {self.batch_size}, "
+            f"global frames {int(frame_indices[0]) if n_frames else 0}-"
+            f"{int(frame_indices[-1]) if n_frames else -1})..."
         )
 
         for batch_start in range(0, n_frames, self.batch_size):
@@ -124,12 +132,13 @@ class InferenceRunner:
 
                 if self.log_file:
                     for i in range(actual_size):
-                        global_idx = batch_start + i
+                        local_idx = batch_start + i
+                        global_idx = int(frame_indices[local_idx])
 
                         true_e = (
-                            true_energies[global_idx]
+                            true_energies[local_idx]
                             if true_energies is not None
-                            and global_idx < len(true_energies)
+                            and local_idx < len(true_energies)
                             else np.nan
                         )
 
@@ -152,12 +161,13 @@ class InferenceRunner:
                         )
 
                 if actual_size > 0:
-                    first_idx = batch_start
+                    first_local_idx = batch_start
+                    first_global_idx = int(frame_indices[first_local_idx])
 
                     true_e_first = (
-                        true_energies[first_idx]
+                        true_energies[first_local_idx]
                         if true_energies is not None
-                        and first_idx < len(true_energies)
+                        and first_local_idx < len(true_energies)
                         else np.nan
                     )
 
@@ -166,7 +176,7 @@ class InferenceRunner:
 
                     print(
                         f"  [Batch {batches_processed + 1}] "
-                        f"Frame {first_idx:5d} | "
+                        f"Frame {first_global_idx:5d} | "
                         f"Pred E: {pred_e_first:12.4f} eV | "
                         f"True E: {true_e_first:12.4f} eV | "
                         f"Diff: {diff_first:10.4f} eV"
@@ -178,7 +188,7 @@ class InferenceRunner:
                     e.__traceback__ = None
                     print(
                         f"[InferenceRunner] CUDA OOM persisted for frame range "
-                        f"{batch_start}-{batch_start + actual_size - 1}; "
+                        f"{int(frame_indices[batch_start])}-{int(frame_indices[batch_start + actual_size - 1])}; "
                         "marking this batch as NaN. Reduce eval.batch_size."
                     )
                     if torch.cuda.is_available():
