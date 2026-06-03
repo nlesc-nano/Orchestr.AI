@@ -21,11 +21,16 @@ class InferenceRunner:
         batch_size: int,
         log_file: str | None = None,
         clear_cuda_cache: bool = False,
+        context_label: str = "InferenceRunner",
     ):
         self.calculator = calculator
         self.batch_size = batch_size
         self.log_file = log_file
         self.clear_cuda_cache = clear_cuda_cache
+        self.context_label = context_label
+
+    def _log(self, message):
+        print(f"[{self.context_label}] {message}", flush=True)
 
     @staticmethod
     def _is_cuda_oom(exc):
@@ -55,8 +60,8 @@ class InferenceRunner:
                 gc.collect()
                 torch.cuda.empty_cache()
             mid = len(batch_frames) // 2
-            print(
-                f"[InferenceRunner] CUDA OOM for local batch starting at {batch_start} "
+            self._log(
+                f"CUDA OOM for local batch starting at {batch_start} "
                 f"(size={len(batch_frames)}). Retrying as {mid}+{len(batch_frames)-mid}."
             )
             left = self._run_batch_recursive(
@@ -102,10 +107,10 @@ class InferenceRunner:
         batches_processed = 0
         log_lines_buffer = []
 
-        print(
+        self._log(
             f"Starting generic inference for {n_frames} frames "
             f"(Batch Size: {self.batch_size}, "
-            f"global frames {int(frame_indices[0]) if n_frames else 0}-"
+            f"global frame span {int(frame_indices[0]) if n_frames else 0}-"
             f"{int(frame_indices[-1]) if n_frames else -1})..."
         )
 
@@ -175,19 +180,20 @@ class InferenceRunner:
                     diff_first = pred_e_first - true_e_first
 
                     print(
-                        f"  [Batch {batches_processed + 1}] "
+                        f"[{self.context_label}]   [Batch {batches_processed + 1}] "
                         f"Frame {first_global_idx:5d} | "
                         f"Pred E: {pred_e_first:12.4f} eV | "
                         f"True E: {true_e_first:12.4f} eV | "
-                        f"Diff: {diff_first:10.4f} eV"
+                        f"Diff: {diff_first:10.4f} eV",
+                        flush=True,
                     )
 
             except Exception as e:
-                print(f"Error processing batch {batches_processed}: {e}")
+                self._log(f"Error processing batch {batches_processed}: {e}")
                 if self._is_cuda_oom(e):
                     e.__traceback__ = None
-                    print(
-                        f"[InferenceRunner] CUDA OOM persisted for frame range "
+                    self._log(
+                        f"CUDA OOM persisted for frame range "
                         f"{int(frame_indices[batch_start])}-{int(frame_indices[batch_start + actual_size - 1])}; "
                         "marking this batch as NaN. Reduce eval.batch_size."
                     )
@@ -218,11 +224,11 @@ class InferenceRunner:
             except IOError as log_e:
                 print(f"Warning: Failed to write log file: {log_e}")
 
-        print("\n--- Inference Summary ---")
-        print(
+        self._log("--- Inference Summary ---")
+        self._log(
             f"Total Time: {cum_eval_time:.3f}s | "
             f"Avg Time/Frame: {cum_eval_time / max(1, n_frames):.5f}s"
         )
-        print("-------------------------\n")
+        self._log("-------------------------")
 
         return all_energy_pred, all_forces_pred, all_latent_frame, all_latent_atom

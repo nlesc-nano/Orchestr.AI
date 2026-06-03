@@ -56,6 +56,7 @@ def evaluate_model(
     config,
     neighbor_list=None,
     frame_indices=None,
+    context_label=None,
 ):
     """
     Backward-compatible entry point used by evaluate.py.
@@ -76,6 +77,7 @@ def evaluate_model(
             batch_size,
             eval_log_file,
             clear_cuda_cache=bool(config.get("eval", {}).get("clear_cuda_cache", False)),
+            context_label=context_label or "InferenceRunner",
         )
 
         return runner.run(

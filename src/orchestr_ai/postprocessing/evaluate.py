@@ -271,6 +271,7 @@ def _evaluate_model_chunk_worker(payload):
         _RESIDENT_MODELS[model_path] = _load_eval_model(model_path, framework, device)
 
     model_obj = _RESIDENT_MODELS[model_path]
+    context_label = f"{os.path.basename(model_path)}|GPU{gpu_id}"
     preds = evaluate_model(
         frames=frames,
         true_energies=true_E,
@@ -282,6 +283,7 @@ def _evaluate_model_chunk_worker(payload):
         config=config,
         neighbor_list=None,
         frame_indices=frame_indices,
+        context_label=context_label,
     )
 
     if not keep_resident:
@@ -408,6 +410,7 @@ class EnsembleRunner:
             config=self.config,
             neighbor_list=self.neighbor_list,
             frame_indices=frame_indices,
+            context_label=f"{os.path.basename(model_path)}|single",
         )
 
     def _evaluate_model_multi_gpu(
@@ -439,6 +442,15 @@ class EnsembleRunner:
             f"GPUs={gpu_ids[:len(chunks)]}, per-GPU batch_size={self.batch_size}, "
             f"chunk_strategy={chunk_strategy}"
         )
+        assigned = np.concatenate(chunks) if chunks else np.array([], dtype=int)
+        unique_assigned = np.unique(assigned)
+        overlap = int(len(assigned) - len(unique_assigned))
+        missing = int(n_frames - len(unique_assigned))
+        print(
+            f"       Chunk coverage: assigned={len(assigned)}, unique={len(unique_assigned)}, "
+            f"missing={missing}, overlap={overlap}. "
+            "Atom-balanced chunks are non-contiguous by design."
+        )
 
         payloads = []
         for gpu_id, idx in zip(gpu_ids, chunks):
@@ -446,9 +458,12 @@ class EnsembleRunner:
             chunk_true_E = None if true_E is None else np.asarray(true_E)[idx]
             chunk_true_F = None if true_F is None else [true_F[i] for i in idx]
             chunk_cost = int(np.sum([max(1, len(frames[i])) ** 2 for i in idx]))
+            preview = ",".join(str(int(i)) for i in idx[:6])
+            tail = ",".join(str(int(i)) for i in idx[-3:])
             print(
-                f"       Planned chunk for GPU {gpu_id}: global frame span "
-                f"{int(idx[0])}-{int(idx[-1])}, n={len(idx)}, cost~{chunk_cost}"
+                f"       Planned chunk for GPU {gpu_id}: n={len(idx)}, "
+                f"min={int(idx.min())}, max={int(idx.max())}, cost~{chunk_cost}, "
+                f"sample=[{preview}...{tail}]"
             )
             payloads.append(
                 (
