@@ -243,9 +243,9 @@ def _log_status_line(log_file, header, fmt, values):
         print(line)
 
 
-def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
+def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, file_handle):
     """Append one extended-XYZ frame with positions, velocities, and forces."""
-    if not traj_file:
+    if not file_handle:
         return
 
     frame = atoms.copy()
@@ -266,7 +266,8 @@ def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
     )
 
     try:
-        write(traj_file, frame, append=True, format="extxyz")
+        write(file_handle, frame, format="extxyz")
+        file_handle.flush()
     except IOError as exc:
         print(f"Warning: Failed to write MD trajectory frame {step}: {exc}")
 
@@ -429,25 +430,32 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         interval=log_int,
     )
 
-    if traj_file and xyz_int > 0:
-        dyn.attach(
-            lambda: _write_xyz_frame(
-                atoms,
-                dyn.get_number_of_steps(),
-                dyn.get_number_of_steps() * dt_fs,
-                getattr(dyn, "temperature_K", np.nan),
-                gamma_fs,
-                atoms.get_potential_energy(),
-                traj_file,
-            ),
-            interval=xyz_int,
-        )
-
     # -----------------------------------------------------------------
     #  run!
     # -----------------------------------------------------------------
-    print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
-    dyn.run(nsteps)
+    if traj_file and xyz_int > 0:
+        try:
+            with open(traj_file, "a") as f_out:
+                dyn.attach(
+                    lambda: _write_xyz_frame(
+                        atoms,
+                        dyn.get_number_of_steps(),
+                        dyn.get_number_of_steps() * dt_fs,
+                        getattr(dyn, "temperature_K", np.nan),
+                        gamma_fs,
+                        atoms.get_potential_energy(),
+                        f_out,
+                    ),
+                    interval=xyz_int,
+                )
+                print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+                dyn.run(nsteps)
+        except IOError as exc:
+            print(f"Error opening/writing MD trajectory file {traj_file}: {exc}")
+            raise
+    else:
+        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+        dyn.run(nsteps)
     print("MD finished.")
 
 
