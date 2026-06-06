@@ -231,6 +231,11 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
 
 def _log_status_line(log_file, header, fmt, values):
     """Append one nicely formatted line to *log_file* (create if absent)."""
+    if log_file and hasattr(log_file, "put"):
+        # Push message to background thread queue
+        log_file.put(("log", (header, fmt, values)))
+        return
+
     line = fmt.format(*values)
     if not log_file:
         print(header)
@@ -343,6 +348,95 @@ def print_md_status(
 
 
 
+from threading import Thread
+from queue import Queue
+
+class MDWriterThread(Thread):
+    """
+    Background worker thread to write trajectory frames and status logs asynchronously,
+    preventing disk I/O operations from blocking the main simulation integration loop.
+    """
+    def __init__(self, traj_file, log_file, q):
+        super().__init__(daemon=True)
+        self.traj_file = traj_file
+        self.log_file = log_file
+        self.q = q
+
+    def run(self):
+        from contextlib import ExitStack
+        from ase import Atoms
+        from ase.io import write
+        
+        with ExitStack() as stack:
+            f_out = None
+            f_log = None
+            
+            if self.traj_file:
+                try:
+                    f_out = stack.enter_context(open(self.traj_file, "a"))
+                except IOError as exc:
+                    print(f"Warning: Background writer failed to open trajectory file {self.traj_file}: {exc}")
+                    
+            if self.log_file:
+                try:
+                    f_log = stack.enter_context(open(self.log_file, "a"))
+                except IOError as exc:
+                    print(f"Warning: Background writer failed to open log file {self.log_file}: {exc}")
+                    
+            # Track if log file header needs to be written
+            fresh_log = False
+            if self.log_file:
+                try:
+                    fresh_log = not Path(self.log_file).exists() or Path(self.log_file).stat().st_size == 0
+                except Exception:
+                    fresh_log = True
+
+            while True:
+                try:
+                    msg_type, msg_data = self.q.get()
+                except Exception:
+                    break
+                
+                if msg_type == "stop":
+                    self.q.task_done()
+                    break
+                    
+                elif msg_type == "traj":
+                    if f_out:
+                        symbols, positions, velocities, forces, info = msg_data
+                        frame = Atoms(symbols=symbols, positions=positions)
+                        if velocities is not None:
+                            frame.set_array("velocities", velocities)
+                        if forces is not None:
+                            frame.set_array("forces", forces)
+                        frame.info.update(info)
+                        
+                        try:
+                            write(f_out, frame, format="extxyz")
+                            f_out.flush()
+                        except Exception as exc:
+                            print(f"Warning: Background writer failed to write traj frame: {exc}")
+                            
+                elif msg_type == "log":
+                    header, fmt, values = msg_data
+                    line = fmt.format(*values)
+                    
+                    if f_log:
+                        try:
+                            if fresh_log:
+                                f_log.write(header + "\n")
+                                fresh_log = False
+                            f_log.write(line + "\n")
+                            f_log.flush()
+                        except Exception as exc:
+                            print(f"Warning: Background writer failed to write status line: {exc}")
+                    else:
+                        print(header)
+                        print(line)
+                        
+                self.q.task_done()
+
+
 def run_md(atoms, model_obj, device, config, neighbor_list=None):
     """Top-level MD driver with tidy, non-overlapping callbacks."""
 
@@ -435,7 +529,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     # -----------------------------------------------------------------
     #  callbacks & run!
     # -----------------------------------------------------------------
-    from contextlib import ExitStack
+    from queue import Queue
     import gc
 
     # Periodically run garbage collection and empty PyTorch CUDA cache to prevent slowdowns
@@ -446,49 +540,70 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
 
     dyn.attach(periodic_cleanup, interval=1000)
 
-    with ExitStack() as stack:
-        f_out = None
-        f_log = None
+    # Start background writer thread if writing/logging is enabled
+    use_writer = (traj_file and xyz_int > 0) or log_file
+    if use_writer:
+        write_queue = Queue()
+        writer_thread = MDWriterThread(traj_file, log_file, write_queue)
+        writer_thread.start()
 
-        if traj_file and xyz_int > 0:
-            try:
-                f_out = stack.enter_context(open(traj_file, "a"))
-            except IOError as exc:
-                print(f"Error opening MD trajectory file {traj_file}: {exc}")
-                raise
-
+        # Attach log status callback (using write_queue for async logging)
         if log_file:
-            try:
-                f_log = stack.enter_context(open(log_file, "a"))
-            except IOError as exc:
-                print(f"Error opening MD log file {log_file}: {exc}")
-                raise
-
-        # Attach log status callback (passing f_log handle or log_file path fallback)
-        dyn.attach(
-            lambda: print_md_status(
-                dyn, atoms, f_log or log_file, dt_fs, gamma_fs
-            ),
-            interval=log_int,
-        )
-
-        # Attach trajectory print callback
-        if f_out:
             dyn.attach(
-                lambda: _write_xyz_frame(
-                    atoms,
-                    dyn.get_number_of_steps(),
-                    dyn.get_number_of_steps() * dt_fs,
-                    getattr(dyn, "temperature_K", np.nan),
-                    gamma_fs,
-                    atoms.get_potential_energy(),
-                    f_out,
+                lambda: print_md_status(
+                    dyn, atoms, write_queue, dt_fs, gamma_fs
                 ),
-                interval=xyz_int,
+                interval=log_int,
             )
 
+        # Attach trajectory print callback
+        if traj_file and xyz_int > 0:
+            def async_write_xyz_frame():
+                step = dyn.get_number_of_steps()
+                md_time = step * dt_fs
+                T_set = getattr(dyn, "temperature_K", np.nan)
+                
+                velocities = atoms.get_velocities()
+                if velocities is not None:
+                    velocities = velocities.copy()
+                    
+                forces = atoms.get_forces()
+                if forces is not None:
+                    forces = forces.copy()
+                    
+                info = {
+                    "step": int(step),
+                    "time_fs": float(md_time),
+                    "temperature_set_K": float(T_set) if np.isfinite(T_set) else np.nan,
+                    "friction_fs_inv": float(gamma_fs),
+                    "energy": float(atoms.get_potential_energy()),
+                }
+                
+                write_queue.put((
+                    "traj", 
+                    (
+                        atoms.get_chemical_symbols(),
+                        atoms.get_positions().copy(),
+                        velocities,
+                        forces,
+                        info
+                    )
+                ))
+
+            dyn.attach(async_write_xyz_frame, interval=xyz_int)
+
+        try:
+            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+            dyn.run(nsteps)
+        finally:
+            # Signal the background writer thread to flush and stop
+            write_queue.put(("stop", None))
+            writer_thread.join()
+    else:
+        # No files to write or log, run standard
         print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
         dyn.run(nsteps)
+
     print("MD finished.")
 
 
