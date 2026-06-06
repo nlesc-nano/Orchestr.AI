@@ -232,15 +232,27 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
 def _log_status_line(log_file, header, fmt, values):
     """Append one nicely formatted line to *log_file* (create if absent)."""
     line = fmt.format(*values)
-    if log_file:
-        fresh = not Path(log_file).exists()
+    if not log_file:
+        print(header)
+        print(line)
+        return
+
+    if isinstance(log_file, (str, Path)):
+        fresh = not Path(log_file).exists() or Path(log_file).stat().st_size == 0
         with open(log_file, "a") as fh:
             if fresh:
                 fh.write(header + "\n")
             fh.write(line + "\n")
-    else:                       # fall back to console
-        print(header)
-        print(line)
+    else:
+        # It's an open file handle
+        try:
+            is_empty = log_file.tell() == 0
+        except Exception:
+            is_empty = False
+        if is_empty:
+            log_file.write(header + "\n")
+        log_file.write(line + "\n")
+        log_file.flush()
 
 
 def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, file_handle):
@@ -421,39 +433,60 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         ramp_callback()
 
     # -----------------------------------------------------------------
-    #  callbacks
+    #  callbacks & run!
     # -----------------------------------------------------------------
-    dyn.attach(
-        lambda: print_md_status(
-            dyn, atoms, log_file, dt_fs, gamma_fs
-        ),
-        interval=log_int,
-    )
+    from contextlib import ExitStack
+    import gc
 
-    # -----------------------------------------------------------------
-    #  run!
-    # -----------------------------------------------------------------
-    if traj_file and xyz_int > 0:
-        try:
-            with open(traj_file, "a") as f_out:
-                dyn.attach(
-                    lambda: _write_xyz_frame(
-                        atoms,
-                        dyn.get_number_of_steps(),
-                        dyn.get_number_of_steps() * dt_fs,
-                        getattr(dyn, "temperature_K", np.nan),
-                        gamma_fs,
-                        atoms.get_potential_energy(),
-                        f_out,
-                    ),
-                    interval=xyz_int,
-                )
-                print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
-                dyn.run(nsteps)
-        except IOError as exc:
-            print(f"Error opening/writing MD trajectory file {traj_file}: {exc}")
-            raise
-    else:
+    # Periodically run garbage collection and empty PyTorch CUDA cache to prevent slowdowns
+    def periodic_cleanup():
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    dyn.attach(periodic_cleanup, interval=1000)
+
+    with ExitStack() as stack:
+        f_out = None
+        f_log = None
+
+        if traj_file and xyz_int > 0:
+            try:
+                f_out = stack.enter_context(open(traj_file, "a"))
+            except IOError as exc:
+                print(f"Error opening MD trajectory file {traj_file}: {exc}")
+                raise
+
+        if log_file:
+            try:
+                f_log = stack.enter_context(open(log_file, "a"))
+            except IOError as exc:
+                print(f"Error opening MD log file {log_file}: {exc}")
+                raise
+
+        # Attach log status callback (passing f_log handle or log_file path fallback)
+        dyn.attach(
+            lambda: print_md_status(
+                dyn, atoms, f_log or log_file, dt_fs, gamma_fs
+            ),
+            interval=log_int,
+        )
+
+        # Attach trajectory print callback
+        if f_out:
+            dyn.attach(
+                lambda: _write_xyz_frame(
+                    atoms,
+                    dyn.get_number_of_steps(),
+                    dyn.get_number_of_steps() * dt_fs,
+                    getattr(dyn, "temperature_K", np.nan),
+                    gamma_fs,
+                    atoms.get_potential_energy(),
+                    f_out,
+                ),
+                interval=xyz_int,
+            )
+
         print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
         dyn.run(nsteps)
     print("MD finished.")

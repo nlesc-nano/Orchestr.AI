@@ -81,3 +81,6 @@ class LegacyOffsetSpkCalculator(SpkCalculator):
             
             if 'E_ml_avg' in self.results:
                 self.results['E_ml_avg'] += total_offset
+
+        # Clear model_results to release the PyTorch autograd graph from memory
+        self.model_results = None
