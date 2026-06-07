@@ -310,26 +310,32 @@ def print_md_status(
     md_time = step * dt_fs
     e_pot = atoms.get_potential_energy()
     e_kin = atoms.get_kinetic_energy()
+    e_tot = e_pot + e_kin
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
     T_set = getattr(dyn, "temperature_K", np.nan)
 
-    # optional extras from calculator -------------------------------------------------
-    calc_results = getattr(atoms.calc, "results", {})
-    E_ml_only   = calc_results.get("E_ml_avg",      np.nan)
-    E_coul      = calc_results.get("coul_fn_energy", np.nan)
-    ml_time     = calc_results.get("ml_time",       0.0)
-    coul_fn_time = calc_results.get("coul_fn_time", 0.0)
+    # Compute maximum force magnitude
+    forces = atoms.get_forces()
+    max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
+
+    # Compute simulated steps per second -> ns/day
+    step_diff = step - getattr(print_md_status, "last_step", 0)
+    print_md_status.last_step = step
+
+    if step_time > 0 and step_diff > 0:
+        speed = (step_diff * dt_fs * 0.0864) / step_time
+    else:
+        speed = 0.0
 
     header = (
         f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
-        f"{'Friction':>10} | {'Epot(eV)':>11} | {'Ekin(eV)':>11} | "
-        f"{'E_ML(eV)':>10} | {'E_Coul(eV)':>11} | {'ML_t(s)':>8} | "
-        f"{'Coul_t(s)':>9} | {'dt(s)':>8} | {'cum(s)':>9}"
+        f"{'Epot(eV)':>14} | {'Ekin(eV)':>12} | {'Etot(eV)':>14} | "
+        f"{'MaxForce(eV/A)':>14} | {'dt(s)':>8} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
     )
     fmt = (
-        "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | {:10.6f} | "
-        "{:11.6f} | {:11.6f} | {:10.6f} | {:11.6f} | "
-        "{:8.4f} | {:9.4f} | {:8.4f} | {:9.4f}"
+        "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+        "{:14.6f} | {:12.6f} | {:14.6f} | "
+        "{:14.6f} | {:8.4f} | {:9.4f} | {:13.4f}"
     )
 
     _log_status_line(
@@ -337,11 +343,9 @@ def print_md_status(
         header,
         fmt,
         (
-            step, md_time, temp_inst, T_set, friction,
-            e_pot, atoms.get_kinetic_energy(),
-            E_ml_only, E_coul,
-            ml_time, coul_fn_time,
-            step_time, cumulative_time,
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_tot,
+            max_force, step_time, cumulative_time, speed
         ),
     )
 
