@@ -365,12 +365,86 @@ def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
                 f"{fx:15.8f} {fy:15.8f} {fz:15.8f}\n"
             )
 
+def _load_scale_metadata(config):
+    """Loads scale factor k_E from mace_scale_metadata.json (or config override) if available."""
+    if not isinstance(config, dict):
+        return None
+    import json
+    import os
+    scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+    if not scale_metadata_path:
+        scale_metadata_path = "mace_scale_metadata.json"
+    if os.path.exists(scale_metadata_path):
+        try:
+            with open(scale_metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            return float(meta.get("k_E", 1.0))
+        except Exception as e:
+            print(f"Warning: Failed to load scale metadata from {scale_metadata_path}: {e}")
+    return None
+
+def _get_other_head_energy(atoms, other_head, config):
+    """
+    Safely calculates or retrieves potential energy for other_head.
+    Restores the original calculator head and results to keep MD forces/cache intact.
+    """
+    if atoms.calc is None:
+        return np.nan
+
+    # If it is ReconstructedMACECalculator, we might already have the cached energies:
+    calc_results = getattr(atoms.calc, "results", {})
+    if other_head == "singlet" and "energy_singlet" in calc_results:
+        return calc_results["energy_singlet"]
+    if other_head == "triplet_reconstructed" and "energy_triplet_reconstructed" in calc_results:
+        return calc_results["energy_triplet_reconstructed"]
+
+    reconstruct_triplet = (other_head == "triplet_reconstructed" or other_head == "triplet")
+
+    try:
+        # Save original calculator state
+        old_results = dict(atoms.calc.results) if hasattr(atoms.calc, "results") else {}
+        old_head = getattr(atoms.calc, "head", None)
+
+        from ase.calculators.calculator import all_changes
+        
+        # Calculate energy for delta or standard head
+        target_head = "delta" if (reconstruct_triplet and not hasattr(atoms.calc, "available_heads")) else other_head
+        if hasattr(atoms.calc, "available_heads") and target_head not in atoms.calc.available_heads:
+            if target_head == "triplet_reconstructed" and "delta" in atoms.calc.available_heads:
+                target_head = "delta"
+
+        atoms.calc.head = target_head
+        atoms.calc.calculate(atoms, properties=["energy"], system_changes=all_changes)
+        calculated_energy = atoms.calc.results.get("energy", np.nan)
+
+        if reconstruct_triplet and target_head == "delta":
+            k_E = _load_scale_metadata(config)
+            if k_E is not None and old_results.get("energy") is not None:
+                E_singlet = old_results["energy"]
+                E_delta = calculated_energy
+                calculated_energy = E_singlet - (E_delta / k_E)
+            else:
+                calculated_energy = np.nan
+
+        return calculated_energy
+
+    except Exception as e:
+        print(f"Warning: Failed to compute energy for other head '{other_head}': {e}")
+        return np.nan
+    finally:
+        # Restore original calculator state
+        if old_head is not None:
+            atoms.calc.head = old_head
+        if hasattr(atoms.calc, "results"):
+            atoms.calc.results = old_results
+
 def print_md_status(
     dyn,
     atoms,
     log_file,
     dt_fs,
     friction,
+    config=None,
 ):
     """
     Log one line with energies, timing, etc.  **Do not** write XYZ here –
@@ -390,36 +464,171 @@ def print_md_status(
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
     T_set = getattr(dyn, "temperature_K", np.nan)
 
-    # optional extras from calculator -------------------------------------------------
-    calc_results = getattr(atoms.calc, "results", {})
-    E_ml_only   = calc_results.get("E_ml_avg",      np.nan)
-    E_coul      = calc_results.get("coul_fn_energy", np.nan)
-    ml_time     = calc_results.get("ml_time",       0.0)
-    coul_fn_time = calc_results.get("coul_fn_time", 0.0)
+    # Compute max force
+    try:
+        forces = atoms.get_forces()
+        max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
+    except Exception:
+        max_force = np.nan
 
-    header = (
-        f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
-        f"{'Friction':>10} | {'Epot(eV)':>11} | {'Ekin(eV)':>11} | "
-        f"{'E_ML(eV)':>10} | {'E_Coul(eV)':>11} | {'ML_t(s)':>8} | "
-        f"{'Coul_t(s)':>9} | {'dt(s)':>8} | {'cum(s)':>9}"
-    )
-    fmt = (
-        "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | {:10.6f} | "
-        "{:11.6f} | {:11.6f} | {:10.6f} | {:11.6f} | "
-        "{:8.4f} | {:9.4f} | {:8.4f} | {:9.4f}"
-    )
+    # Compute simulated steps per second -> ns/day
+    step_diff = step - getattr(print_md_status, "last_step", 0)
+    print_md_status.last_step = step
+
+    if step_time > 0 and step_diff > 0:
+        speed = (step_diff * dt_fs * 0.0864) / step_time
+    else:
+        speed = 0.0
+
+    # Helper to rename long head name
+    def log_name(h):
+        if h == "triplet_reconstructed":
+            return "trip_delta"
+        return h
+
+    # Detect multi-head MACE run
+    is_mace = False
+    if config is not None:
+        framework = config.get("model_framework", "").lower()
+        if framework == "mace":
+            is_mace = True
+
+    has_multihead = False
+    selected_head = None
+    other_head = None
+    available_heads = []
+
+    if is_mace and atoms.calc is not None:
+        if hasattr(atoms.calc, "models") and len(atoms.calc.models) > 0:
+            available_heads = getattr(atoms.calc.models[0], "heads", [])
+        if not available_heads and hasattr(atoms.calc, "available_heads"):
+            available_heads = atoms.calc.available_heads
+        
+        if available_heads:
+            available_heads = [h.strip() for h in available_heads if isinstance(h, str)]
+
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        is_reconstructed = (mace_head == "triplet_reconstructed")
+        is_multi_model = ("singlet" in available_heads and ("triplet" in available_heads or "delta" in available_heads))
+        
+        if is_reconstructed or is_multi_model:
+            has_multihead = True
+            selected_head = mace_head if mace_head else "singlet"
+
+            if selected_head == "singlet":
+                other_head = "triplet" if "triplet" in available_heads else "delta"
+            elif selected_head == "triplet":
+                other_head = "singlet"
+            elif selected_head == "delta":
+                other_head = "singlet"
+            elif selected_head == "triplet_reconstructed":
+                other_head = "singlet"
+            else:
+                other_head = "singlet" if "singlet" in available_heads else None
+
+            if other_head == "delta":
+                k_E = _load_scale_metadata(config)
+                if k_E is not None:
+                    other_head = "triplet_reconstructed"
+
+    epot_other = np.nan
+    if has_multihead and other_head:
+        epot_other = _get_other_head_energy(atoms, other_head, config)
+
+    # Compute delta_gap = Epot_singlet - Epot_triplet
+    delta_gap = np.nan
+    if has_multihead and other_head:
+        e_singlet_val = np.nan
+        e_triplet_val = np.nan
+        
+        # Check active/selected head
+        if selected_head == "singlet":
+            e_singlet_val = e_pot
+        elif selected_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = e_pot
+            
+        # Check other head
+        if other_head == "singlet":
+            e_singlet_val = epot_other
+        elif other_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = epot_other
+            
+        if not np.isnan(e_singlet_val) and not np.isnan(e_triplet_val):
+            delta_gap = e_singlet_val - e_triplet_val
+
+    if has_multihead and other_head:
+        col1_name = f"Epot_{log_name(selected_head)}(eV)"
+        col2_name = f"Epot_{log_name(other_head)}(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_ekin_str = f"{e_kin:.6f}"
+        val_etot_str = f"{e_pot + e_kin:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_epot_other_str = f"{epot_other:.6f}"
+        val_delta_gap_str = f"{delta_gap:.6f}"
+        
+        col1_w = max(11, len(col1_name), len(val_epot_str))
+        ekin_w = max(11, len("Ekin(eV)"), len(val_ekin_str))
+        etot_w = max(11, len("Etot(eV)"), len(val_etot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        col2_w = max(11, len(col2_name), len(val_epot_other_str))
+        gap_w = max(13, len("delta_gap(eV)"), len(val_delta_gap_str))
+
+        header = (
+            f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+            f"{col1_name:>{col1_w}} | {'Ekin(eV)':>{ekin_w}} | {'Etot(eV)':>{etot_w}} | "
+            f"{'MaxForce(eV/A)':>{force_w}} | {'dt(s)':>8} | {col2_name:>{col2_w}} | "
+            f"{'delta_gap(eV)':>{gap_w}} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
+        )
+        fmt = (
+            "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+            f"{{:{col1_w}.6f}} | {{:{ekin_w}.6f}} | {{:{etot_w}.6f}} | "
+            f"{{:{force_w}.6f}} | {{:8.4f}} | {{:{col2_w}.6f}} | "
+            f"{{:{gap_w}.6f}} | {{:9.4f}} | {{:13.4f}}"
+        )
+        values = (
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_pot + e_kin,
+            max_force, step_time, epot_other,
+            delta_gap, cumulative_time, speed
+        )
+    else:
+        col_name = f"Epot_{log_name(selected_head)}(eV)" if selected_head else "Epot(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_ekin_str = f"{e_kin:.6f}"
+        val_etot_str = f"{e_pot + e_kin:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        
+        col_w = max(11, len(col_name), len(val_epot_str))
+        ekin_w = max(11, len("Ekin(eV)"), len(val_ekin_str))
+        etot_w = max(11, len("Etot(eV)"), len(val_etot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+
+        header = (
+            f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+            f"{col_name:>{col_w}} | {'Ekin(eV)':>{ekin_w}} | {'Etot(eV)':>{etot_w}} | "
+            f"{'MaxForce(eV/A)':>{force_w}} | {'dt(s)':>8} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
+        )
+        fmt = (
+            "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+            f"{{:{col_w}.6f}} | {{:{ekin_w}.6f}} | {{:{etot_w}.6f}} | "
+            f"{{:{force_w}.6f}} | {{:8.4f}} | {{:9.4f}} | {{:13.4f}}"
+        )
+        values = (
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_pot + e_kin,
+            max_force, step_time, cumulative_time, speed
+        )
 
     _log_status_line(
         log_file,
         header,
         fmt,
-        (
-            step, md_time, temp_inst, T_set, friction,
-            e_pot, atoms.get_kinetic_energy(),
-            E_ml_only, E_coul,
-            ml_time, coul_fn_time,
-            step_time, cumulative_time,
-        ),
+        values,
     )
 
 
@@ -466,7 +675,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     # -----------------------------------------------------------------
     dyn.attach(
         lambda: print_md_status(
-            dyn, atoms, log_file, dt_fs, gamma_fs
+            dyn, atoms, log_file, dt_fs, gamma_fs, config=config
         ),
         interval=log_int,
     )

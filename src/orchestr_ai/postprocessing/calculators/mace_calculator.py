@@ -368,3 +368,5 @@ class ReconstructedMACECalculator(MACECalculator):
         self.results["energy"] = E_triplet
         self.results["free_energy"] = E_triplet
         self.results["forces"] = F_triplet  
+        self.results["energy_singlet"] = E_singlet
+        self.results["energy_triplet_reconstructed"] = E_triplet
