@@ -105,7 +105,81 @@ def _build_calibration_policy(eval_cfg, metrics_eval, *, pool_cache_mode):
         "[Pool-AL] Eval-gated calibration policy: "
         f"force={accepted['force_mode'] or 'raw'}, energy={accepted['energy_mode'] or 'raw'}"
     )
+    _print_calibration_policy_summary(
+        metrics_eval,
+        accepted,
+        min_spearman=min_sp,
+        max_ence=max_ence,
+        picp_tol=picp_tol,
+        pool_cache_mode=pool_cache_mode,
+    )
     return accepted
+
+
+def _print_calibration_policy_summary(
+    metrics_result,
+    accepted,
+    *,
+    min_spearman,
+    max_ence,
+    picp_tol,
+    pool_cache_mode,
+):
+    """Print the eval UQ evidence used to choose AL calibration."""
+    if not metrics_result:
+        print("[Pool-AL] Calibration summary unavailable: no eval UQ metrics.")
+        return
+
+    metrics = metrics_result.get("metrics", {})
+    if not metrics:
+        print("[Pool-AL] Calibration summary unavailable: empty eval UQ metrics.")
+        return
+
+    print("[Pool-AL] Calibration quality gates for active learning:")
+    print(
+        f"          Spearman >= {min_spearman:.3f}, "
+        f"ENCE <= {max_ence:.3f}, |PICP95 - 0.95| <= {picp_tol:.3f}; "
+        f"pool_cache_mode={pool_cache_mode}"
+    )
+
+    def _fmt(value):
+        if value is None or not np.isfinite(value):
+            return "   n/a"
+        return f"{float(value):7.4f}"
+
+    def _row(prefix, label, suffix=""):
+        ence = metrics.get(f"ENCE_{prefix}{suffix}")
+        picp = metrics.get(f"PICP95_{prefix}{suffix}")
+        spearman = metrics.get(f"Spearman_{prefix}{suffix}")
+        nll = metrics.get(f"NLL_{prefix}{suffix}")
+        ks = metrics.get(f"KS_z_{prefix}{suffix}")
+        return (
+            f"          {label:<6} "
+            f"ENCE={_fmt(ence)}  PICP95={_fmt(picp)}  "
+            f"Spearman={_fmt(spearman)}  NLL={_fmt(nll)}  KS_z={_fmt(ks)}"
+        )
+
+    print("[Pool-AL] Force calibration metrics on eval split:")
+    print(_row("raw", "raw"))
+    print(_row("calVAR", "var"))
+    print(_row("calISO", "iso"))
+    print(f"          -> selected for AL forces: {accepted.get('force_mode') or 'raw'}")
+
+    has_energy_metrics = any(key.endswith("_E") for key in metrics)
+    if has_energy_metrics:
+        print("[Pool-AL] Energy calibration metrics on eval split:")
+        print(_row("raw", "raw", "_E"))
+        print(_row("calVAR", "var", "_E"))
+        print(_row("calISO", "iso", "_E"))
+        print(f"          -> selected for AL energy: {accepted.get('energy_mode') or 'raw'}")
+
+    for quantity, mode in (("forces", accepted.get("force_mode")), ("energy", accepted.get("energy_mode"))):
+        if mode is None:
+            print(f"[Pool-AL] {quantity.capitalize()} AL selection will use raw uncertainties because requested calibration failed gates or is unavailable.")
+        elif mode == "var":
+            print(f"[Pool-AL] {quantity.capitalize()} AL selection will use variance-scaled uncertainties; ranking is preserved, scale is corrected.")
+        elif mode == "iso":
+            print(f"[Pool-AL] {quantity.capitalize()} AL selection will use isotonic-on-variance calibration in support, with VAR fallback where configured.")
 
 
 def _range_with_margin(values, *, lo_pct=0.5, hi_pct=99.5, upper_mult=1.25):
