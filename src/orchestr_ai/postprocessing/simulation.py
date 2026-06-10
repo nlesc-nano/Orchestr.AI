@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import traceback # Make sure traceback is imported
+from types import MethodType
 
 from pathlib import Path
 from ase import units
@@ -91,6 +92,96 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         )
     else:
         raise ValueError(f"Unknown framework: {framework}")
+
+
+def _enable_calculator_profiling(calc, *, label="calculator", sync_cuda=False):
+    """Attach low-overhead call counting/timing to an ASE calculator instance."""
+    if getattr(calc, "_orchestr_profile_enabled", False):
+        return calc
+
+    original_calculate = calc.calculate
+    profile = {
+        "label": label,
+        "calls": 0,
+        "total_s": 0.0,
+        "last_s": 0.0,
+        "max_s": 0.0,
+        "last_print_calls": 0,
+        "last_print_total_s": 0.0,
+        "sync_cuda": bool(sync_cuda),
+    }
+
+    def profiled_calculate(self, *args, **kwargs):
+        if sync_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        start = time.perf_counter()
+        try:
+            return original_calculate(*args, **kwargs)
+        finally:
+            if sync_cuda and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            elapsed = time.perf_counter() - start
+            profile["calls"] += 1
+            profile["total_s"] += elapsed
+            profile["last_s"] = elapsed
+            if elapsed > profile["max_s"]:
+                profile["max_s"] = elapsed
+
+    calc.calculate = MethodType(profiled_calculate, calc)
+    calc._orchestr_profile = profile
+    calc._orchestr_profile_enabled = True
+    print(
+        f"[MD-PROFILE] Enabled {label} calculate() profiler "
+        f"(sync_cuda={bool(sync_cuda)})."
+    )
+    return calc
+
+
+def _print_calculator_profile(calc, dyn, write_queue=None):
+    """Print a profiler snapshot without calling energy/force getters."""
+    profile = getattr(calc, "_orchestr_profile", None)
+    if not profile:
+        return
+
+    calls = profile["calls"]
+    total_s = profile["total_s"]
+    delta_calls = calls - profile["last_print_calls"]
+    delta_s = total_s - profile["last_print_total_s"]
+    avg_s = total_s / calls if calls else 0.0
+    delta_avg_s = delta_s / delta_calls if delta_calls else 0.0
+
+    profile["last_print_calls"] = calls
+    profile["last_print_total_s"] = total_s
+
+    queue_size = "n/a"
+    if write_queue is not None:
+        try:
+            queue_size = str(write_queue.qsize())
+        except Exception:
+            queue_size = "unknown"
+
+    cuda_msg = "cuda=n/a"
+    if torch.cuda.is_available():
+        allocated_mb = torch.cuda.memory_allocated() / 1024**2
+        reserved_mb = torch.cuda.memory_reserved() / 1024**2
+        max_allocated_mb = torch.cuda.max_memory_allocated() / 1024**2
+        cuda_msg = (
+            f"cuda_alloc={allocated_mb:.1f}MB "
+            f"cuda_reserved={reserved_mb:.1f}MB "
+            f"cuda_max_alloc={max_allocated_mb:.1f}MB"
+        )
+
+    step = dyn.get_number_of_steps()
+    print(
+        f"[MD-PROFILE] step={step} "
+        f"{profile['label']}_calls={calls} delta_calls={delta_calls} "
+        f"last_calc={profile['last_s']:.6f}s "
+        f"avg_calc={avg_s:.6f}s delta_avg={delta_avg_s:.6f}s "
+        f"max_calc={profile['max_s']:.6f}s queue={queue_size} {cuda_msg}",
+        flush=True,
+    )
 
 def _reset_timers():
     """
@@ -452,11 +543,23 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     T0            = md.get("temperature_K",    300.0)
     traj_file     = md.get("trajectory_file_md")
     log_file      = md.get("log_file")
+    framework     = config.get("model_framework", "schnetpack").lower()
 
     # -----------------------------------------------------------------
     #  calculator + starting velocities (preventing zero kinetic energy)
     # -----------------------------------------------------------------
     calc = get_ase_calculator(model_obj, config, device, neighbor_list)
+    profile_mace = bool(md.get("profile_mace", framework == "mace"))
+    profile_interval = int(md.get("profile_interval", log_int if log_int else 50))
+    profile_sync_cuda = bool(md.get("profile_sync_cuda", False))
+
+    if framework == "mace" and profile_mace:
+        calc = _enable_calculator_profiling(
+            calc,
+            label="mace",
+            sync_cuda=profile_sync_cuda,
+        )
+
     atoms.calc = calc
 
     heating_steps = md.get("heating_steps", 0)
@@ -551,6 +654,12 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         writer_thread = MDWriterThread(traj_file, log_file, write_queue)
         writer_thread.start()
 
+        if framework == "mace" and profile_mace and profile_interval > 0:
+            dyn.attach(
+                lambda: _print_calculator_profile(calc, dyn, write_queue),
+                interval=profile_interval,
+            )
+
         # Attach log status callback (using write_queue for async logging)
         if log_file:
             dyn.attach(
@@ -604,6 +713,12 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
             write_queue.put(("stop", None))
             writer_thread.join()
     else:
+        if framework == "mace" and profile_mace and profile_interval > 0:
+            dyn.attach(
+                lambda: _print_calculator_profile(calc, dyn),
+                interval=profile_interval,
+            )
+
         # No files to write or log, run standard
         print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
         dyn.run(nsteps)
