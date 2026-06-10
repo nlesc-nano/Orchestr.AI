@@ -139,8 +139,14 @@ def _enable_calculator_profiling(calc, *, label="calculator", sync_cuda=False):
     return calc
 
 
-def _print_calculator_profile(calc, dyn, write_queue=None):
-    """Print a profiler snapshot without calling energy/force getters."""
+def _print_calculator_profile(
+    calc,
+    dyn,
+    write_queue=None,
+    profile_file=None,
+    print_to_screen=True,
+):
+    """Emit a profiler snapshot without calling energy/force getters."""
     profile = getattr(calc, "_orchestr_profile", None)
     if not profile:
         return
@@ -162,6 +168,9 @@ def _print_calculator_profile(calc, dyn, write_queue=None):
         except Exception:
             queue_size = "unknown"
 
+    allocated_mb = np.nan
+    reserved_mb = np.nan
+    max_allocated_mb = np.nan
     cuda_msg = "cuda=n/a"
     if torch.cuda.is_available():
         allocated_mb = torch.cuda.memory_allocated() / 1024**2
@@ -174,14 +183,36 @@ def _print_calculator_profile(calc, dyn, write_queue=None):
         )
 
     step = dyn.get_number_of_steps()
-    print(
+    line = (
         f"[MD-PROFILE] step={step} "
         f"{profile['label']}_calls={calls} delta_calls={delta_calls} "
         f"last_calc={profile['last_s']:.6f}s "
         f"avg_calc={avg_s:.6f}s delta_avg={delta_avg_s:.6f}s "
-        f"max_calc={profile['max_s']:.6f}s queue={queue_size} {cuda_msg}",
-        flush=True,
+        f"max_calc={profile['max_s']:.6f}s queue={queue_size} {cuda_msg}"
     )
+
+    if profile_file:
+        try:
+            fresh = not Path(profile_file).exists() or Path(profile_file).stat().st_size == 0
+            with open(profile_file, "a") as fh:
+                if fresh:
+                    fh.write(
+                        "# step calls delta_calls last_calc_s avg_calc_s "
+                        "delta_avg_s max_calc_s queue cuda_alloc_MB "
+                        "cuda_reserved_MB cuda_max_alloc_MB\n"
+                    )
+                fh.write(
+                    f"{step} {calls} {delta_calls} "
+                    f"{profile['last_s']:.6f} {avg_s:.6f} "
+                    f"{delta_avg_s:.6f} {profile['max_s']:.6f} "
+                    f"{queue_size} {allocated_mb:.1f} {reserved_mb:.1f} "
+                    f"{max_allocated_mb:.1f}\n"
+                )
+        except IOError as exc:
+            print(f"Warning: Failed to write MD profile line: {exc}", flush=True)
+
+    if print_to_screen:
+        print(line, flush=True)
 
 def _reset_timers():
     """
@@ -552,6 +583,8 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     profile_mace = bool(md.get("profile_mace", framework == "mace"))
     profile_interval = int(md.get("profile_interval", log_int if log_int else 50))
     profile_sync_cuda = bool(md.get("profile_sync_cuda", False))
+    profile_file = md.get("profile_file")
+    profile_print = bool(md.get("profile_print", profile_file is None))
     cleanup_interval = int(md.get("clear_cuda_cache_interval", 0) or 0)
 
     if framework == "mace" and profile_mace:
@@ -661,7 +694,13 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
 
         if framework == "mace" and profile_mace and profile_interval > 0:
             dyn.attach(
-                lambda: _print_calculator_profile(calc, dyn, write_queue),
+                lambda: _print_calculator_profile(
+                    calc,
+                    dyn,
+                    write_queue,
+                    profile_file=profile_file,
+                    print_to_screen=profile_print,
+                ),
                 interval=profile_interval,
             )
 
@@ -720,7 +759,12 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     else:
         if framework == "mace" and profile_mace and profile_interval > 0:
             dyn.attach(
-                lambda: _print_calculator_profile(calc, dyn),
+                lambda: _print_calculator_profile(
+                    calc,
+                    dyn,
+                    profile_file=profile_file,
+                    print_to_screen=profile_print,
+                ),
                 interval=profile_interval,
             )
 
