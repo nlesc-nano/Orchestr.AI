@@ -16,7 +16,6 @@ import traceback # Make sure traceback is imported
 from pathlib import Path
 from ase import units
 from ase.io import write
-from ase.io.extxyz import write_extxyz
 from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.optimize import BFGSLineSearch
@@ -38,75 +37,7 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                 "but neighbor_list=None was passed."
             )
 
-        from schnetpack.interfaces import SpkCalculator
-        from ase.calculators.calculator import all_changes
-        import torch
-
-        class LegacyOffsetSpkCalculator(SpkCalculator):
-            def __init__(self, model_obj, **kwargs):
-                self.mean_offset = 0.0
-                self.atomref = None
-                print("--- Attempting to surgically extract 'mean' and 'atomref' offsets ---")
-                try:
-                    if hasattr(model_obj, 'postprocessors'):
-                        for pp in model_obj.postprocessors:
-                            
-                            # 1. Aggressively extract mean
-                            extracted_mean = 0.0
-                            if hasattr(pp, 'state_dict') and 'mean' in pp.state_dict():
-                                extracted_mean = pp.state_dict()['mean'].item()
-                            elif hasattr(pp, 'mean') and isinstance(getattr(pp, 'mean'), torch.Tensor):
-                                extracted_mean = getattr(pp, 'mean').item()
-                            
-                            # 2. Flag and process the mean
-                            if abs(extracted_mean) > 1e-8:
-                                self.mean_offset = extracted_mean
-                                print(f"\n⚠️  FLAG: Non-zero dataset mean offset detected: {self.mean_offset:.6f} eV/atom")
-                                print("    -> The model was trained with 'remove_mean: true'.")
-                                print("    -> For optimal transferability, consider training future")
-                                print("       models with 'remove_mean: false'.\n")
-                            else:
-                                self.mean_offset = 0.0
-                                print("\n✅ FLAG: Mean offset is 0.0 (Trained with 'remove_mean: false').")
-                                print("    -> Model relies purely on isolated atomic energies.\n")
-                                
-                            # 3. Extract atomic references
-                            for ref_name in ['atomref', 'z_offsets']:
-                                if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
-                                    ref_val = getattr(pp, ref_name)
-                                    if isinstance(ref_val, torch.Tensor):
-                                        self.atomref = ref_val.detach().cpu().numpy().astype(np.float64).flatten()
-                                    elif hasattr(ref_val, 'weight'):
-                                        self.atomref = ref_val.weight.detach().cpu().numpy().astype(np.float64).flatten()
-                                    print(f"Successfully extracted '{ref_name}' (isolated atomic energies).")
-                                    
-                        # Disable internal postprocessors 
-                        model_obj.postprocessors = torch.nn.ModuleList([])
-                        print("Successfully disabled model's internal postprocessors.")
-                except Exception as e:
-                     print(f"WARNING: Surgical extraction failed: {e}")
-                
-                super().__init__(model=model_obj, **kwargs)
-
-            def calculate(self, atoms=None, properties=['energy', 'forces'], system_changes=all_changes):
-                super().calculate(atoms, properties, system_changes)
-                
-                # Apply the surgical offset fix on-the-fly in float64
-                if 'energy' in self.results:
-                    total_offset = 0.0
-                    
-                    if self.atomref is not None:
-                        Z = self.atoms.numbers
-                        valid_Z = np.clip(Z, 0, len(self.atomref) - 1)
-                        total_offset += np.sum(self.atomref[valid_Z])
-                        
-                    if self.mean_offset != 0.0:
-                        total_offset += self.mean_offset * len(self.atoms)
-                        
-                    self.results['energy'] += total_offset
-                    
-                    if 'E_ml_avg' in self.results:
-                        self.results['E_ml_avg'] += total_offset
+        from orchestr_ai.postprocessing.calculators.schnetpack_ase import LegacyOffsetSpkCalculator
 
         # Return our newly wrapped calculator
         return LegacyOffsetSpkCalculator(
@@ -329,41 +260,62 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
 
 def _log_status_line(log_file, header, fmt, values):
     """Append one nicely formatted line to *log_file* (create if absent)."""
+    if log_file and hasattr(log_file, "put"):
+        # Push message to background thread queue
+        log_file.put(("log", (header, fmt, values)))
+        return
+
     line = fmt.format(*values)
-    if log_file:
-        fresh = not Path(log_file).exists()
+    if not log_file:
+        print(header)
+        print(line)
+        return
+
+    if isinstance(log_file, (str, Path)):
+        fresh = not Path(log_file).exists() or Path(log_file).stat().st_size == 0
         with open(log_file, "a") as fh:
             if fresh:
                 fh.write(header + "\n")
             fh.write(line + "\n")
-    else:                       # fall back to console
-        print(header)
-        print(line)
+    else:
+        # It's an open file handle
+        try:
+            is_empty = log_file.tell() == 0
+        except Exception:
+            is_empty = False
+        if is_empty:
+            log_file.write(header + "\n")
+        log_file.write(line + "\n")
+        log_file.flush()
 
 
-def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
-    """Append one extended-XYZ frame (with forces) to *traj_file*."""
-    if not traj_file:
+def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, file_handle):
+    """Append one extended-XYZ frame with positions, velocities, and forces."""
+    if not file_handle:
         return
-    forces = atoms.get_forces()
-    positions = atoms.get_positions()
-    symbols = atoms.get_chemical_symbols()
 
-    with open(traj_file, "a") as fh:
-        fh.write(f"{len(atoms)}\n")
-        fh.write(
-            f"Step = {step}, MD time = {md_time:.2f} fs, "
-            f"T_set = {T_set:.1f} K, Friction = {friction:.6f} fs⁻¹, "
-            f"Epot (eV) = {e_pot:.8f}\n"
-        )
-        for i, sym in enumerate(symbols):
-            x, y, z = positions[i]
-            fx, fy, fz = forces[i]
-            fh.write(
-                f"{sym:<2s} "
-                f"{x:15.8f} {y:15.8f} {z:15.8f} "
-                f"{fx:15.8f} {fy:15.8f} {fz:15.8f}\n"
-            )
+    frame = atoms.copy()
+    velocities = atoms.get_velocities()
+    if velocities is None:
+        velocities = np.full((len(atoms), 3), np.nan, dtype=float)
+
+    frame.set_array("velocities", np.asarray(velocities, dtype=float))
+    frame.set_array("forces", np.asarray(atoms.get_forces(), dtype=float))
+    frame.info.update(
+        {
+            "step": int(step),
+            "time_fs": float(md_time),
+            "temperature_set_K": float(T_set) if np.isfinite(T_set) else np.nan,
+            "friction_fs_inv": float(friction),
+            "energy": float(e_pot),
+        }
+    )
+
+    try:
+        write(file_handle, frame, format="extxyz")
+        file_handle.flush()
+    except IOError as exc:
+        print(f"Warning: Failed to write MD trajectory frame {step}: {exc}")
 
 def _load_scale_metadata(config):
     """Loads scale factor k_E from mace_scale_metadata.json (or config override) if available."""
@@ -461,6 +413,7 @@ def print_md_status(
     md_time = step * dt_fs
     e_pot = atoms.get_potential_energy()
     e_kin = atoms.get_kinetic_energy()
+    e_tot = e_pot + e_kin
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
     T_set = getattr(dyn, "temperature_K", np.nan)
 
@@ -634,6 +587,95 @@ def print_md_status(
 
 
 
+from threading import Thread
+from queue import Queue
+
+class MDWriterThread(Thread):
+    """
+    Background worker thread to write trajectory frames and status logs asynchronously,
+    preventing disk I/O operations from blocking the main simulation integration loop.
+    """
+    def __init__(self, traj_file, log_file, q):
+        super().__init__(daemon=True)
+        self.traj_file = traj_file
+        self.log_file = log_file
+        self.q = q
+
+    def run(self):
+        from contextlib import ExitStack
+        from ase import Atoms
+        from ase.io import write
+        
+        with ExitStack() as stack:
+            f_out = None
+            f_log = None
+            
+            if self.traj_file:
+                try:
+                    f_out = stack.enter_context(open(self.traj_file, "a"))
+                except IOError as exc:
+                    print(f"Warning: Background writer failed to open trajectory file {self.traj_file}: {exc}")
+                    
+            if self.log_file:
+                try:
+                    f_log = stack.enter_context(open(self.log_file, "a"))
+                except IOError as exc:
+                    print(f"Warning: Background writer failed to open log file {self.log_file}: {exc}")
+                    
+            # Track if log file header needs to be written
+            fresh_log = False
+            if self.log_file:
+                try:
+                    fresh_log = not Path(self.log_file).exists() or Path(self.log_file).stat().st_size == 0
+                except Exception:
+                    fresh_log = True
+
+            while True:
+                try:
+                    msg_type, msg_data = self.q.get()
+                except Exception:
+                    break
+                
+                if msg_type == "stop":
+                    self.q.task_done()
+                    break
+                    
+                elif msg_type == "traj":
+                    if f_out:
+                        symbols, positions, velocities, forces, info = msg_data
+                        frame = Atoms(symbols=symbols, positions=positions)
+                        if velocities is not None:
+                            frame.set_array("velocities", velocities)
+                        if forces is not None:
+                            frame.set_array("forces", forces)
+                        frame.info.update(info)
+                        
+                        try:
+                            write(f_out, frame, format="extxyz")
+                            f_out.flush()
+                        except Exception as exc:
+                            print(f"Warning: Background writer failed to write traj frame: {exc}")
+                            
+                elif msg_type == "log":
+                    header, fmt, values = msg_data
+                    line = fmt.format(*values)
+                    
+                    if f_log:
+                        try:
+                            if fresh_log:
+                                f_log.write(header + "\n")
+                                fresh_log = False
+                            f_log.write(line + "\n")
+                            f_log.flush()
+                        except Exception as exc:
+                            print(f"Warning: Background writer failed to write status line: {exc}")
+                    else:
+                        print(header)
+                        print(line)
+                        
+                self.q.task_done()
+
+
 def run_md(atoms, model_obj, device, config, neighbor_list=None):
     """Top-level MD driver with tidy, non-overlapping callbacks."""
 
@@ -643,62 +685,164 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     log_int       = md.get("log_interval",     5)
     xyz_int       = md.get("xyz_print_interval", 50)
     T0            = md.get("temperature_K",    300.0)
-    use_langevin  = md.get("use_langevin",     True)
     traj_file     = md.get("trajectory_file_md")
     log_file      = md.get("log_file")
 
     # -----------------------------------------------------------------
-    #  calculator + starting velocities
+    #  calculator + starting velocities (preventing zero kinetic energy)
     # -----------------------------------------------------------------
     calc = get_ase_calculator(model_obj, config, device, neighbor_list)
     atoms.calc = calc
-    MaxwellBoltzmannDistribution(atoms, temperature_K=T0/8)
+
+    heating_steps = md.get("heating_steps", 0)
+    T_start = md.get("heating_T_start", 10.0)
+
+    if heating_steps > 0:
+        print(f"Heating initialized: starting at {T_start} K, ramping to {T0} K over {heating_steps} steps.")
+        MaxwellBoltzmannDistribution(atoms, temperature_K=T_start)
+    else:
+        print(f"No heating ramp: starting at target temperature {T0} K.")
+        MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
 
     # -----------------------------------------------------------------
-    #  choose integrator
+    #  choose integrator (thermostat)
     # -----------------------------------------------------------------
-    if use_langevin:
-        gamma_fs      = md.get("friction_coefficient", 0.01)
+    thermostat = md.get("thermostat", "langevin").lower()
+    if "thermostat" not in md and "use_langevin" in md:
+        thermostat = "langevin" if md.get("use_langevin") else "verlet"
+
+    if thermostat in {"bussi", "csvr"}:
+        from ase.md.bussi import Bussi
+        taut_fs = md.get("taut_fs", 100.0)
+        dyn = Bussi(
+            atoms,
+            timestep      = dt_fs * units.fs,
+            temperature_K = T0,
+            taut          = taut_fs * units.fs,
+        )
+        dyn.temperature_K = T0
+        gamma_fs = 0.0  # not Langevin, no friction logging
+        thermostat_desc = f"Bussi/CSVR τ = {taut_fs} fs"
+    elif thermostat == "langevin":
+        gamma_fs = md.get("friction_coefficient", 0.01)
         dyn = Langevin(
             atoms,
-            timestep   = dt_fs * units.fs,
+            timestep      = dt_fs * units.fs,
             temperature_K = T0,
-            friction   = gamma_fs,
+            friction      = gamma_fs,
         )
+        dyn.temperature_K = T0
+        thermostat_desc = f"Langevin γ = {gamma_fs}"
     else:
         from ase.md.verlet import VelocityVerlet
         dyn = VelocityVerlet(atoms, timestep = dt_fs * units.fs)
-        gamma_fs = 0.0                                 # for logging
+        dyn.temperature_K = np.nan
+        gamma_fs = 0.0
+        thermostat_desc = "VelocityVerlet"
 
     # -----------------------------------------------------------------
-    #  callbacks
+    #  temperature heating ramp callback
     # -----------------------------------------------------------------
-    dyn.attach(
-        lambda: print_md_status(
-            dyn, atoms, log_file, dt_fs, gamma_fs, config=config
-        ),
-        interval=log_int,
-    )
+    if heating_steps > 0:
+        def ramp_callback():
+            step = dyn.get_number_of_steps()
+            if step <= heating_steps:
+                current_T = T_start + (T0 - T_start) * (step / heating_steps)
+            else:
+                current_T = T0
 
-    if traj_file and xyz_int > 0:
-        dyn.attach(
-            lambda: _write_xyz_frame(
-                atoms,
-                dyn.get_number_of_steps(),
-                dyn.get_number_of_steps() * dt_fs,
-                getattr(dyn, "temperature_K", np.nan),
-                gamma_fs,
-                atoms.get_potential_energy(),
-                traj_file,
-            ),
-            interval=xyz_int,
-        )
+            # Set temperature on thermostat
+            if hasattr(dyn, "set_temperature"):
+                dyn.set_temperature(temperature_K=current_T)
+            elif hasattr(dyn, "temp"):
+                dyn.temp = current_T * units.kB
+                if hasattr(dyn, "ndof"):
+                    dyn.target_kinetic_energy = 0.5 * dyn.temp * dyn.ndof
+            
+            dyn.temperature_K = current_T
+
+        dyn.attach(ramp_callback, interval=1)
+        # Execute once at step 0 to ensure initialization starts at T_start
+        ramp_callback()
 
     # -----------------------------------------------------------------
-    #  run!
+    #  callbacks & run!
     # -----------------------------------------------------------------
-    print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {('Langevin γ = %.5f' % gamma_fs) if use_langevin else 'VelocityVerlet'}")
-    dyn.run(nsteps)
+    from queue import Queue
+    import gc
+
+    # Periodically run garbage collection and empty PyTorch CUDA cache to prevent slowdowns
+    def periodic_cleanup():
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    dyn.attach(periodic_cleanup, interval=1000)
+
+    # Start background writer thread if writing/logging is enabled
+    use_writer = (traj_file and xyz_int > 0) or log_file
+    if use_writer:
+        write_queue = Queue()
+        writer_thread = MDWriterThread(traj_file, log_file, write_queue)
+        writer_thread.start()
+
+        # Attach log status callback (using write_queue for async logging)
+        if log_file:
+            dyn.attach(
+                lambda: print_md_status(
+                    dyn, atoms, write_queue, dt_fs, gamma_fs, config=config
+                ),
+                interval=log_int,
+            )
+
+        # Attach trajectory print callback
+        if traj_file and xyz_int > 0:
+            def async_write_xyz_frame():
+                step = dyn.get_number_of_steps()
+                md_time = step * dt_fs
+                T_set = getattr(dyn, "temperature_K", np.nan)
+                
+                velocities = atoms.get_velocities()
+                if velocities is not None:
+                    velocities = velocities.copy()
+                    
+                forces = atoms.get_forces()
+                if forces is not None:
+                    forces = forces.copy()
+                    
+                info = {
+                    "step": int(step),
+                    "time_fs": float(md_time),
+                    "temperature_set_K": float(T_set) if np.isfinite(T_set) else np.nan,
+                    "friction_fs_inv": float(gamma_fs),
+                    "energy": float(atoms.get_potential_energy()),
+                }
+                
+                write_queue.put((
+                    "traj", 
+                    (
+                        atoms.get_chemical_symbols(),
+                        atoms.get_positions().copy(),
+                        velocities,
+                        forces,
+                        info
+                    )
+                ))
+
+            dyn.attach(async_write_xyz_frame, interval=xyz_int)
+
+        try:
+            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+            dyn.run(nsteps)
+        finally:
+            # Signal the background writer thread to flush and stop
+            write_queue.put(("stop", None))
+            writer_thread.join()
+    else:
+        # No files to write or log, run standard
+        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+        dyn.run(nsteps)
+
     print("MD finished.")
 
 
@@ -855,4 +999,3 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         traceback.print_exc() # Print traceback for VDOS errors
 
     return frequencies_cm
-

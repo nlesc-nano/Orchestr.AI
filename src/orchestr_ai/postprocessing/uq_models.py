@@ -19,92 +19,57 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 import traceback
 
-# Check for PyCaret installation
-try:
-    import pycaret
-    PYCARET_AVAILABLE = True
-except ImportError:
-    PYCARET_AVAILABLE = False
-    print("Warning: PyCaret not found. UQ model training/prediction (train_uq_models, predict_uncertainties) will be unavailable.")
+# Check for PyCaret installation (No longer needed, retained as a stub for compatibility)
+PYCARET_AVAILABLE = False
 
 
 def train_uq_models(features_val, energy_residuals_abs, force_residuals_mae, gpu_available=False):
     """
-    Trains ML models (using PyCaret, typically with XGBoost) to predict residuals.
+    Trains ML models (using sklearn GradientBoostingRegressor) to predict residuals.
     
-    This function sets up two regression experiments with PyCaret:
+    This function sets up two regression pipelines:
         - One for energy residuals.
         - One for force residuals.
-    It compares and tunes models (restricting to XGBoost), finalizes the best model,
-    and saves it to a pipeline file. If PyCaret is not installed, the function returns (None, None).
+    It fits a GradientBoostingRegressor pipeline and saves it to a pkl file using joblib.
     
     Parameters:
         features_val (np.ndarray): Feature matrix used as predictors.
         energy_residuals_abs (np.ndarray): Absolute energy residuals (target for energy model).
         force_residuals_mae (np.ndarray): MAE of force residuals (target for force model).
-        gpu_available (bool): If True, attempts to use GPU support in PyCaret.
+        gpu_available (bool): Ignored (retained for backward compatibility).
     
     Returns:
         tuple: (best_model_e, best_model_f) for energy and force residuals, or (None, None) on failure.
     """
-    if not PYCARET_AVAILABLE:
-        print("Error: Cannot train UQ models because PyCaret is not installed.")
-        return None, None
-
-    from pycaret.regression import setup, compare_models, save_model, finalize_model, create_model
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.ensemble import GradientBoostingRegressor
+    import joblib
 
     best_model_e, best_model_f = None, None
 
     # --- Energy Model ---
     print("\n--- Training UQ Model for Energy Residuals ---")
     try:
-        data_e = pd.DataFrame(
-            features_val,
-            columns=[f'feature_{i}' for i in range(features_val.shape[1])]
-        )
-        data_e['target'] = energy_residuals_abs
-        print("Setting up PyCaret for energy residuals...")
+        print("Fitting Gradient Boosting Regressor for energy residuals...")
         sys.stdout.flush()
-        setup_kwargs_e = dict(
-            data=data_e,
-            target='target',
-            session_id=123,
-            train_size=0.8,
-            fold=5,
-            n_jobs=-1,
-            verbose=False,
-            log_experiment=False,
-            html=False
-        )
-        if gpu_available:
-            setup_kwargs_e['use_gpu'] = True
-        try:
-            reg_e = setup(**setup_kwargs_e)
-            print("PyCaret setup complete.")
-        except Exception as e_setup:
-            print(f"[ERROR] PyCaret setup failed: {e_setup}")
-            raise
-
-        create_model_kwargs = {'tree_method': 'hist'}
-        if gpu_available and getattr(reg_e, 'gpu_used', False):
-            create_model_kwargs = {'tree_method': 'gpu_hist', 'device': 'cuda'}
-        print(f"Creating XGBoost model ({'GPU' if gpu_available and getattr(reg_e, 'gpu_used', False) else 'CPU'})...")
-        # Optionally create the model; here compare_models will handle tuning.
-        print("Comparing/tuning XGBoost model for energy residuals...")
-        sys.stdout.flush()
-        best_model_e = compare_models(
-            include=['xgboost'],
-            sort='mae',
-            n_select=1,
-            verbose=True
-        )
-        if best_model_e:
-            print("Finalizing and saving best energy residuals model...")
-            final_model_e = finalize_model(best_model_e)
-            save_model(final_model_e, 'best_model_energy_pipeline')
-            print("Energy residuals model training completed.")
-        else:
-            print("Error: Failed to train/select energy model.")
+        pipeline_e = Pipeline([
+            ('scaler', StandardScaler()),
+            ('regressor', GradientBoostingRegressor(
+                n_estimators=100,
+                learning_rate=0.05,
+                max_depth=4,
+                subsample=0.8,
+                random_state=123
+            ))
+        ])
+        pipeline_e.fit(features_val, energy_residuals_abs)
+        best_model_e = pipeline_e
+        
+        # Save model pipeline
+        print("Saving best energy residuals model...")
+        joblib.dump(pipeline_e, 'best_model_energy_pipeline.pkl')
+        print("Energy residuals model training completed.")
     except Exception as e:
         print(f"Error during Energy UQ model training: {e}")
         traceback.print_exc()
@@ -113,52 +78,25 @@ def train_uq_models(features_val, energy_residuals_abs, force_residuals_mae, gpu
     # --- Force Model ---
     print("\n--- Training UQ Model for Force Residuals ---")
     try:
-        data_f = pd.DataFrame(
-            features_val,
-            columns=[f'feature_{i}' for i in range(features_val.shape[1])]
-        )
-        data_f['target'] = force_residuals_mae
-        print("Setting up PyCaret for force residuals...")
+        print("Fitting Gradient Boosting Regressor for force residuals...")
         sys.stdout.flush()
-        setup_kwargs_f = dict(
-            data=data_f,
-            target='target',
-            session_id=124,
-            train_size=0.8,
-            fold=5,
-            n_jobs=-1,
-            verbose=False,
-            log_experiment=False,
-            html=False
-        )
-        if gpu_available:
-            setup_kwargs_f['use_gpu'] = True
-        try:
-            reg_f = setup(**setup_kwargs_f)
-            print("PyCaret setup complete.")
-        except Exception as e_setup:
-            print(f"[ERROR] PyCaret setup failed: {e_setup}")
-            raise
-
-        create_model_kwargs_f = {'tree_method': 'hist'}
-        if gpu_available and getattr(reg_f, 'gpu_used', False):
-            create_model_kwargs_f = {'tree_method': 'gpu_hist', 'device': 'cuda'}
-        print(f"Creating XGBoost model ({'GPU' if gpu_available and getattr(reg_f, 'gpu_used', False) else 'CPU'})...")
-        print("Comparing/tuning XGBoost model for force residuals...")
-        sys.stdout.flush()
-        best_model_f = compare_models(
-            include=['xgboost'],
-            sort='mae',
-            n_select=1,
-            verbose=True
-        )
-        if best_model_f:
-            print("Finalizing and saving best force residuals model...")
-            final_model_f = finalize_model(best_model_f)
-            save_model(final_model_f, 'best_model_force_pipeline')
-            print("Force residuals model training completed.")
-        else:
-            print("Error: Failed to train/select force model.")
+        pipeline_f = Pipeline([
+            ('scaler', StandardScaler()),
+            ('regressor', GradientBoostingRegressor(
+                n_estimators=100,
+                learning_rate=0.05,
+                max_depth=4,
+                subsample=0.8,
+                random_state=124
+            ))
+        ])
+        pipeline_f.fit(features_val, force_residuals_mae)
+        best_model_f = pipeline_f
+        
+        # Save model pipeline
+        print("Saving best force residuals model...")
+        joblib.dump(pipeline_f, 'best_model_force_pipeline.pkl')
+        print("Force residuals model training completed.")
     except Exception as e:
         print(f"Error during Force UQ model training: {e}")
         traceback.print_exc()
@@ -169,34 +107,31 @@ def train_uq_models(features_val, energy_residuals_abs, force_residuals_mae, gpu
 
 def predict_uncertainties(best_model_e, best_model_f, features):
     """
-    Predicts uncertainties using pre-trained/loaded PyCaret models.
+    Predicts uncertainties using pre-trained/loaded regression pipelines.
 
     Parameters:
-        best_model_e: Pre-trained PyCaret regression model for energy residuals.
-        best_model_f: Pre-trained PyCaret regression model for force residuals.
+        best_model_e: Pre-trained scikit-learn pipeline for energy residuals.
+        best_model_f: Pre-trained scikit-learn pipeline for force residuals.
         features (np.ndarray): Feature matrix for prediction.
 
     Returns:
         tuple: (sigma_e_pred, sigma_f_pred) uncertainties for energy and force.
                Returns (None, None) if prediction fails.
     """
-    if not PYCARET_AVAILABLE:
-        print("Error: Cannot predict uncertainties because PyCaret is not installed.")
-        return None, None
-
-    from pycaret.regression import predict_model, load_model
+    import joblib
 
     # Load models from saved pipelines if not provided.
     if best_model_e is None and os.path.exists('best_model_energy_pipeline.pkl'):
         try:
             print("Loading saved energy uncertainty model...")
-            best_model_e = load_model('best_model_energy_pipeline', verbose=False)
+            best_model_e = joblib.load('best_model_energy_pipeline.pkl')
         except Exception as e:
             print(f"Error loading energy model: {e}")
+            
     if best_model_f is None and os.path.exists('best_model_force_pipeline.pkl'):
         try:
             print("Loading saved force uncertainty model...")
-            best_model_f = load_model('best_model_force_pipeline', verbose=False)
+            best_model_f = joblib.load('best_model_force_pipeline.pkl')
         except Exception as e:
             print(f"Error loading force model: {e}")
 
@@ -206,29 +141,19 @@ def predict_uncertainties(best_model_e, best_model_f, features):
         return None, None
 
     try:
-        feature_names = [f'feature_{i}' for i in range(features.shape[1])]
-        data = pd.DataFrame(features, columns=feature_names)
-        print(f"Predicting uncertainties for {len(data)} data points...")
+        print(f"Predicting uncertainties for {len(features)} data points...")
         if best_model_e:
             print("Predicting energy uncertainty...")
-            pred_e = predict_model(best_model_e, data=data)
-            label_col_e = 'prediction_label'
-            if label_col_e in pred_e.columns:
-                sigma_e_pred = pred_e[label_col_e].values
-                sigma_e_pred = np.maximum(sigma_e_pred, 0)
-                print(f"  Energy uncertainty shape: {sigma_e_pred.shape}, Mean: {np.nanmean(sigma_e_pred):.4f}")
-            else:
-                print(f"Warning: Column '{label_col_e}' not found in energy predictions.")
+            sigma_e_pred = best_model_e.predict(features)
+            sigma_e_pred = np.maximum(sigma_e_pred, 0.0)
+            print(f"  Energy uncertainty shape: {sigma_e_pred.shape}, Mean: {np.nanmean(sigma_e_pred):.4f}")
+            
         if best_model_f:
             print("Predicting force uncertainty...")
-            pred_f = predict_model(best_model_f, data=data)
-            label_col_f = 'prediction_label'
-            if label_col_f in pred_f.columns:
-                sigma_f_pred = pred_f[label_col_f].values
-                sigma_f_pred = np.maximum(sigma_f_pred, 0)
-                print(f"  Force uncertainty shape: {sigma_f_pred.shape}, Mean: {np.nanmean(sigma_f_pred):.4f}")
-            else:
-                print(f"Warning: Column '{label_col_f}' not found in force predictions.")
+            sigma_f_pred = best_model_f.predict(features)
+            sigma_f_pred = np.maximum(sigma_f_pred, 0.0)
+            print(f"  Force uncertainty shape: {sigma_f_pred.shape}, Mean: {np.nanmean(sigma_f_pred):.4f}")
+            
     except Exception as e:
         print(f"Error during uncertainty prediction: {e}")
         traceback.print_exc()

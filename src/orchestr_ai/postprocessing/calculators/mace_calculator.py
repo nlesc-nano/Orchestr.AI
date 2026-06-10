@@ -156,10 +156,9 @@ class MaceCalculator(BaseCalculator):
             ]
 
             latent_frame_list = [
-                np.sum(l, axis=0).astype(np.float64)
+                np.mean(l, axis=0).astype(np.float64)
                 for l in latent_atom_list
             ]
-
         return energies_np, forces_list, latent_frame_list, latent_atom_list
 
 
@@ -252,7 +251,7 @@ class AutoScaledReconstructedMaceCalculator(MaceCalculator):
                 for l in torch.split(latents_cpu, n_atoms_list, dim=0)
             ]
             latent_frame_list = [
-                np.sum(l, axis=0).astype(np.float64)
+                np.mean(l, axis=0).astype(np.float64)
                 for l in latent_atom_list
             ]
 

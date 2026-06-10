@@ -28,10 +28,10 @@ create_or_update_env_from_yaml () {
 
   if micromamba env list | awk '{print $1}' | grep -qx "$ENVNAME"; then
     echo "[INFO] Env '$ENVNAME' exists -> updating from $YAMLFILE"
-    micromamba env update -n "$ENVNAME" -f "$YAMLFILE" --prune
+    micromamba env update -n "$ENVNAME" -f "$YAMLFILE" --prune 
   else
     echo "[INFO] Creating env '$ENVNAME' from $YAMLFILE"
-    micromamba env create -n "$ENVNAME" -f "$YAMLFILE"
+    micromamba env create -n "$ENVNAME" -f "$YAMLFILE" 
   fi
 }
 

@@ -11,7 +11,7 @@ dependencies:
   - scikit-learn
   - wandb
   - pip:
-      - torch==2.10.0
+      - torch>=2.6,<2.7 
       - schnetpack
       - dscribe
       - nequip==0.16.0

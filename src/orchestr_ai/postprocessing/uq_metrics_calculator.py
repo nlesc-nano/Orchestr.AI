@@ -21,14 +21,9 @@ from scipy.integrate import trapezoid
 from scipy.stats import norm, spearmanr, ks_2samp, normaltest
 
 # ---------------------------------------------------------------------------
-# Logging – configured *once* when the module is imported
+# Logging
 # ---------------------------------------------------------------------------
-_LOGGER = logging.getLogger("uq_metrics")
-if not _LOGGER.handlers:  # avoid duplicate handlers under re‑import
-    _LOGGER.setLevel(logging.INFO)
-    _h = logging.FileHandler("metrics.log", mode="a", encoding="utf‑8")
-    _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-    _LOGGER.addHandler(_h)
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +328,7 @@ def run_uq_metrics(
     log_path: str | Path = "metrics.log",
     ensemble_size: Optional[int] = None,
     calibrators: Optional[Dict[str, Any]] = None,
+    energy_per_atom: bool = False,
 ) -> Dict:
     """
     Compute, calibrate (variance + isotonic) & log UQ metrics.
@@ -357,6 +353,7 @@ def run_uq_metrics(
     delta_comp = stats.all_force_residuals.reshape(-1)
     delta_atom = stats.force_rmse_per_atom
     delta_energy = stats.delta_E_frame if sigma_energy is not None else None
+    atom_counts_frame = np.asarray(getattr(stats, "atom_counts", []), dtype=float)
 
     frame_mask = stats.train_mask if split.lower() == "train" else stats.eval_mask
     atom_mask = stats._get_atom_mask(frame_mask)
@@ -370,6 +367,12 @@ def run_uq_metrics(
     if delta_energy is not None:
         delta_e = delta_energy[frame_mask]
         sigma_e = sigma_energy[frame_mask]
+        if energy_per_atom:
+            counts_e = atom_counts_frame[frame_mask]
+            if counts_e.size != delta_e.size or np.any(counts_e <= 0):
+                raise ValueError("energy_per_atom=True requires positive atom counts for each frame")
+            delta_e = delta_e / counts_e
+            sigma_e = sigma_e / counts_e
     else:
         delta_e = sigma_e = None
 
@@ -802,6 +805,8 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
     set_uq: str = "ensemble",
     log_file: str = "metrics.log",
     ensemble_size: Optional[int] = None,
+    calibrators: Optional[Dict[str, Any]] = None,
+    energy_per_atom: bool = False,
 ):
     """Thin wrapper that forwards to :func:`run_uq_metrics`.
 
@@ -818,5 +823,6 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
         tag=set_uq,
         log_path=log_file,
         ensemble_size=ensemble_size,
+        calibrators=calibrators,
+        energy_per_atom=energy_per_atom,
     )
-

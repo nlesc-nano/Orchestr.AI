@@ -17,6 +17,7 @@ from orchestr_ai.postprocessing.calculators.base import BaseCalculator
 from orchestr_ai.postprocessing.calculators.factory import create_calculator
 from orchestr_ai.postprocessing.inference_runner import InferenceRunner
 
+
 def require_schnetpack_interfaces():
     """
     Lazy import SchNetPack interface utilities.
@@ -37,10 +38,11 @@ def require_schnetpack_interfaces():
 
     return AtomsConverter, Properties
 
+
 def setup_neighbor_list(config):
     from orchestr_ai.postprocessing.neighbor_list import setup_neighbor_list as _setup_neighbor_list
-    return _setup_neighbor_list(config)
 
+    return _setup_neighbor_list(config)
 def evaluate_model(
     frames,
     true_energies,
@@ -53,6 +55,8 @@ def evaluate_model(
     neighbor_list=None,
     E_singlet_true=None,
     E_triplet_true=None,
+    frame_indices=None,
+    context_label=None,
 ):
     """
     Backward-compatible entry point used by evaluate.py.
@@ -68,7 +72,13 @@ def evaluate_model(
             neighbor_list=neighbor_list,
         )
 
-        runner = InferenceRunner(calc, batch_size, eval_log_file)
+        runner = InferenceRunner(
+            calc,
+            batch_size,
+            eval_log_file,
+            clear_cuda_cache=bool(config.get("eval", {}).get("clear_cuda_cache", False)),
+            context_label=context_label or "InferenceRunner",
+        )
 
         return runner.run(
             frames=frames,
@@ -76,6 +86,7 @@ def evaluate_model(
             true_forces=true_forces,
             E_singlet_true=E_singlet_true,
             E_triplet_true=E_triplet_true,
+            frame_indices=frame_indices,
         )
 
     except Exception as e:

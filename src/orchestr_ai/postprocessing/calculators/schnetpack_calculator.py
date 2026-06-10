@@ -63,6 +63,8 @@ class SchnetpackCalculator(BaseCalculator):
                 return
 
             for pp in self.model.postprocessors:
+                add_mean_enabled = bool(getattr(pp, "add_mean", False))
+                add_atomrefs_enabled = bool(getattr(pp, "add_atomrefs", True))
                 extracted_mean = 0.0
 
                 if hasattr(pp, "state_dict") and "mean" in pp.state_dict():
@@ -70,41 +72,48 @@ class SchnetpackCalculator(BaseCalculator):
                 elif hasattr(pp, "mean") and isinstance(getattr(pp, "mean"), torch.Tensor):
                     extracted_mean = getattr(pp, "mean").item()
 
-                if abs(extracted_mean) > 1e-8:
+                if add_mean_enabled and abs(extracted_mean) > 1e-8:
                     self.mean_offset = extracted_mean
                     print(
                         f"\n⚠️  FLAG: Non-zero dataset mean offset detected: "
                         f"{self.mean_offset:.6f} eV/atom"
                     )
+                elif abs(extracted_mean) > 1e-8:
+                    self.mean_offset = 0.0
+                    print(
+                        "\nFLAG: Stored dataset mean detected, but "
+                        "AddOffsets.add_mean is false."
+                    )
                 else:
                     self.mean_offset = 0.0
                     print("\n✅ FLAG: Mean offset is 0.0.")
 
-                for ref_name in ["atomref", "z_offsets"]:
-                    if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
-                        ref_val = getattr(pp, ref_name)
+                if add_atomrefs_enabled:
+                    for ref_name in ["atomref", "z_offsets"]:
+                        if hasattr(pp, ref_name) and getattr(pp, ref_name) is not None:
+                            ref_val = getattr(pp, ref_name)
 
-                        if isinstance(ref_val, torch.Tensor):
-                            self.atomref = (
-                                ref_val.detach()
-                                .cpu()
-                                .numpy()
-                                .astype(np.float64)
-                                .flatten()
-                            )
-                        elif hasattr(ref_val, "weight"):
-                            self.atomref = (
-                                ref_val.weight.detach()
-                                .cpu()
-                                .numpy()
-                                .astype(np.float64)
-                                .flatten()
-                            )
+                            if isinstance(ref_val, torch.Tensor):
+                                self.atomref = (
+                                    ref_val.detach()
+                                    .cpu()
+                                    .numpy()
+                                    .astype(np.float64)
+                                    .flatten()
+                                )
+                            elif hasattr(ref_val, "weight"):
+                                self.atomref = (
+                                    ref_val.weight.detach()
+                                    .cpu()
+                                    .numpy()
+                                    .astype(np.float64)
+                                    .flatten()
+                                )
 
-                        print(
-                            f"Successfully extracted '{ref_name}' "
-                            "(isolated atomic energies)."
-                        )
+                            print(
+                                f"Successfully extracted '{ref_name}' "
+                                "(isolated atomic energies)."
+                            )
 
             self.model.postprocessors = torch.nn.ModuleList([])
             print("Successfully disabled model's internal postprocessors.")
@@ -203,7 +212,7 @@ class SchnetpackCalculator(BaseCalculator):
                 for l in torch.split(latents_cpu, n_atoms_list, dim=0)
             ]
             latent_frame_list = [
-                np.sum(l, axis=0).astype(np.float64)
+                np.mean(l, axis=0).astype(np.float64)
                 for l in latent_atom_list
             ]
 
