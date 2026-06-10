@@ -552,6 +552,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     profile_mace = bool(md.get("profile_mace", framework == "mace"))
     profile_interval = int(md.get("profile_interval", log_int if log_int else 50))
     profile_sync_cuda = bool(md.get("profile_sync_cuda", False))
+    cleanup_interval = int(md.get("clear_cuda_cache_interval", 0) or 0)
 
     if framework == "mace" and profile_mace:
         calc = _enable_calculator_profiling(
@@ -639,13 +640,17 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     from queue import Queue
     import gc
 
-    # Periodically run garbage collection and empty PyTorch CUDA cache to prevent slowdowns
-    def periodic_cleanup():
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    if cleanup_interval > 0:
+        def periodic_cleanup():
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    dyn.attach(periodic_cleanup, interval=1000)
+        dyn.attach(periodic_cleanup, interval=cleanup_interval)
+        print(
+            f"MD cleanup enabled: clearing Python/CUDA caches every "
+            f"{cleanup_interval} steps."
+        )
 
     # Start background writer thread if writing/logging is enabled
     use_writer = (traj_file and xyz_int > 0) or log_file
