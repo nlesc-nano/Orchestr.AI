@@ -24,7 +24,7 @@ def estimate_padding(positions):
     # clip between 3.0 and 10.0 Å for sanity
     return float(np.clip(padding, 3.0, 10.0))
 
-def process_xyz(input_file, output_file, png_file, spin_state="single"):
+def process_xyz(input_file, output_file, png_file, spin_state="single", L_max_global=None):
     with open(input_file, 'r') as f:
         lines = f.readlines()
 
@@ -52,20 +52,18 @@ def process_xyz(input_file, output_file, png_file, spin_state="single"):
 
         frame_positions = np.array(frame_positions)
 
-        # Bounding box
-        mins = np.min(frame_positions, axis=0)
-        maxs = np.max(frame_positions, axis=0)
-        lengths = maxs - mins
-
-        # Automatic padding
-        padding = estimate_padding(frame_positions)
-
-        # Add padding
-        box_lengths = lengths + padding
-
-        # Force cubic box
-        max_length = np.max(box_lengths)
-        box_lengths[:] = max_length
+        # Bounding box or L_max_global
+        if L_max_global is not None:
+            max_length = L_max_global
+            box_lengths = np.array([L_max_global, L_max_global, L_max_global])
+        else:
+            mins = np.min(frame_positions, axis=0)
+            maxs = np.max(frame_positions, axis=0)
+            lengths = maxs - mins
+            padding = estimate_padding(frame_positions)
+            box_lengths = lengths + padding
+            max_length = np.max(box_lengths)
+            box_lengths[:] = max_length
 
         # Center atoms
         frame_positions -= np.mean(frame_positions, axis=0)
@@ -75,10 +73,10 @@ def process_xyz(input_file, output_file, png_file, spin_state="single"):
         output_lines.append(f"{num_atoms}\n")
         
         if spin_state == "dual":
-            # Extract energies from the existing MACE header safely using regex
-            e_s_match = re.search(r"E_singlet=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
-            e_t_match = re.search(r"E_triplet=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
-            de_match  = re.search(r"Delta_E=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            # Extract energies from the existing MACE header safely using regex (supporting both ':' and '=')
+            e_s_match = re.search(r"E_singlet[:=]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            e_t_match = re.search(r"E_triplet[:=]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            de_match  = re.search(r"Delta_E[:=]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
             
             e_s = e_s_match.group(1) if e_s_match else "0.0"
             e_t = e_t_match.group(1) if e_t_match else "0.0"
@@ -90,9 +88,25 @@ def process_xyz(input_file, output_file, png_file, spin_state="single"):
                 f'E_singlet={e_s} E_triplet={e_t} Delta_E={de} - centered\n'
             )
         else:
+            # Extract single spin energy
+            energy_match = re.search(r"energy[=:]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", header)
+            if energy_match:
+                energy_val = energy_match.group(1)
+            else:
+                tokens = header.split()
+                if tokens:
+                    try:
+                        token_clean = tokens[0].replace('"', '').replace("'", "")
+                        float(token_clean)
+                        energy_val = token_clean
+                    except ValueError:
+                        energy_val = "0.0"
+                else:
+                    energy_val = "0.0"
+
             output_lines.append(
                 f'Lattice="{box_lengths[0]:.6f} 0.0 0.0 0.0 {box_lengths[1]:.6f} 0.0 0.0 0.0 {box_lengths[2]:.6f}" '
-                f'Properties=species:S:1:pos:R:3:forces:R:3 pbc="F F F" energy={header} - centered\n'
+                f'Properties=species:S:1:pos:R:3:forces:R:3 pbc="F F F" energy={energy_val} - centered\n'
             )
 
         for (elem, rest), pos in zip(frame_atoms, frame_positions):
