@@ -18,7 +18,8 @@ from pathlib import Path
 from ase import units
 from ase.io import write
 from ase.md import VelocityVerlet, Langevin
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
+from ase.neighborlist import neighbor_list
 from ase.optimize import BFGSLineSearch
 from ase.vibrations import Vibrations
 
@@ -139,10 +140,36 @@ def _enable_calculator_profiling(calc, *, label="calculator", sync_cuda=False):
     return calc
 
 
+def _get_structure_profile(atoms, cutoff):
+    """Return cheap structural diagnostics for MD profiling."""
+    min_distance = np.nan
+    edge_count = -1
+
+    try:
+        if len(atoms) > 1:
+            use_mic = bool(np.any(atoms.get_pbc()))
+            distances = atoms.get_all_distances(mic=use_mic)
+            distances[distances <= 0.0] = np.inf
+            min_distance = float(np.min(distances))
+    except Exception:
+        min_distance = np.nan
+
+    try:
+        if cutoff and cutoff > 0:
+            # ASE returns directed i->j pairs; this still tracks neighbor-graph size.
+            edge_count = int(len(neighbor_list("i", atoms, cutoff)))
+    except Exception:
+        edge_count = -1
+
+    return min_distance, edge_count
+
+
 def _print_calculator_profile(
     calc,
     dyn,
+    atoms,
     write_queue=None,
+    cutoff=None,
     profile_file=None,
     print_to_screen=True,
 ):
@@ -183,12 +210,14 @@ def _print_calculator_profile(
         )
 
     step = dyn.get_number_of_steps()
+    min_distance, edge_count = _get_structure_profile(atoms, cutoff)
     line = (
         f"[MD-PROFILE] step={step} "
         f"{profile['label']}_calls={calls} delta_calls={delta_calls} "
         f"last_calc={profile['last_s']:.6f}s "
         f"avg_calc={avg_s:.6f}s delta_avg={delta_avg_s:.6f}s "
-        f"max_calc={profile['max_s']:.6f}s queue={queue_size} {cuda_msg}"
+        f"max_calc={profile['max_s']:.6f}s queue={queue_size} "
+        f"min_dist={min_distance:.4f}A edges={edge_count} {cuda_msg}"
     )
 
     if profile_file:
@@ -199,14 +228,16 @@ def _print_calculator_profile(
                     fh.write(
                         "# step calls delta_calls last_calc_s avg_calc_s "
                         "delta_avg_s max_calc_s queue cuda_alloc_MB "
-                        "cuda_reserved_MB cuda_max_alloc_MB\n"
+                        "cuda_reserved_MB cuda_max_alloc_MB min_distance_A "
+                        "neighbor_edges\n"
                     )
                 fh.write(
                     f"{step} {calls} {delta_calls} "
                     f"{profile['last_s']:.6f} {avg_s:.6f} "
                     f"{delta_avg_s:.6f} {profile['max_s']:.6f} "
                     f"{queue_size} {allocated_mb:.1f} {reserved_mb:.1f} "
-                    f"{max_allocated_mb:.1f}\n"
+                    f"{max_allocated_mb:.1f} {min_distance:.6f} "
+                    f"{edge_count}\n"
                 )
         except IOError as exc:
             print(f"Warning: Failed to write MD profile line: {exc}", flush=True)
@@ -575,6 +606,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     traj_file     = md.get("trajectory_file_md")
     log_file      = md.get("log_file")
     framework     = config.get("model_framework", "schnetpack").lower()
+    cutoff        = config.get("cutoff", md.get("cutoff"))
 
     # -----------------------------------------------------------------
     #  calculator + starting velocities (preventing zero kinetic energy)
@@ -586,6 +618,9 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     profile_file = md.get("profile_file")
     profile_print = bool(md.get("profile_print", profile_file is None))
     cleanup_interval = int(md.get("clear_cuda_cache_interval", 0) or 0)
+    remove_translation = bool(md.get("remove_translation", False))
+    remove_rotation = bool(md.get("remove_rotation", False))
+    remove_drift_interval = int(md.get("remove_drift_interval", 100) or 0)
 
     if framework == "mace" and profile_mace:
         calc = _enable_calculator_profiling(
@@ -667,6 +702,25 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         # Execute once at step 0 to ensure initialization starts at T_start
         ramp_callback()
 
+    if (remove_translation or remove_rotation) and remove_drift_interval > 0:
+        def remove_drift_callback():
+            if remove_translation:
+                Stationary(atoms, preserve_temperature=True)
+            if remove_rotation:
+                ZeroRotation(atoms, preserve_temperature=True)
+
+        remove_drift_callback()
+        dyn.attach(remove_drift_callback, interval=remove_drift_interval)
+        active = []
+        if remove_translation:
+            active.append("translation")
+        if remove_rotation:
+            active.append("rotation")
+        print(
+            f"MD drift removal enabled: removing {' and '.join(active)} "
+            f"every {remove_drift_interval} steps."
+        )
+
     # -----------------------------------------------------------------
     #  callbacks & run!
     # -----------------------------------------------------------------
@@ -697,7 +751,9 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
                 lambda: _print_calculator_profile(
                     calc,
                     dyn,
+                    atoms,
                     write_queue,
+                    cutoff=cutoff,
                     profile_file=profile_file,
                     print_to_screen=profile_print,
                 ),
@@ -762,6 +818,8 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
                 lambda: _print_calculator_profile(
                     calc,
                     dyn,
+                    atoms,
+                    cutoff=cutoff,
                     profile_file=profile_file,
                     print_to_screen=profile_print,
                 ),
