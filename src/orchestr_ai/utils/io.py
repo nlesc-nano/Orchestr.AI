@@ -1,6 +1,7 @@
 import numpy as np
 from pathlib import Path
 import os
+import re
 
 import logging
 logger = logging.getLogger(__name__)
@@ -244,12 +245,82 @@ def parse_stacked_xyz(filename):
             np.array(forces),
             atom_types)
             
-def save_stacked_xyz(filename, energies, positions, forces, atom_types):
-    num_frames, num_atoms, _ = positions.shape
-    with open(filename,'w') as f:
-        for i in range(num_frames):
-            f.write(f"{num_atoms}\n")
-            f.write(f"{energies[i]:.6f}\n")
-            for atom,(x,y,z),(fx,fy,fz) in zip(atom_types, positions[i], forces[i]):
-                f.write(f"{atom:<2} {x:12.6f} {y:12.6f} {z:12.6f}"
-                        f" {fx:12.6f} {fy:12.6f} {fz:12.6f}\n")
+# def save_stacked_xyz(filename, energies, positions, forces, atom_types):
+#     num_frames, num_atoms, _ = positions.shape
+#     with open(filename,'w') as f:
+#         for i in range(num_frames):
+#             f.write(f"{num_atoms}\n")
+#             f.write(f"{energies[i]:.6f}\n")
+#             for atom,(x,y,z),(fx,fy,fz) in zip(atom_types, positions[i], forces[i]):
+#                 f.write(f"{atom:<2} {x:12.6f} {y:12.6f} {z:12.6f}"
+#                         f" {fx:12.6f} {fy:12.6f} {fz:12.6f}\n")
+
+
+def save_stacked_xyz(filename, E, P, F, atoms, spin_state="single", E_s=None, E_t=None, dE=None, F_s=None, F_t=None):
+    """
+    Saves geometries, energies, and forces to a stacked XYZ file.
+    Supports single state or dual spin state (MACE extxyz format).
+    """
+    with open(filename, "w") as f:
+        for i in range(len(E)):
+            f.write(f"{len(atoms)}\n")
+            
+            if spin_state == "dual":
+                header = (f'Lattice="0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0" '
+                          f'Properties=species:S:1:pos:R:3:f_singlet:R:3:f_triplet:R:3 '
+                          f'config_type=Default pbc="F F F" '
+                          f'E_singlet={E_s[i]:.12f} E_triplet={E_t[i]:.12f} Delta_E={dE[i]:.12f}\n')
+                f.write(header)
+                for j, atom in enumerate(atoms):
+                    pos = P[i, j]
+                    fs, ft = F_s[i, j], F_t[i, j]
+                    f.write(f"{atom} {pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f} "
+                            f"{fs[0]:.6f} {fs[1]:.6f} {fs[2]:.6f} "
+                            f"{ft[0]:.6f} {ft[1]:.6f} {ft[2]:.6f}\n")
+            else:
+                f.write(f"{E[i]:.6f}\n")
+                for atom, (x, y, z), (fx, fy, fz) in zip(atoms, P[i], F[i]):
+                    f.write(f"{atom:<2} {x:12.6f} {y:12.6f} {z:12.6f}"
+                            f" {fx:12.6f} {fy:12.6f} {fz:12.6f}\n")
+
+
+def parse_dual_spin_xyz(filepath):
+    """Parses 10-column dual-state XYZ into numpy arrays."""
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+        
+    E_s_list, E_t_list, dE_list, P_list, F_s_list, F_t_list = [], [], [], [], [], []
+    atoms = None
+    idx = 0
+    energy_re = re.compile(r"E_singlet:\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+"
+                           r"E_triplet:\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+                           r"(?:\s+Delta_E:\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?))?")
+    
+    while idx < len(lines):
+        if not lines[idx].strip():
+            idx += 1
+            continue
+            
+        natoms = int(lines[idx].strip())
+        comment = lines[idx+1].strip()
+        m = energy_re.match(comment)
+        
+        e_s, e_t = float(m.group(1)), float(m.group(2))
+        de = float(m.group(3)) if m.group(3) else (e_s - e_t)
+        
+        E_s_list.append(e_s); E_t_list.append(e_t); dE_list.append(de)
+        
+        current_P, current_Fs, current_Ft, current_atoms = [], [], [], []
+        for i in range(natoms):
+            parts = lines[idx + 2 + i].split()
+            current_atoms.append(parts[0])
+            current_P.append([float(x) for x in parts[1:4]])
+            current_Fs.append([float(x) for x in parts[4:7]])
+            current_Ft.append([float(x) for x in parts[7:10]])
+            
+        P_list.append(current_P); F_s_list.append(current_Fs); F_t_list.append(current_Ft)
+        if atoms is None: atoms = current_atoms 
+        idx += natoms + 2
+        
+    return (np.array(E_s_list), np.array(E_t_list), np.array(dE_list), 
+            np.array(P_list), np.array(F_s_list), np.array(F_t_list), atoms)

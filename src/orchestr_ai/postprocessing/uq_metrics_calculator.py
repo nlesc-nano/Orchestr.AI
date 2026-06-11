@@ -328,6 +328,7 @@ def run_uq_metrics(
     log_path: str | Path = "metrics.log",
     ensemble_size: Optional[int] = None,
     calibrators: Optional[Dict[str, Any]] = None,
+    energy_per_atom: bool = False,
 ) -> Dict:
     """
     Compute, calibrate (variance + isotonic) & log UQ metrics.
@@ -352,6 +353,7 @@ def run_uq_metrics(
     delta_comp = stats.all_force_residuals.reshape(-1)
     delta_atom = stats.force_rmse_per_atom
     delta_energy = stats.delta_E_frame if sigma_energy is not None else None
+    atom_counts_frame = np.asarray(getattr(stats, "atom_counts", []), dtype=float)
 
     frame_mask = stats.train_mask if split.lower() == "train" else stats.eval_mask
     atom_mask = stats._get_atom_mask(frame_mask)
@@ -365,12 +367,21 @@ def run_uq_metrics(
     if delta_energy is not None:
         delta_e = delta_energy[frame_mask]
         sigma_e = sigma_energy[frame_mask]
+        if energy_per_atom:
+            counts_e = atom_counts_frame[frame_mask]
+            if counts_e.size != delta_e.size or np.any(counts_e <= 0):
+                raise ValueError("energy_per_atom=True requires positive atom counts for each frame")
+            delta_e = delta_e / counts_e
+            sigma_e = sigma_e / counts_e
     else:
         delta_e = sigma_e = None
 
     # ========= DEBUG DIAGNOSTICS BEFORE CALIBRATION =========
     def _show_stats(name, arr):
         arrf = np.asarray(arr, dtype=float)
+        if arrf.size == 0:
+            print(f"{name}: n=0, min=nan, med=nan, mean=nan, max=nan")
+            return
         print(f"{name}: n={arrf.size}, min={np.nanmin(arrf):g}, "
               f"p0.1={np.nanpercentile(arrf,0.1):g}, p1={np.nanpercentile(arrf,1):g}, "
               f"p10={np.nanpercentile(arrf,10):g}, med={np.nanmedian(arrf):g}, "
@@ -611,7 +622,10 @@ def run_uq_metrics(
 
     # ------------ LOGGING TO FILE & TERMINAL PRINTING -------------------
     ence_F_vals = [m_raw_F["ENCE_raw"], m_var_F["ENCE_calVAR"], m_iso_F["ENCE_calISO"]]
-    best_F_idx = int(np.argmin(ence_F_vals))
+    if np.isnan(ence_F_vals).all():
+        best_F_idx = 0
+    else:
+        best_F_idx = int(np.nanargmin(ence_F_vals))
     
     banner = (
         f"\n=== UQ EVALUATION ({split.upper()}) ===\n"
@@ -640,7 +654,10 @@ def run_uq_metrics(
 
     if delta_e is not None:
         ence_E_vals = [m_raw_E["ENCE_raw_E"], m_var_E["ENCE_calVAR_E"], m_iso_E["ENCE_calISO_E"]]
-        best_E_idx = int(np.argmin(ence_E_vals))
+        if np.isnan(ence_E_vals).all():
+            best_E_idx = 0
+        else:
+            best_E_idx = int(np.nanargmin(ence_E_vals))
         energy_raw_verdict = qualitative_label(m_raw_E['ENCE_raw_E'], "ENCE_raw_E")
 
         if energy_raw_verdict == "good":
@@ -734,7 +751,7 @@ def run_uq_metrics(
             # Forces
             delta_comp=delta_c,
             sigma_comp_uncal=sigma_c,
-            sigma_comp_cal_var=sigma_c_cal_var,
+            sigma_comp_cal_var=sigma_c_cal_var, 
             sigma_comp_cal_iso=sigma_c_cal_iso,
             # Energies
             delta_energy=delta_e,
@@ -788,6 +805,8 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
     set_uq: str = "ensemble",
     log_file: str = "metrics.log",
     ensemble_size: Optional[int] = None,
+    calibrators: Optional[Dict[str, Any]] = None,
+    energy_per_atom: bool = False,
 ):
     """Thin wrapper that forwards to :func:`run_uq_metrics`.
 
@@ -804,5 +823,6 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
         tag=set_uq,
         log_path=log_file,
         ensemble_size=ensemble_size,
+        calibrators=calibrators,
+        energy_per_atom=energy_per_atom,
     )
-

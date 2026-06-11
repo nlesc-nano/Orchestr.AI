@@ -12,13 +12,14 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import traceback # Make sure traceback is imported
+from types import MethodType
 
 from pathlib import Path
 from ase import units
 from ase.io import write
-from ase.io.extxyz import write_extxyz
 from ase.md import VelocityVerlet, Langevin
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
+from ase.neighborlist import neighbor_list
 from ase.optimize import BFGSLineSearch
 from ase.vibrations import Vibrations
 from ase.calculators.calculator import Calculator, all_changes
@@ -71,17 +72,47 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                     model.z_table = z_table
                 else:
                     z_table = val
-                break
+                break    
 
-        # 2. Return the official calculator using the correct plural 'models' keyword
-        # We pass the model inside a list as MACE expects for ensembles or single models.
+        # 2. Return the official calculator using the correct plural 'models' keyword.
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        if mace_head == "triplet_reconstructed":
+            from orchestr_ai.postprocessing.calculators.mace_calculator import (
+                ReconstructedMACECalculator,
+            )
+            scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+            if not scale_metadata_path:
+                scale_metadata_path = "mace_scale_metadata.json"
+
+            return ReconstructedMACECalculator(
+                model=model,
+                device=device,
+                scale_metadata_path=scale_metadata_path,
+            )
+
         try:
             import cuequivariance_torch
             cueq = True
         except ImportError:
             cueq = False
         
-        return MACECalculator(models=[model], device=str(device), default_dtype="float32", enable_cueq=cueq)
+        kwargs = {
+            "models": [model],
+            "device": str(device),
+            "default_dtype": "float32",
+            "enable_cueq": cueq,
+        }
+
+        if mace_head:
+            print(f"[MACE] Requested head from config: {mace_head}")
+            kwargs["head"] = mace_head
+        else:
+            print("[MACE] No mace_head specified. Using MACE default head.")
+
+        return MACECalculator(**kwargs)
 
     elif framework in {"nequip", "allegro"}:
         from nequip.ase import NequIPCalculator
@@ -100,6 +131,157 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         )
     else:
         raise ValueError(f"Unknown framework: {framework}")
+
+
+def _enable_calculator_profiling(calc, *, label="calculator", sync_cuda=False):
+    """Attach low-overhead call counting/timing to an ASE calculator instance."""
+    if getattr(calc, "_orchestr_profile_enabled", False):
+        return calc
+
+    original_calculate = calc.calculate
+    profile = {
+        "label": label,
+        "calls": 0,
+        "total_s": 0.0,
+        "last_s": 0.0,
+        "max_s": 0.0,
+        "last_print_calls": 0,
+        "last_print_total_s": 0.0,
+        "sync_cuda": bool(sync_cuda),
+    }
+
+    def profiled_calculate(self, *args, **kwargs):
+        if sync_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        start = time.perf_counter()
+        try:
+            return original_calculate(*args, **kwargs)
+        finally:
+            if sync_cuda and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            elapsed = time.perf_counter() - start
+            profile["calls"] += 1
+            profile["total_s"] += elapsed
+            profile["last_s"] = elapsed
+            if elapsed > profile["max_s"]:
+                profile["max_s"] = elapsed
+
+    calc.calculate = MethodType(profiled_calculate, calc)
+    calc._orchestr_profile = profile
+    calc._orchestr_profile_enabled = True
+    print(
+        f"[MD-PROFILE] Enabled {label} calculate() profiler "
+        f"(sync_cuda={bool(sync_cuda)})."
+    )
+    return calc
+
+
+def _get_structure_profile(atoms, cutoff):
+    """Return cheap structural diagnostics for MD profiling."""
+    min_distance = np.nan
+    edge_count = -1
+
+    try:
+        if len(atoms) > 1:
+            use_mic = bool(np.any(atoms.get_pbc()))
+            distances = atoms.get_all_distances(mic=use_mic)
+            distances[distances <= 0.0] = np.inf
+            min_distance = float(np.min(distances))
+    except Exception:
+        min_distance = np.nan
+
+    try:
+        if cutoff and cutoff > 0:
+            # ASE returns directed i->j pairs; this still tracks neighbor-graph size.
+            edge_count = int(len(neighbor_list("i", atoms, cutoff)))
+    except Exception:
+        edge_count = -1
+
+    return min_distance, edge_count
+
+
+def _print_calculator_profile(
+    calc,
+    dyn,
+    atoms,
+    write_queue=None,
+    cutoff=None,
+    profile_file=None,
+    print_to_screen=True,
+):
+    """Emit a profiler snapshot without calling energy/force getters."""
+    profile = getattr(calc, "_orchestr_profile", None)
+    if not profile:
+        return
+
+    calls = profile["calls"]
+    total_s = profile["total_s"]
+    delta_calls = calls - profile["last_print_calls"]
+    delta_s = total_s - profile["last_print_total_s"]
+    avg_s = total_s / calls if calls else 0.0
+    delta_avg_s = delta_s / delta_calls if delta_calls else 0.0
+
+    profile["last_print_calls"] = calls
+    profile["last_print_total_s"] = total_s
+
+    queue_size = "n/a"
+    if write_queue is not None:
+        try:
+            queue_size = str(write_queue.qsize())
+        except Exception:
+            queue_size = "unknown"
+
+    allocated_mb = np.nan
+    reserved_mb = np.nan
+    max_allocated_mb = np.nan
+    cuda_msg = "cuda=n/a"
+    if torch.cuda.is_available():
+        allocated_mb = torch.cuda.memory_allocated() / 1024**2
+        reserved_mb = torch.cuda.memory_reserved() / 1024**2
+        max_allocated_mb = torch.cuda.max_memory_allocated() / 1024**2
+        cuda_msg = (
+            f"cuda_alloc={allocated_mb:.1f}MB "
+            f"cuda_reserved={reserved_mb:.1f}MB "
+            f"cuda_max_alloc={max_allocated_mb:.1f}MB"
+        )
+
+    step = dyn.get_number_of_steps()
+    min_distance, edge_count = _get_structure_profile(atoms, cutoff)
+    line = (
+        f"[MD-PROFILE] step={step} "
+        f"{profile['label']}_calls={calls} delta_calls={delta_calls} "
+        f"last_calc={profile['last_s']:.6f}s "
+        f"avg_calc={avg_s:.6f}s delta_avg={delta_avg_s:.6f}s "
+        f"max_calc={profile['max_s']:.6f}s queue={queue_size} "
+        f"min_dist={min_distance:.4f}A edges={edge_count} {cuda_msg}"
+    )
+
+    if profile_file:
+        try:
+            fresh = not Path(profile_file).exists() or Path(profile_file).stat().st_size == 0
+            with open(profile_file, "a") as fh:
+                if fresh:
+                    fh.write(
+                        "# step calls delta_calls last_calc_s avg_calc_s "
+                        "delta_avg_s max_calc_s queue cuda_alloc_MB "
+                        "cuda_reserved_MB cuda_max_alloc_MB min_distance_A "
+                        "neighbor_edges\n"
+                    )
+                fh.write(
+                    f"{step} {calls} {delta_calls} "
+                    f"{profile['last_s']:.6f} {avg_s:.6f} "
+                    f"{delta_avg_s:.6f} {profile['max_s']:.6f} "
+                    f"{queue_size} {allocated_mb:.1f} {reserved_mb:.1f} "
+                    f"{max_allocated_mb:.1f} {min_distance:.6f} "
+                    f"{edge_count}\n"
+                )
+        except IOError as exc:
+            print(f"Warning: Failed to write MD profile line: {exc}", flush=True)
+
+    if print_to_screen:
+        print(line, flush=True)
 
 def _reset_timers():
     """
@@ -298,41 +480,135 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
 
 def _log_status_line(log_file, header, fmt, values):
     """Append one nicely formatted line to *log_file* (create if absent)."""
+    if log_file and hasattr(log_file, "put"):
+        # Push message to background thread queue
+        log_file.put(("log", (header, fmt, values)))
+        return
+
     line = fmt.format(*values)
-    if log_file:
-        fresh = not Path(log_file).exists()
+    if not log_file:
+        print(header)
+        print(line)
+        return
+
+    if isinstance(log_file, (str, Path)):
+        fresh = not Path(log_file).exists() or Path(log_file).stat().st_size == 0
         with open(log_file, "a") as fh:
             if fresh:
                 fh.write(header + "\n")
             fh.write(line + "\n")
-    else:                       # fall back to console
-        print(header)
-        print(line)
+    else:
+        # It's an open file handle
+        try:
+            is_empty = log_file.tell() == 0
+        except Exception:
+            is_empty = False
+        if is_empty:
+            log_file.write(header + "\n")
+        log_file.write(line + "\n")
+        log_file.flush()
 
 
-def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, traj_file):
-    """Append one extended-XYZ frame (with forces) to *traj_file*."""
-    if not traj_file:
+def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, file_handle):
+    """Append one extended-XYZ frame with positions, velocities, and forces."""
+    if not file_handle:
         return
-    forces = atoms.get_forces()
-    positions = atoms.get_positions()
-    symbols = atoms.get_chemical_symbols()
 
-    with open(traj_file, "a") as fh:
-        fh.write(f"{len(atoms)}\n")
-        fh.write(
-            f"Step = {step}, MD time = {md_time:.2f} fs, "
-            f"T_set = {T_set:.1f} K, Friction = {friction:.6f} fs⁻¹, "
-            f"Epot (eV) = {e_pot:.8f}\n"
-        )
-        for i, sym in enumerate(symbols):
-            x, y, z = positions[i]
-            fx, fy, fz = forces[i]
-            fh.write(
-                f"{sym:<2s} "
-                f"{x:15.8f} {y:15.8f} {z:15.8f} "
-                f"{fx:15.8f} {fy:15.8f} {fz:15.8f}\n"
-            )
+    frame = atoms.copy()
+    velocities = atoms.get_velocities()
+    if velocities is None:
+        velocities = np.full((len(atoms), 3), np.nan, dtype=float)
+
+    frame.set_array("velocities", np.asarray(velocities, dtype=float))
+    frame.set_array("forces", np.asarray(atoms.get_forces(), dtype=float))
+    frame.info.update(
+        {
+            "step": int(step),
+            "time_fs": float(md_time),
+            "temperature_set_K": float(T_set) if np.isfinite(T_set) else np.nan,
+            "friction_fs_inv": float(friction),
+            "energy": float(e_pot),
+        }
+    )
+
+    try:
+        write(file_handle, frame, format="extxyz")
+        file_handle.flush()
+    except IOError as exc:
+        print(f"Warning: Failed to write MD trajectory frame {step}: {exc}")
+
+def _load_scale_metadata(config):
+    """Loads scale factor k_E from mace_scale_metadata.json (or config override) if available."""
+    if not isinstance(config, dict):
+        return None
+    import json
+    import os
+    scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+    if not scale_metadata_path:
+        scale_metadata_path = "mace_scale_metadata.json"
+    if os.path.exists(scale_metadata_path):
+        try:
+            with open(scale_metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            return float(meta.get("k_E", 1.0))
+        except Exception as e:
+            print(f"Warning: Failed to load scale metadata from {scale_metadata_path}: {e}")
+    return None
+
+def _get_other_head_energy(atoms, other_head, config):
+    """
+    Safely calculates or retrieves potential energy for other_head.
+    Restores the original calculator head and results to keep MD forces/cache intact.
+    """
+    if atoms.calc is None:
+        return np.nan
+
+    # If it is ReconstructedMACECalculator, we might already have the cached energies:
+    calc_results = getattr(atoms.calc, "results", {})
+    if other_head == "singlet" and "energy_singlet" in calc_results:
+        return calc_results["energy_singlet"]
+    if other_head == "triplet_reconstructed" and "energy_triplet_reconstructed" in calc_results:
+        return calc_results["energy_triplet_reconstructed"]
+
+    reconstruct_triplet = (other_head == "triplet_reconstructed" or other_head == "triplet")
+
+    try:
+        # Save original calculator state
+        old_results = dict(atoms.calc.results) if hasattr(atoms.calc, "results") else {}
+        old_head = getattr(atoms.calc, "head", None)
+
+        from ase.calculators.calculator import all_changes
+        
+        # Calculate energy for delta or standard head
+        target_head = "delta" if (reconstruct_triplet and not hasattr(atoms.calc, "available_heads")) else other_head
+        if hasattr(atoms.calc, "available_heads") and target_head not in atoms.calc.available_heads:
+            if target_head == "triplet_reconstructed" and "delta" in atoms.calc.available_heads:
+                target_head = "delta"
+
+        atoms.calc.head = target_head
+        atoms.calc.calculate(atoms, properties=["energy"], system_changes=all_changes)
+        calculated_energy = atoms.calc.results.get("energy", np.nan)
+
+        if reconstruct_triplet and target_head == "delta":
+            k_E = _load_scale_metadata(config)
+            if k_E is not None and old_results.get("energy") is not None:
+                E_singlet = old_results["energy"]
+                E_delta = calculated_energy
+                calculated_energy = E_singlet - (E_delta / k_E)
+            else:
+                calculated_energy = np.nan
+
+        return calculated_energy
+
+    except Exception as e:
+        print(f"Warning: Failed to compute energy for other head '{other_head}': {e}")
+        return np.nan
+    finally:
+        # Restore original calculator state
+        if old_head is not None:
+            atoms.calc.head = old_head
+        if hasattr(atoms.calc, "results"):
+            atoms.calc.results = old_results
 
 def print_md_status(
     dyn,
@@ -340,6 +616,7 @@ def print_md_status(
     log_file,
     dt_fs,
     friction,
+    config=None,
 ):
     """
     Log one line with energies, timing, etc.  **Do not** write XYZ here –
@@ -356,42 +633,267 @@ def print_md_status(
     md_time = step * dt_fs
     e_pot = atoms.get_potential_energy()
     e_kin = atoms.get_kinetic_energy()
+    e_tot = e_pot + e_kin
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
     T_set = getattr(dyn, "temperature_K", np.nan)
 
-    # optional extras from calculator -------------------------------------------------
-    calc_results = getattr(atoms.calc, "results", {})
-    E_ml_only   = calc_results.get("E_ml_avg",      np.nan)
-    E_coul      = calc_results.get("coul_fn_energy", np.nan)
-    ml_time     = calc_results.get("ml_time",       0.0)
-    coul_fn_time = calc_results.get("coul_fn_time", 0.0)
+    # Compute max force
+    try:
+        forces = atoms.get_forces()
+        max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
+    except Exception:
+        max_force = np.nan
 
-    header = (
-        f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
-        f"{'Friction':>10} | {'Epot(eV)':>11} | {'Ekin(eV)':>11} | "
-        f"{'E_ML(eV)':>10} | {'E_Coul(eV)':>11} | {'ML_t(s)':>8} | "
-        f"{'Coul_t(s)':>9} | {'dt(s)':>8} | {'cum(s)':>9}"
-    )
-    fmt = (
-        "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | {:10.6f} | "
-        "{:11.6f} | {:11.6f} | {:10.6f} | {:11.6f} | "
-        "{:8.4f} | {:9.4f} | {:8.4f} | {:9.4f}"
-    )
+    # Compute simulated steps per second -> ns/day
+    step_diff = step - getattr(print_md_status, "last_step", 0)
+    print_md_status.last_step = step
+
+    if step_time > 0 and step_diff > 0:
+        speed = (step_diff * dt_fs * 0.0864) / step_time
+    else:
+        speed = 0.0
+
+    # Helper to rename long head name
+    def log_name(h):
+        if h == "triplet_reconstructed":
+            return "trip_delta"
+        return h
+
+    # Detect multi-head MACE run
+    is_mace = False
+    if config is not None:
+        framework = config.get("model_framework", "").lower()
+        if framework == "mace":
+            is_mace = True
+
+    has_multihead = False
+    selected_head = None
+    other_head = None
+    available_heads = []
+
+    if is_mace and atoms.calc is not None:
+        if hasattr(atoms.calc, "models") and len(atoms.calc.models) > 0:
+            available_heads = getattr(atoms.calc.models[0], "heads", [])
+        if not available_heads and hasattr(atoms.calc, "available_heads"):
+            available_heads = atoms.calc.available_heads
+        
+        if available_heads:
+            available_heads = [h.strip() for h in available_heads if isinstance(h, str)]
+
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        is_reconstructed = (mace_head == "triplet_reconstructed")
+        is_multi_model = ("singlet" in available_heads and ("triplet" in available_heads or "delta" in available_heads))
+        
+        if is_reconstructed or is_multi_model:
+            has_multihead = True
+            selected_head = mace_head if mace_head else "singlet"
+
+            if selected_head == "singlet":
+                other_head = "triplet" if "triplet" in available_heads else "delta"
+            elif selected_head == "triplet":
+                other_head = "singlet"
+            elif selected_head == "delta":
+                other_head = "singlet"
+            elif selected_head == "triplet_reconstructed":
+                other_head = "singlet"
+            else:
+                other_head = "singlet" if "singlet" in available_heads else None
+
+            if other_head == "delta":
+                k_E = _load_scale_metadata(config)
+                if k_E is not None:
+                    other_head = "triplet_reconstructed"
+
+    epot_other = np.nan
+    if has_multihead and other_head:
+        epot_other = _get_other_head_energy(atoms, other_head, config)
+
+    # Compute delta_gap = Epot_singlet - Epot_triplet
+    delta_gap = np.nan
+    if has_multihead and other_head:
+        e_singlet_val = np.nan
+        e_triplet_val = np.nan
+        
+        # Check active/selected head
+        if selected_head == "singlet":
+            e_singlet_val = e_pot
+        elif selected_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = e_pot
+            
+        # Check other head
+        if other_head == "singlet":
+            e_singlet_val = epot_other
+        elif other_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = epot_other
+            
+        if not np.isnan(e_singlet_val) and not np.isnan(e_triplet_val):
+            delta_gap = e_singlet_val - e_triplet_val
+
+    if has_multihead and other_head:
+        col1_name = f"Epot_{log_name(selected_head)}(eV)"
+        col2_name = f"Epot_{log_name(other_head)}(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_ekin_str = f"{e_kin:.6f}"
+        val_etot_str = f"{e_pot + e_kin:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_epot_other_str = f"{epot_other:.6f}"
+        val_delta_gap_str = f"{delta_gap:.6f}"
+        
+        col1_w = max(11, len(col1_name), len(val_epot_str))
+        ekin_w = max(11, len("Ekin(eV)"), len(val_ekin_str))
+        etot_w = max(11, len("Etot(eV)"), len(val_etot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        col2_w = max(11, len(col2_name), len(val_epot_other_str))
+        gap_w = max(13, len("delta_gap(eV)"), len(val_delta_gap_str))
+
+        header = (
+            f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+            f"{col1_name:>{col1_w}} | {'Ekin(eV)':>{ekin_w}} | {'Etot(eV)':>{etot_w}} | "
+            f"{'MaxForce(eV/A)':>{force_w}} | {'dt(s)':>8} | {col2_name:>{col2_w}} | "
+            f"{'delta_gap(eV)':>{gap_w}} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
+        )
+        fmt = (
+            "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+            f"{{:{col1_w}.6f}} | {{:{ekin_w}.6f}} | {{:{etot_w}.6f}} | "
+            f"{{:{force_w}.6f}} | {{:8.4f}} | {{:{col2_w}.6f}} | "
+            f"{{:{gap_w}.6f}} | {{:9.4f}} | {{:13.4f}}"
+        )
+        values = (
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_pot + e_kin,
+            max_force, step_time, epot_other,
+            delta_gap, cumulative_time, speed
+        )
+    else:
+        col_name = f"Epot_{log_name(selected_head)}(eV)" if selected_head else "Epot(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_ekin_str = f"{e_kin:.6f}"
+        val_etot_str = f"{e_pot + e_kin:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        
+        col_w = max(11, len(col_name), len(val_epot_str))
+        ekin_w = max(11, len("Ekin(eV)"), len(val_ekin_str))
+        etot_w = max(11, len("Etot(eV)"), len(val_etot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+
+        header = (
+            f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+            f"{col_name:>{col_w}} | {'Ekin(eV)':>{ekin_w}} | {'Etot(eV)':>{etot_w}} | "
+            f"{'MaxForce(eV/A)':>{force_w}} | {'dt(s)':>8} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
+        )
+        fmt = (
+            "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+            f"{{:{col_w}.6f}} | {{:{ekin_w}.6f}} | {{:{etot_w}.6f}} | "
+            f"{{:{force_w}.6f}} | {{:8.4f}} | {{:9.4f}} | {{:13.4f}}"
+        )
+        values = (
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_pot + e_kin,
+            max_force, step_time, cumulative_time, speed
+        )
 
     _log_status_line(
         log_file,
         header,
         fmt,
-        (
-            step, md_time, temp_inst, T_set, friction,
-            e_pot, atoms.get_kinetic_energy(),
-            E_ml_only, E_coul,
-            ml_time, coul_fn_time,
-            step_time, cumulative_time,
-        ),
+        values,
     )
 
 
+
+
+from threading import Thread
+from queue import Queue
+
+class MDWriterThread(Thread):
+    """
+    Background worker thread to write trajectory frames and status logs asynchronously,
+    preventing disk I/O operations from blocking the main simulation integration loop.
+    """
+    def __init__(self, traj_file, log_file, q):
+        super().__init__(daemon=True)
+        self.traj_file = traj_file
+        self.log_file = log_file
+        self.q = q
+
+    def run(self):
+        from contextlib import ExitStack
+        from ase import Atoms
+        from ase.io import write
+        
+        with ExitStack() as stack:
+            f_out = None
+            f_log = None
+            
+            if self.traj_file:
+                try:
+                    f_out = stack.enter_context(open(self.traj_file, "a"))
+                except IOError as exc:
+                    print(f"Warning: Background writer failed to open trajectory file {self.traj_file}: {exc}")
+                    
+            if self.log_file:
+                try:
+                    f_log = stack.enter_context(open(self.log_file, "a"))
+                except IOError as exc:
+                    print(f"Warning: Background writer failed to open log file {self.log_file}: {exc}")
+                    
+            # Track if log file header needs to be written
+            fresh_log = False
+            if self.log_file:
+                try:
+                    fresh_log = not Path(self.log_file).exists() or Path(self.log_file).stat().st_size == 0
+                except Exception:
+                    fresh_log = True
+
+            while True:
+                try:
+                    msg_type, msg_data = self.q.get()
+                except Exception:
+                    break
+                
+                if msg_type == "stop":
+                    self.q.task_done()
+                    break
+                    
+                elif msg_type == "traj":
+                    if f_out:
+                        symbols, positions, velocities, forces, info = msg_data
+                        frame = Atoms(symbols=symbols, positions=positions)
+                        if velocities is not None:
+                            frame.set_array("velocities", velocities)
+                        if forces is not None:
+                            frame.set_array("forces", forces)
+                        frame.info.update(info)
+                        
+                        try:
+                            write(f_out, frame, format="extxyz")
+                            f_out.flush()
+                        except Exception as exc:
+                            print(f"Warning: Background writer failed to write traj frame: {exc}")
+                            
+                elif msg_type == "log":
+                    header, fmt, values = msg_data
+                    line = fmt.format(*values)
+                    
+                    if f_log:
+                        try:
+                            if fresh_log:
+                                f_log.write(header + "\n")
+                                fresh_log = False
+                            f_log.write(line + "\n")
+                            f_log.flush()
+                        except Exception as exc:
+                            print(f"Warning: Background writer failed to write status line: {exc}")
+                    else:
+                        print(header)
+                        print(line)
+                        
+                self.q.task_done()
 
 
 def run_md(atoms, model_obj, device, config, neighbor_list=None):
@@ -408,11 +910,30 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     radius        = md.get("confinement_radius", 10.0)
     force_constant= md.get("confinement_force",  0.05)
     center        = md.get("confinement_center",  None)
+    framework     = config.get("model_framework", "schnetpack").lower()
+    cutoff        = config.get("cutoff", md.get("cutoff"))
 
     # -----------------------------------------------------------------
     #  calculator + starting velocities (preventing zero kinetic energy)
     # -----------------------------------------------------------------
     calc = get_ase_calculator(model_obj, config, device, neighbor_list)
+    profile_mace = bool(md.get("profile_mace", framework == "mace"))
+    profile_interval = int(md.get("profile_interval", log_int if log_int else 50))
+    profile_sync_cuda = bool(md.get("profile_sync_cuda", False))
+    profile_file = md.get("profile_file")
+    profile_print = bool(md.get("profile_print", profile_file is None))
+    cleanup_interval = int(md.get("clear_cuda_cache_interval", 0) or 0)
+    remove_translation = bool(md.get("remove_translation", False))
+    remove_rotation = bool(md.get("remove_rotation", False))
+    remove_drift_interval = int(md.get("remove_drift_interval", 100) or 0)
+
+    if framework == "mace" and profile_mace:
+        calc = _enable_calculator_profiling(
+            calc,
+            label="mace",
+            sync_cuda=profile_sync_cuda,
+        )
+
     
     if md.get("reactor", False):
         print(f"Using spherical confinement with radius {radius} Å and force {force_constant} eV/Å.")
@@ -493,35 +1014,134 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         # Execute once at step 0 to ensure initialization starts at T_start
         ramp_callback()
 
-    # -----------------------------------------------------------------
-    #  callbacks
-    # -----------------------------------------------------------------
-    dyn.attach(
-        lambda: print_md_status(
-            dyn, atoms, log_file, dt_fs, gamma_fs
-        ),
-        interval=log_int,
-    )
+    if (remove_translation or remove_rotation) and remove_drift_interval > 0:
+        def remove_drift_callback():
+            if remove_translation:
+                Stationary(atoms, preserve_temperature=True)
+            if remove_rotation:
+                ZeroRotation(atoms, preserve_temperature=True)
 
-    if traj_file and xyz_int > 0:
-        dyn.attach(
-            lambda: _write_xyz_frame(
-                atoms,
-                dyn.get_number_of_steps(),
-                dyn.get_number_of_steps() * dt_fs,
-                getattr(dyn, "temperature_K", np.nan),
-                gamma_fs,
-                atoms.get_potential_energy(),
-                traj_file,
-            ),
-            interval=xyz_int,
+        remove_drift_callback()
+        dyn.attach(remove_drift_callback, interval=remove_drift_interval)
+        active = []
+        if remove_translation:
+            active.append("translation")
+        if remove_rotation:
+            active.append("rotation")
+        print(
+            f"MD drift removal enabled: removing {' and '.join(active)} "
+            f"every {remove_drift_interval} steps."
         )
 
     # -----------------------------------------------------------------
-    #  run!
+    #  callbacks & run!
     # -----------------------------------------------------------------
-    print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
-    dyn.run(nsteps)
+    from queue import Queue
+    import gc
+
+    if cleanup_interval > 0:
+        def periodic_cleanup():
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        dyn.attach(periodic_cleanup, interval=cleanup_interval)
+        print(
+            f"MD cleanup enabled: clearing Python/CUDA caches every "
+            f"{cleanup_interval} steps."
+        )
+
+    # Start background writer thread if writing/logging is enabled
+    use_writer = (traj_file and xyz_int > 0) or log_file
+    if use_writer:
+        write_queue = Queue()
+        writer_thread = MDWriterThread(traj_file, log_file, write_queue)
+        writer_thread.start()
+
+        if framework == "mace" and profile_mace and profile_interval > 0:
+            dyn.attach(
+                lambda: _print_calculator_profile(
+                    calc,
+                    dyn,
+                    atoms,
+                    write_queue,
+                    cutoff=cutoff,
+                    profile_file=profile_file,
+                    print_to_screen=profile_print,
+                ),
+                interval=profile_interval,
+            )
+
+        # Attach log status callback (using write_queue for async logging)
+        if log_file:
+            dyn.attach(
+                lambda: print_md_status(
+                    dyn, atoms, write_queue, dt_fs, gamma_fs, config=config
+                ),
+                interval=log_int,
+            )
+
+        # Attach trajectory print callback
+        if traj_file and xyz_int > 0:
+            def async_write_xyz_frame():
+                step = dyn.get_number_of_steps()
+                md_time = step * dt_fs
+                T_set = getattr(dyn, "temperature_K", np.nan)
+                
+                velocities = atoms.get_velocities()
+                if velocities is not None:
+                    velocities = velocities.copy()
+                    
+                forces = atoms.get_forces()
+                if forces is not None:
+                    forces = forces.copy()
+                    
+                info = {
+                    "step": int(step),
+                    "time_fs": float(md_time),
+                    "temperature_set_K": float(T_set) if np.isfinite(T_set) else np.nan,
+                    "friction_fs_inv": float(gamma_fs),
+                    "energy": float(atoms.get_potential_energy()),
+                }
+                
+                write_queue.put((
+                    "traj", 
+                    (
+                        atoms.get_chemical_symbols(),
+                        atoms.get_positions().copy(),
+                        velocities,
+                        forces,
+                        info
+                    )
+                ))
+
+            dyn.attach(async_write_xyz_frame, interval=xyz_int)
+
+        try:
+            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+            dyn.run(nsteps)
+        finally:
+            # Signal the background writer thread to flush and stop
+            write_queue.put(("stop", None))
+            writer_thread.join()
+    else:
+        if framework == "mace" and profile_mace and profile_interval > 0:
+            dyn.attach(
+                lambda: _print_calculator_profile(
+                    calc,
+                    dyn,
+                    atoms,
+                    cutoff=cutoff,
+                    profile_file=profile_file,
+                    print_to_screen=profile_print,
+                ),
+                interval=profile_interval,
+            )
+
+        # No files to write or log, run standard
+        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+        dyn.run(nsteps)
+
     print("MD finished.")
 
 
