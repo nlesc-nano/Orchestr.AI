@@ -608,17 +608,17 @@ class _PoolActiveLearner:
 
             for i in win_good:
                 # 1. Energy Mean check
-                if self.mu_E_atom_pool[i] >= self.thr_E_hi_atom:
-                    drop_E_hi += 1
-                    continue
-                win_E.append(i)
+                #if self.mu_E_atom_pool[i] >= self.thr_E_hi_atom:
+                #    drop_E_hi += 1
+                #    continue
+                #win_E.append(i)
                 
                 # 2. Confidence Interval overlap check
-                if not ((self.E_hi_pool_atom[i] >= (self.mu_E_atom_train.min() - self.allowed_offset_eff)) and
-                        (self.E_lo_pool_atom[i] <= (self.mu_E_atom_train.max() + self.allowed_offset_eff))):
-                    drop_CI += 1
-                    continue
-                win_CI.append(i)
+                #if not ((self.E_hi_pool_atom[i] >= (self.mu_E_atom_train.min() - self.allowed_offset_eff)) and
+                #        (self.E_lo_pool_atom[i] <= (self.mu_E_atom_train.max() + self.allowed_offset_eff))):
+                #    drop_CI += 1
+                #    continue
+                #win_CI.append(i)
                 
                 # 3. Physics / Uncertainty upper bounds (The "Ceiling")
                 if self.sigma_E_atom_pool[i] >= self.thr_sigma_E_hi_eff:
