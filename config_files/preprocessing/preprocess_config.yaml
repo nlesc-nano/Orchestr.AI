@@ -49,6 +49,24 @@ dataset:
     target_energy_key: "E_triplet"
     target_forces_key: "f_triplet"
     output_meta_json: "mace_scale_metadata.json"
+
+  # --- Option C: Merge, Sample, and Globally Center Multiple Files ---
+  # If enabled: pools files, picks equally-spaced frames, merges them,
+  # auto-detects largest system size for a global cubic box, centers all atoms,
+  # and writes standardized headers for single or dual-spin state MACE setups.
+  merge_and_center:
+    enabled: false
+    only_merge_and_center: false # If true, runs only centering/headers and exits early.
+
+    # Files can be listed as a YAML array or a comma-separated string:
+    # pool_files: "file1.xyz, file2.xyz"
+    pool_files: []
+    num_picked: 325 # Number of equally spaced frames to pick (0 or null to keep all)
+
+    # Files to load in full (no sampling) and merge:
+    # merge_files: []
+    merge_files: []
+    output_file: "final_centered_merged_dataset.xyz"
 # ───────────────────────────────────────────────
 # Optional SOAP descriptor settings
 # (You can safely remove this section to let MLFF-QD

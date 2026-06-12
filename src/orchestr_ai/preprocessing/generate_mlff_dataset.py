@@ -18,6 +18,21 @@ def main():
 
     # Resolve dataset inputs: prefer input_file; otherwise construct stacked XYZ from pos/frc.
     ds = cfg.get("dataset", {})
+
+    # Pre-step: Merge and Center datasets
+    merge_and_center_cfg = ds.get("merge_and_center", {})
+    if merge_and_center_cfg.get("enabled", False):
+        logger.info("Dataset merging and global centering is enabled.")
+        from orchestr_ai.utils.merge_and_center import run_merge_and_center
+        output_file = run_merge_and_center(merge_and_center_cfg, spin_state=ds.get("spin_state", "single"))
+        
+        if merge_and_center_cfg.get("only_merge_and_center", False):
+            logger.info("only_merge_and_center is active. Exiting pipeline early.")
+            return
+            
+        ds["input_file"] = output_file
+        logger.info(f"Updated dataset.input_file to: {output_file}")
+
     input_file = ds.get("input_file")
     pos_file   = ds.get("pos_file")
     frc_file   = ds.get("frc_file")

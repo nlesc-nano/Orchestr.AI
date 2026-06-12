@@ -292,9 +292,10 @@ def parse_dual_spin_xyz(filepath):
     E_s_list, E_t_list, dE_list, P_list, F_s_list, F_t_list = [], [], [], [], [], []
     atoms = None
     idx = 0
-    energy_re = re.compile(r"E_singlet:\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s+"
-                           r"E_triplet:\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
-                           r"(?:\s+Delta_E:\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?))?")
+    # Pre-compile regexes to safely parse energies supporting both '=' and ':' anywhere in comment line
+    e_s_re = re.compile(r"E_singlet[:=]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
+    e_t_re = re.compile(r"E_triplet[:=]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
+    de_re  = re.compile(r"Delta_E[:=]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
     
     while idx < len(lines):
         if not lines[idx].strip():
@@ -303,10 +304,17 @@ def parse_dual_spin_xyz(filepath):
             
         natoms = int(lines[idx].strip())
         comment = lines[idx+1].strip()
-        m = energy_re.match(comment)
         
-        e_s, e_t = float(m.group(1)), float(m.group(2))
-        de = float(m.group(3)) if m.group(3) else (e_s - e_t)
+        e_s_match = e_s_re.search(comment)
+        e_t_match = e_t_re.search(comment)
+        de_match  = de_re.search(comment)
+        
+        if not e_s_match or not e_t_match:
+            raise ValueError(f"Could not parse singlet/triplet energies from comment line: {comment}")
+            
+        e_s = float(e_s_match.group(1))
+        e_t = float(e_t_match.group(1))
+        de = float(de_match.group(1)) if de_match else (e_s - e_t)
         
         E_s_list.append(e_s); E_t_list.append(e_t); dE_list.append(de)
         
