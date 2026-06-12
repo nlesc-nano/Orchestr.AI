@@ -391,7 +391,6 @@ class DatasetManager:
         
     def load_datasets(self):
         print("\n--- Setting up Datasets ---")
-        assert self.eval_path and os.path.exists(self.eval_path), f"Eval file not found: {self.eval_path}"
         
         # Retrieve configuration-driven mappings or fallbacks, ensuring DEFAULT_MACE_HEADS_MAP is preserved as fallback keys
         mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
@@ -400,7 +399,6 @@ class DatasetManager:
             if head_name not in mace_heads_map:
                 mace_heads_map[head_name] = {}
             mace_heads_map[head_name].update(head_cfg)
-
             
         mace_head = self.config.get("mace_head", None)
         
@@ -419,12 +417,7 @@ class DatasetManager:
         triplet_cfg = mace_heads_map.get("triplet", {})
         t_e_key = triplet_cfg.get("energy_key", "E_triplet")
         t_f_key = triplet_cfg.get("forces_key", "f_triplet")
-        val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval", energy_key=energy_key, forces_key=forces_key)
-        val_E_singlet, val_F_singlet, _ = parse_extxyz(self.eval_path, "eval_singlet", energy_key=s_e_key, forces_key=s_f_key)
-        val_E_triplet, val_F_triplet, _ = parse_extxyz(self.eval_path, "eval_triplet", energy_key=t_e_key, forces_key=t_f_key)
-        
-        val_frames = read(self.eval_path, index=":", format="extxyz")
-        
+
         train_frames, train_E, train_F, train_pos = [], [], [], []
         train_E_singlet, train_E_triplet = [], []
         train_F_singlet, train_F_triplet = [], []
@@ -438,8 +431,12 @@ class DatasetManager:
             raise FileNotFoundError(f"Eval file not found: {self.eval_path}")
 
         val_frames, val_E, val_F, val_pos = [], [], [], []
+        val_E_singlet, val_F_singlet = [], []
+        val_E_triplet, val_F_triplet = [], []
         if self.eval_path and os.path.exists(self.eval_path) and not self._same_train_eval_file():
-            val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval")
+            val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval", energy_key=energy_key, forces_key=forces_key)
+            val_E_singlet, val_F_singlet, _ = parse_extxyz(self.eval_path, "eval_singlet", energy_key=s_e_key, forces_key=s_f_key)
+            val_E_triplet, val_F_triplet, _ = parse_extxyz(self.eval_path, "eval_triplet", energy_key=t_e_key, forces_key=t_f_key)
             val_frames = read(self.eval_path, index=":", format="extxyz")
 
             if train_frames:
