@@ -27,7 +27,10 @@ from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_sc
 from orchestr_ai.postprocessing.calculator import evaluate_model
 from orchestr_ai.postprocessing.stats import MLFFStats
 from orchestr_ai.postprocessing.features import compute_features
-from orchestr_ai.postprocessing.uq_metrics_calculator import calculate_uq_metrics
+from orchestr_ai.postprocessing.uq_metrics_calculator import (
+    VarianceScalingCalibrator,
+    calculate_uq_metrics,
+)
 from orchestr_ai.postprocessing.mlff_plotting import plot_mlff_stats
 from orchestr_ai.postprocessing.plotting import generate_uq_plots
 # Active Learning & Geometry Sanity
@@ -387,13 +390,14 @@ class DatasetManager:
         self.config = config
         self.eval_cfg = config.get("eval", {})
         self.train_path = self.eval_cfg.get("training_data")
-        self.eval_path = self.eval_cfg.get("eval_input_xyz")
-        
-    def load_datasets(self):
-        print("\n--- Setting up Datasets ---")
-        assert self.eval_path and os.path.exists(self.eval_path), f"Eval file not found: {self.eval_path}"
-        
-        # Retrieve configuration-driven mappings or fallbacks, ensuring DEFAULT_MACE_HEADS_MAP is preserved as fallback keys
+        self.validation_path = self.eval_cfg.get("validation_data")
+        if not self.validation_path:
+            self.validation_path = self.eval_cfg.get("eval_input_xyz")
+            if self.validation_path:
+                print("[Eval] 'eval_input_xyz' is deprecated; use 'validation_data' instead.")
+        self.eval_path = self.validation_path
+
+    def _head_keys(self):
         mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
         custom_heads = self.eval_cfg.get("mace_heads", self.config.get("mace_heads", {}))
         for head_name, head_cfg in custom_heads.items():
@@ -401,24 +405,92 @@ class DatasetManager:
                 mace_heads_map[head_name] = {}
             mace_heads_map[head_name].update(head_cfg)
 
-            
         mace_head = self.config.get("mace_head", None)
-        
         energy_key = None
         forces_key = None
         if mace_head:
             head_config = mace_heads_map.get(mace_head, {})
             energy_key = head_config.get("energy_key", f"E_{mace_head}")
             forces_key = head_config.get("forces_key", f"f_{mace_head}")
-            
-        # Singlet and triplet keys for multi-head comparison logging
+
         singlet_cfg = mace_heads_map.get("singlet", {})
-        s_e_key = singlet_cfg.get("energy_key", "E_singlet")
-        s_f_key = singlet_cfg.get("forces_key", "f_singlet")
-        
         triplet_cfg = mace_heads_map.get("triplet", {})
-        t_e_key = triplet_cfg.get("energy_key", "E_triplet")
-        t_f_key = triplet_cfg.get("forces_key", "f_triplet")
+        return (
+            energy_key,
+            forces_key,
+            singlet_cfg.get("energy_key", "E_singlet"),
+            singlet_cfg.get("forces_key", "f_singlet"),
+            triplet_cfg.get("energy_key", "E_triplet"),
+            triplet_cfg.get("forces_key", "f_triplet"),
+        )
+
+    @staticmethod
+    def _structure_key(energy, positions, symbols, decimals=4):
+        pos = np.asarray(positions, dtype=float)
+        return (
+            tuple(symbols),
+            round(float(energy), decimals) if np.isfinite(energy) else None,
+            tuple(np.round(pos.reshape(-1), decimals)),
+        )
+
+    def _purge_redundant_validation(
+        self,
+        val_frames,
+        val_E,
+        val_F,
+        val_E_singlet,
+        val_F_singlet,
+        val_E_triplet,
+        val_F_triplet,
+        train_E,
+        train_pos,
+        train_frames,
+    ):
+        if not _parse_bool_like(self.eval_cfg.get("purge_redundant_validation", True), default=True):
+            return val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet
+
+        train_keys = {
+            self._structure_key(e, p, fr.get_chemical_symbols())
+            for e, p, fr in zip(train_E, train_pos, train_frames)
+        }
+        keep = []
+        removed = []
+        for i, (e, fr) in enumerate(zip(val_E, val_frames)):
+            key = self._structure_key(e, fr.get_positions(), fr.get_chemical_symbols())
+            redundant = key in train_keys
+            keep.append(not redundant)
+            if redundant:
+                removed.append(i)
+
+        print("[Dataset] Redundant validation purge enabled.")
+        print(f"[Dataset] Training frames: {len(train_frames)}")
+        print(f"[Dataset] Validation frames before purge: {len(val_frames)}")
+        print(f"[Dataset] Removed redundant validation frames: {len(removed)}")
+        if removed:
+            with open("redundant_validation_frames.txt", "w") as fh:
+                fh.write("# validation_frame_index redundant_with_training\n")
+                for idx in removed:
+                    fh.write(f"{idx} 1\n")
+
+        val_frames = [f for f, k in zip(val_frames, keep) if k]
+        val_E = [e for e, k in zip(val_E, keep) if k]
+        val_F = [f for f, k in zip(val_F, keep) if k]
+        if val_E_singlet and len(val_E_singlet) == len(keep):
+            val_E_singlet = [e for e, k in zip(val_E_singlet, keep) if k]
+        if val_F_singlet and len(val_F_singlet) == len(keep):
+            val_F_singlet = [f for f, k in zip(val_F_singlet, keep) if k]
+        if val_E_triplet and len(val_E_triplet) == len(keep):
+            val_E_triplet = [e for e, k in zip(val_E_triplet, keep) if k]
+        if val_F_triplet and len(val_F_triplet) == len(keep):
+            val_F_triplet = [f for f, k in zip(val_F_triplet, keep) if k]
+        print(f"[Dataset] Validation frames after purge: {len(val_frames)}")
+        return val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet
+
+    def load_datasets(self):
+        print("\n--- Setting up Datasets ---")
+        assert self.eval_path and os.path.exists(self.eval_path), f"Eval file not found: {self.eval_path}"
+
+        energy_key, forces_key, s_e_key, s_f_key, t_e_key, t_f_key = self._head_keys()
         val_E, val_F, val_pos = parse_extxyz(self.eval_path, "eval", energy_key=energy_key, forces_key=forces_key)
         val_E_singlet, val_F_singlet, _ = parse_extxyz(self.eval_path, "eval_singlet", energy_key=s_e_key, forces_key=s_f_key)
         val_E_triplet, val_F_triplet, _ = parse_extxyz(self.eval_path, "eval_triplet", energy_key=t_e_key, forces_key=t_f_key)
@@ -434,34 +506,16 @@ class DatasetManager:
             train_E_triplet, train_F_triplet, _ = parse_extxyz(self.train_path, "training_triplet", energy_key=t_e_key, forces_key=t_f_key)
             train_frames = read(self.train_path, index=":", format="extxyz")
             
-            # Redundancy Purge
-            eval_mask = []
-            energy_tol, pos_tol = 0.0001, 0.0001
-            for i, (e_eval, p_eval) in enumerate(zip(val_E, val_pos)):
-                is_redundant = False
-                e_eval_rounded = round(e_eval, 5) if not np.isnan(e_eval) else np.nan
-                for j, (e_train, p_train) in enumerate(zip(train_E, train_pos)):
-                    e_train_rounded = round(e_train, 5) if not np.isnan(e_train) else np.nan
-                    if not np.isnan(e_eval_rounded) and not np.isnan(e_train_rounded) and abs(e_eval_rounded - e_train_rounded) < energy_tol:
-                        if p_eval.shape[0] >= 3 and p_train.shape[0] >= 3:
-                            if np.allclose(p_eval[:3], p_train[:3], atol=pos_tol):
-                                print(f"Redundant structure found: Eval frame {i} is redundant with Training frame {j}.")
-                                is_redundant = True
-                                break
-                eval_mask.append(not is_redundant)
-            
-            val_frames = [f for f, k in zip(val_frames, eval_mask) if k]
-            val_E = [e for e, k in zip(val_E, eval_mask) if k]
-            val_F = [f for f, k in zip(val_F, eval_mask) if k]
-            if val_E_singlet and len(val_E_singlet) == len(eval_mask):
-                val_E_singlet = [e for e, k in zip(val_E_singlet, eval_mask) if k]
-            if val_F_singlet and len(val_F_singlet) == len(eval_mask):
-                val_F_singlet = [f for f, k in zip(val_F_singlet, eval_mask) if k]
-            if val_E_triplet and len(val_E_triplet) == len(eval_mask):
-                val_E_triplet = [e for e, k in zip(val_E_triplet, eval_mask) if k]
-            if val_F_triplet and len(val_F_triplet) == len(eval_mask):
-                val_F_triplet = [f for f, k in zip(val_F_triplet, eval_mask) if k]
-            print(f"Validation frames after purge: {len(val_frames)}")
+            (
+                val_frames, val_E, val_F,
+                val_E_singlet, val_F_singlet,
+                val_E_triplet, val_F_triplet,
+            ) = self._purge_redundant_validation(
+                val_frames, val_E, val_F,
+                val_E_singlet, val_F_singlet,
+                val_E_triplet, val_F_triplet,
+                train_E, train_pos, train_frames,
+            )
 
         all_frames = train_frames + val_frames
         n_train, n_val = len(train_frames), len(val_frames)
@@ -479,6 +533,67 @@ class DatasetManager:
             "F_singlet_true": train_F_singlet + val_F_singlet if (train_F_singlet or val_F_singlet) else None,
             "E_triplet_true": np.array(train_E_triplet + val_E_triplet) if (train_E_triplet or val_E_triplet) else None,
             "F_triplet_true": train_F_triplet + val_F_triplet if (train_F_triplet or val_F_triplet) else None,
+        }
+
+    def load_active_learning_datasets(self):
+        print("\n--- Setting up Active Learning Calibration Dataset ---")
+        if not self.validation_path or not os.path.exists(self.validation_path):
+            raise ValueError("eval.mode='active_learning' requires eval.validation_data (or legacy eval.eval_input_xyz).")
+        pool_path = self.eval_cfg.get("unlabeled_pool_path")
+        if not pool_path or not os.path.exists(pool_path):
+            raise ValueError("eval.mode='active_learning' requires eval.unlabeled_pool_path.")
+
+        purge = _parse_bool_like(self.eval_cfg.get("purge_redundant_validation", True), default=True)
+        if purge and (not self.train_path or not os.path.exists(self.train_path)):
+            raise ValueError("purge_redundant_validation=true requires eval.training_data for active_learning mode.")
+
+        calibration_source = str(self.eval_cfg.get("calibration_source", "validation")).lower()
+        if calibration_source != "validation":
+            raise ValueError("active_learning mode currently supports calibration_source='validation'.")
+
+        energy_key, forces_key, s_e_key, s_f_key, t_e_key, t_f_key = self._head_keys()
+        val_E, val_F, _ = parse_extxyz(self.validation_path, "validation", energy_key=energy_key, forces_key=forces_key)
+        val_E_singlet, val_F_singlet, _ = parse_extxyz(self.validation_path, "validation_singlet", energy_key=s_e_key, forces_key=s_f_key)
+        val_E_triplet, val_F_triplet, _ = parse_extxyz(self.validation_path, "validation_triplet", energy_key=t_e_key, forces_key=t_f_key)
+        val_frames = read(self.validation_path, index=":", format="extxyz")
+
+        if purge:
+            train_E, _, train_pos = parse_extxyz(self.train_path, "training_data", energy_key=energy_key, forces_key=forces_key)
+            train_frames = read(self.train_path, index=":", format="extxyz")
+            (
+                val_frames, val_E, val_F,
+                val_E_singlet, val_F_singlet,
+                val_E_triplet, val_F_triplet,
+            ) = self._purge_redundant_validation(
+                val_frames, val_E, val_F,
+                val_E_singlet, val_F_singlet,
+                val_E_triplet, val_F_triplet,
+                train_E, train_pos, train_frames,
+            )
+
+        n_val = len(val_frames)
+        if n_val < 2:
+            raise ValueError("active_learning mode requires at least two non-redundant validation frames for calibration.")
+
+        train_mask = np.ones(n_val, dtype=bool)
+        val_mask = np.zeros(n_val, dtype=bool)
+        print(f"[Dataset] Calibration source: validation ({n_val} frames).")
+        print("[Dataset] Active-learning thresholds and calibration will be based on validation data.")
+        return {
+            "frames": val_frames,
+            "E_true": np.array(val_E),
+            "F_true": val_F,
+            "train_mask": train_mask,
+            "val_mask": val_mask,
+            "train_idx": np.arange(n_val, dtype=int),
+            "val_idx": np.array([], dtype=int),
+            "calibration_idx": np.arange(n_val, dtype=int),
+            "validation_idx": np.arange(n_val, dtype=int),
+            "val_frames_ref": val_frames,
+            "E_singlet_true": np.array(val_E_singlet) if val_E_singlet else None,
+            "F_singlet_true": val_F_singlet if val_F_singlet else None,
+            "E_triplet_true": np.array(val_E_triplet) if val_E_triplet else None,
+            "F_triplet_true": val_F_triplet if val_F_triplet else None,
         }
 
 
@@ -1141,8 +1256,41 @@ class EvaluationPipeline:
         self.sigma_E_raw_other = None
 
     def run(self):
-        # 1. Load Data
         data_mgr = DatasetManager(self.config)
+        mode = str(self.eval_cfg.get("mode", "all")).lower()
+
+        if mode == "active_learning":
+            self.ds = data_mgr.load_active_learning_datasets()
+            if "ensemble" not in self.uq_methods:
+                raise ValueError("eval.mode='active_learning' requires eval.uncertainty to include 'ensemble'.")
+            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal = (
+                self._run_ensemble_calibration()
+            )
+            soap_species = self._maybe_replace_latents_with_soap(mean_L_frame)
+            if soap_species is not None:
+                mean_L_frame = self._soap_labeled
+            self._run_pool_al(
+                stats_ens,
+                mean_L_frame,
+                sigma_E_raw,
+                sigma_comp,
+                soap_species=soap_species,
+                uq_calibrators=uq_calibrators,
+                metrics_train=metrics_cal,
+                metrics_eval=metrics_cal,
+            )
+            print("Evaluation Pipeline Completed.")
+            return
+
+        if mode == "uq_stats":
+            if not self.eval_cfg.get("training_data"):
+                raise ValueError("eval.mode='uq_stats' requires eval.training_data.")
+            if not (self.eval_cfg.get("validation_data") or self.eval_cfg.get("eval_input_xyz")):
+                raise ValueError("eval.mode='uq_stats' requires eval.validation_data (or legacy eval.eval_input_xyz).")
+
+        if mode not in {"all", "uq_stats"}:
+            raise ValueError("eval.mode must be one of: 'active_learning', 'uq_stats', 'all'.")
+
         self.ds = data_mgr.load_datasets()
         
         # 2. Evaluate Base Model (Single Model Fallback)
@@ -1155,24 +1303,16 @@ class EvaluationPipeline:
                 self._run_ensemble_labeled()
             )
             
-            # --- Model-Independent SOAP Active Learning Integration ---
-            use_soap = self.eval_cfg.get("use_soap", True)
             soap_species = None
-            if use_soap:
-                print("\n[Active Learning] Computing model-independent SOAP descriptors for active learning latent space...")
-                soap_all, soap_species = compute_soap_features(
-                    self.ds["frames"],
-                    r_cut=self.eval_cfg.get("soap_rcut", 4.0),
-                    n_max=self.eval_cfg.get("soap_nmax", 4),
-                    l_max=self.eval_cfg.get("soap_lmax", 4),
-                )
-                if soap_all is not None:
-                    mean_L_frame = soap_all
+            if mode == "all":
+                soap_species = self._maybe_replace_latents_with_soap(mean_L_frame)
+                if soap_species is not None:
+                    mean_L_frame = self._soap_labeled
             
-            if self.al_val_flag and self.al_val_flag.lower() == "influence":
+            if mode == "all" and self.al_val_flag and self.al_val_flag.lower() == "influence":
                 self._run_validation_al(stats_ens, mean_L_frame, sigma_comp)
                 
-            if self.pool_xyz_path and os.path.exists(self.pool_xyz_path):
+            if mode == "all" and self.pool_xyz_path and os.path.exists(self.pool_xyz_path):
                 self._run_pool_al(
                     stats_ens,
                     mean_L_frame,
@@ -1185,6 +1325,23 @@ class EvaluationPipeline:
                 )
 
         print("Evaluation Pipeline Completed.")
+
+    def _maybe_replace_latents_with_soap(self, mean_L_frame):
+        use_soap = self.eval_cfg.get("use_soap", True)
+        if not use_soap:
+            return None
+        print("\n[Active Learning] Computing model-independent SOAP descriptors for active learning latent space...")
+        soap_all, soap_species = compute_soap_features(
+            self.ds["frames"],
+            r_cut=self.eval_cfg.get("soap_rcut", 4.0),
+            n_max=self.eval_cfg.get("soap_nmax", 4),
+            l_max=self.eval_cfg.get("soap_lmax", 4),
+        )
+        if soap_all is not None:
+            self._soap_labeled = soap_all
+            return soap_species
+        self._soap_labeled = mean_L_frame
+        return None
 
     def _run_base_model(self):
         """Runs the standard single-model evaluation."""
@@ -1238,6 +1395,220 @@ class EvaluationPipeline:
                 self.ds["train_mask"], self.ds["val_mask"]
             )
             plot_mlff_stats(stats_base, min_dists_all, "validation_results_base", True, self.ds["train_mask"], self.ds["val_mask"])
+
+    def _run_ensemble_calibration(self):
+        """Run ensemble on the calibration set only for pool active learning."""
+        orig_mace_head = self.config.get("mace_head")
+        primary = self._evaluate_calibration_head(
+            cache_file="ensemble_calibration.npz",
+            tag="ensemble_calibration",
+        )
+
+        shared_calibrators = primary[4]
+        other_head = self._dual_head_other_head(orig_mace_head)
+        if other_head is not None:
+            print(
+                f"\n[Calibration] Dual-head AL: evaluating validation calibration "
+                f"for secondary head '{other_head}'."
+            )
+            self.config["mace_head"] = other_head
+            try:
+                other_E_true, other_F_true = self._truth_for_head(other_head)
+                other = self._evaluate_calibration_head(
+                    cache_file=f"ensemble_calibration_{other_head}.npz",
+                    tag=f"ensemble_calibration_{other_head}",
+                    true_E=other_E_true,
+                    true_F=other_F_true,
+                )
+                self.stats_ens_other = other[0]
+                self.sigma_comp_other = other[2]
+                self.sigma_E_raw_other = other[3]
+                self.metrics_train_other = other[5]
+                self.metrics_eval_other = other[5]
+                shared_calibrators = self._build_shared_var_calibrators(
+                    primary[0], primary[2], primary[3], other[0], other[2], other[3]
+                )
+                primary[5]["calibrators"] = shared_calibrators
+                self.metrics_train_other["calibrators"] = shared_calibrators
+                if str(self.eval_cfg.get("selection_calibration", "var")).lower() != "var":
+                    print("[Calibration] Shared dual-head calibration is VAR-based; using selection_calibration='var'.")
+                    self.eval_cfg["selection_calibration"] = "var"
+                print("[Calibration] Dual-head AL uses one shared VAR calibration for both heads.")
+            finally:
+                if orig_mace_head is None:
+                    self.config.pop("mace_head", None)
+                else:
+                    self.config["mace_head"] = orig_mace_head
+
+        return primary[0], primary[1], primary[2], primary[3], shared_calibrators, primary[5]
+
+    def _evaluate_calibration_head(self, cache_file, tag, true_E=None, true_F=None):
+        """Evaluate one head on validation/calibration frames and fit diagnostics."""
+        runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
+        cache_mode = str(self.eval_cfg.get("ensemble_cache_mode", "stats")).lower()
+        true_E = self.ds["E_true"] if true_E is None else true_E
+        true_F = self.ds["F_true"] if true_F is None else true_F
+
+        if cache_mode == "raw":
+            ens_E_sel, ens_F_list, ens_L_frame_sel, _ = runner.evaluate(
+                self.ds["frames"],
+                true_E,
+                true_F,
+                cache_file=cache_file,
+                E_singlet_true=self.ds.get("E_singlet_true"),
+                E_triplet_true=self.ds.get("E_triplet_true"),
+            )
+            ens_F_sel = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_list], dtype=float)
+            if ens_E_sel.shape[0] < 2:
+                raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
+            mu_E_frame = np.mean(ens_E_sel, axis=0)
+            sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
+            mu_F_comp = np.mean(ens_F_sel, axis=0)
+            sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
+            mean_L_frame = np.mean(ens_L_frame_sel, axis=0)
+        else:
+            stats_cache = runner.evaluate_stats(
+                self.ds["frames"],
+                true_E,
+                true_F,
+                cache_file=cache_file,
+                E_singlet_true=self.ds.get("E_singlet_true"),
+                E_triplet_true=self.ds.get("E_triplet_true"),
+            )
+            if int(stats_cache["n_models"]) < 2:
+                raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
+            mu_E_frame = stats_cache["mu_E"]
+            sigma_E_raw = stats_cache["sigma_E"]
+            mu_F_comp = stats_cache["mu_F"]
+            sigma_F_flat = stats_cache["sigma_F"]
+            mean_L_frame = stats_cache["mu_L_frame"]
+
+        mf_list, idx = [], 0
+        for fr in self.ds["frames"]:
+            mf_list.append(mu_F_comp[idx:idx+len(fr)])
+            idx += len(fr)
+        stats_ens = MLFFStats(
+            true_E,
+            mu_E_frame,
+            true_F,
+            mf_list,
+            self.ds["train_mask"],
+            self.ds["val_mask"],
+        )
+        sigma_comp = sigma_F_flat.flatten()
+        sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+
+        metrics_cal = calculate_uq_metrics(
+            stats_ens,
+            sigma_comp,
+            sigma_atom,
+            sigma_E_raw,
+            "Train",
+            tag,
+            self.eval_log,
+            energy_per_atom=True,
+            save_plot_data=False,
+        )
+        uq_calibrators = metrics_cal.get("calibrators", {})
+        self._print_active_learning_calibration_summary(metrics_cal)
+        self._run_reference_slope_validation(stats_ens)
+        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal
+
+    def _dual_head_other_head(self, orig_mace_head):
+        al_multihead_mode = self.eval_cfg.get("al_multihead_mode", "reconstructed").lower()
+        model_fw = self.config.get("model_framework", "").lower()
+        if model_fw != "mace" or al_multihead_mode != "dual_head_or":
+            return None
+        mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
+        custom_heads = self.eval_cfg.get("mace_heads", self.config.get("mace_heads", {}))
+        for head_name, head_cfg in custom_heads.items():
+            mace_heads_map.setdefault(head_name, {}).update(head_cfg)
+        has_multihead = (
+            "singlet" in mace_heads_map
+            and any(k in mace_heads_map for k in ["triplet", "triplet_reconstructed", "delta"])
+        )
+        if not has_multihead:
+            return None
+        if orig_mace_head == "singlet":
+            return "triplet_reconstructed" if "triplet_reconstructed" in mace_heads_map else "triplet"
+        return "singlet"
+
+    def _truth_for_head(self, head):
+        if head == "singlet":
+            true_E = self.ds.get("E_singlet_true")
+            true_F = self.ds.get("F_singlet_true")
+        else:
+            true_E = self.ds.get("E_triplet_true")
+            true_F = self.ds.get("F_triplet_true")
+        if true_E is None:
+            true_E = self.ds["E_true"]
+        if true_F is None:
+            true_F = self.ds["F_true"]
+        return true_E, true_F
+
+    def _build_shared_var_calibrators(
+        self,
+        stats_a,
+        sigma_comp_a,
+        sigma_energy_a,
+        stats_b,
+        sigma_comp_b,
+        sigma_energy_b,
+    ):
+        atom_counts_a = np.asarray(stats_a.atom_counts, dtype=float)
+        atom_counts_b = np.asarray(stats_b.atom_counts, dtype=float)
+        delta_e = np.concatenate([
+            stats_a.delta_E_frame / atom_counts_a,
+            stats_b.delta_E_frame / atom_counts_b,
+        ])
+        sigma_e = np.concatenate([
+            np.asarray(sigma_energy_a, dtype=float) / atom_counts_a,
+            np.asarray(sigma_energy_b, dtype=float) / atom_counts_b,
+        ])
+        delta_f = np.concatenate([
+            stats_a.all_force_residuals.reshape(-1),
+            stats_b.all_force_residuals.reshape(-1),
+        ])
+        sigma_f = np.concatenate([
+            np.asarray(sigma_comp_a, dtype=float).reshape(-1),
+            np.asarray(sigma_comp_b, dtype=float).reshape(-1),
+        ])
+        cal_var_F = VarianceScalingCalibrator().fit(delta_f, sigma_f)
+        cal_var_E = VarianceScalingCalibrator().fit(delta_e, sigma_e)
+        print(
+            "[Calibration] Shared VAR scales: "
+            f"forces={cal_var_F.s:.4f}, energy_per_atom={cal_var_E.s:.4f}"
+        )
+        return {"cal_var_F": cal_var_F, "cal_var_E": cal_var_E}
+
+    def _print_active_learning_calibration_summary(self, metrics_cal):
+        metrics = metrics_cal.get("metrics", {}) if metrics_cal else {}
+        mode = str(self.eval_cfg.get("selection_calibration", "var")).lower()
+        if mode not in {"var", "iso"}:
+            mode = "var"
+        print("\n[Calibration] Active-learning calibration summary")
+        print("[Calibration] Source: validation")
+        print(f"[Calibration] Frames used: {len(self.ds['frames'])}")
+        print(f"[Calibration] Method requested for AL selection: {mode.upper()}")
+        print("[Calibration] Diagnostics below are computed on the calibration source itself.")
+        def _fmt(value):
+            return "n/a" if value is None or not np.isfinite(value) else f"{float(value):.4f}"
+        for label, prefix in (("raw", "raw"), ("VAR", "calVAR"), ("ISO", "calISO")):
+            print(
+                f"[Calibration] {label:>3} force: "
+                f"Spearman={_fmt(metrics.get(f'Spearman_{prefix}'))}, "
+                f"ENCE={_fmt(metrics.get(f'ENCE_{prefix}'))}, "
+                f"PICP95={_fmt(metrics.get(f'PICP95_{prefix}'))}"
+            )
+        has_energy = any(key.endswith("_E") for key in metrics)
+        if has_energy:
+            for label, prefix in (("raw", "raw_E"), ("VAR", "calVAR_E"), ("ISO", "calISO_E")):
+                print(
+                    f"[Calibration] {label:>3} energy: "
+                    f"Spearman={_fmt(metrics.get(f'Spearman_{prefix}'))}, "
+                    f"ENCE={_fmt(metrics.get(f'ENCE_{prefix}'))}, "
+                    f"PICP95={_fmt(metrics.get(f'PICP95_{prefix}'))}"
+                )
 
     def _run_ensemble_labeled(self):
         """Runs the ensemble on labeled datasets and computes UQ metrics."""
@@ -1396,16 +1767,20 @@ class EvaluationPipeline:
                         
                         self.metrics_train_other = calculate_uq_metrics(
                             stats_ens_other, sigma_comp_other, sigma_atom_other, sigma_E_raw_other,
-                            "Train", f"ensemble_{other_head}", self.eval_log
+                            "Train", f"ensemble_{other_head}", self.eval_log,
+                            energy_per_atom=True,
                         )
+                        uq_calibrators_other = self.metrics_train_other.get("calibrators", {})
                         self.metrics_eval_other = calculate_uq_metrics(
                             stats_ens_other, sigma_comp_other, sigma_atom_other, sigma_E_raw_other,
-                            "Eval", f"ensemble_{other_head}", self.eval_log
+                            "Eval", f"ensemble_{other_head}", self.eval_log,
+                            calibrators=uq_calibrators_other,
+                            energy_per_atom=True,
                         )
                         
                         if self.do_plot:
-                            generate_uq_plots(metrics_train_other["npz_path"], "Train", f"error_model_{other_head}", calibration="var")
-                            generate_uq_plots(metrics_eval_other["npz_path"], "Eval", f"error_model_{other_head}", calibration="var")
+                            generate_uq_plots(self.metrics_train_other["npz_path"], "Train", f"error_model_{other_head}", calibration="var")
+                            generate_uq_plots(self.metrics_eval_other["npz_path"], "Eval", f"error_model_{other_head}", calibration="var")
         except Exception as e:
             print(f"[Ensemble-UQ] WARNING: Failed to compute UQ metrics/plots for secondary head: {e}")
 
