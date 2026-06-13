@@ -5,7 +5,7 @@ import csv
 from typing import Dict
 from sklearn.preprocessing import StandardScaler
 from ase.data import atomic_numbers as _ase_atomic_numbers
-from orchestr_ai.utils.io import ( parse_stacked_xyz, save_stacked_xyz,
+from orchestr_ai.utils.io import ( parse_stacked_xyz, parse_dual_spin_xyz, save_stacked_xyz,
                               save_to_npz )
 from orchestr_ai.utils.plots import (
     plot_energy_and_forces,
@@ -15,6 +15,7 @@ from orchestr_ai.utils.plots import (
     plot_kmeans_elbow,
     plot_cluster_map,
     plot_coverage_histogram,
+    plot_pca_density_contour,
 )
 from orchestr_ai.utils.helpers import ( analyze_reference_forces,
                                    suggest_thresholds )
@@ -27,10 +28,14 @@ from orchestr_ai.utils.cluster import (
     assign_kmeans_labels,
     sample_indices,
     compute_subset_coverage_metrics,
+    select_farthest_point_sampling,
+    compute_selection_entropy,
 )
 from orchestr_ai.utils.descriptors import compute_local_descriptors
 from orchestr_ai.utils.centering import process_xyz
 from orchestr_ai.utils.data_conversion import preprocess_data_for_platform
+from orchestr_ai.utils.coverage_report import plot_coverage_summary_report
+
 
 import logging
 logger = logging.getLogger(__name__)
@@ -49,6 +54,10 @@ def export_subset_bundle(
     method_name,
     coverage_rows,
     random_state=0,
+    entropy_cluster_labels=None,
+    entropy_k=None,
+    spin_state="single",
+    E_s=None, E_t=None, dE=None, F_s=None, F_t=None
 ):
     """
     Export one selected subset and all associated plots/files.
@@ -102,6 +111,28 @@ def export_subset_bundle(
         f"max={cov_metrics['max_min_dist']:.6f}"
     )
 
+    entropy_metrics = {
+        "entropy": None,
+        "normalized_entropy": None,
+        "occupied_clusters": None,
+        "total_clusters": entropy_k,
+    }
+
+    if entropy_cluster_labels is not None:
+        try:
+            entropy_metrics = compute_selection_entropy(
+                entropy_cluster_labels,
+                sel_idxs,
+            )
+            logger.info(
+                f"[Entropy-{method_label}] set={set_id}, size={tgt}, "
+                f"H={entropy_metrics['entropy']:.6f}, "
+                f"Hnorm={entropy_metrics['normalized_entropy']:.6f}, "
+                f"occupied={entropy_metrics['occupied_clusters']}/{entropy_metrics['total_clusters']}"
+            )
+        except Exception as e:
+            logger.warning(f"[Entropy-{method_label}] Failed: {e}")
+
     coverage_rows.append({
         "set_id": int(set_id),
         "size": int(nsel),
@@ -109,6 +140,10 @@ def export_subset_bundle(
         "mean_min_dist": float(cov_metrics["mean_min_dist"]),
         "p95_min_dist": float(cov_metrics["p95_min_dist"]),
         "max_min_dist": float(cov_metrics["max_min_dist"]),
+        "entropy": entropy_metrics["entropy"],
+        "normalized_entropy": entropy_metrics["normalized_entropy"],
+        "occupied_clusters": entropy_metrics["occupied_clusters"],
+        "total_clusters": entropy_metrics["total_clusters"],
     })
 
     plot_coverage_histogram(
@@ -147,7 +182,15 @@ def export_subset_bundle(
 
     # 3) Save XYZ
     xyz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.xyz"
-    save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
+    if spin_state == "dual":
+        save_stacked_xyz(
+            xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms,
+            spin_state="dual",
+            E_s=E_s[sel_idxs], E_t=E_t[sel_idxs], dE=dE[sel_idxs],
+            F_s=F_s[sel_idxs], F_t=F_t[sel_idxs]
+        )
+    else:
+        save_stacked_xyz(xyz_fn, E[sel_idxs], P[sel_idxs], F[sel_idxs], atoms)
 
     # 4) Energy/force plots
     plot_energy_and_forces(
@@ -162,7 +205,7 @@ def export_subset_bundle(
     # 6) Centering
     centered_xyz = f"{prefix}_set{set_id}_{tgt}{tag}_centered.xyz"
     centered_png = f"{prefix}_set{set_id}_{tgt}{tag}_centered.png"
-    process_xyz(xyz_fn, centered_xyz, centered_png)
+    process_xyz(xyz_fn, centered_xyz, centered_png, spin_state=spin_state)
 
     # 7) Save NPZ
     npz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.npz"
@@ -173,6 +216,221 @@ def export_subset_bundle(
         energies=E[sel_idxs],
         forces=F[sel_idxs],
     )
+
+    if False:  # diagnostic only
+        plot_pca_density_contour(
+            embeddings=feats,
+            selected_indices=sel_idxs,
+            title=f"PCA Density Contour ({method_label}): selected {nsel} from {n_total} inliers",
+            output_path=f"{prefix}_set{set_id}_{tgt}_pca_density_contour{tag}.png",
+            random_state=random_state,
+        )
+
+def save_coverage_summary(prefix, coverage_rows):
+    """
+    Save full coverage summary to CSV and print compact grouped summary in logs.
+    """
+    if not coverage_rows:
+        logger.info("[CoverageSummary] No coverage rows collected. Skipping summary export.")
+        return
+
+    coverage_rows = sorted(
+        coverage_rows,
+        key=lambda r: (r["size"], r["method"], r["set_id"])
+    )
+
+    coverage_csv = f"{prefix}_coverage_summary.csv"
+    fieldnames = [
+        "set_id",
+        "size",
+        "method",
+        "mean_min_dist",
+        "p95_min_dist",
+        "max_min_dist",
+        "entropy",
+        "normalized_entropy",
+        "occupied_clusters",
+        "total_clusters",
+    ]
+
+    with open(coverage_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(coverage_rows)
+
+    compact_rows = []
+
+    grouped = {}
+    for row in coverage_rows:
+        key = (row["size"], row["method"])
+        grouped.setdefault(key, {
+            "mean_min_dist": [],
+            "p95_min_dist": [],
+            "max_min_dist": [],
+            "entropy": [],
+            "normalized_entropy": [],
+            "occupied_clusters": [],
+        })
+        grouped[key]["mean_min_dist"].append(row["mean_min_dist"])
+        grouped[key]["p95_min_dist"].append(row["p95_min_dist"])
+        grouped[key]["max_min_dist"].append(row["max_min_dist"])
+        grouped[key]["entropy"].append(row["entropy"])
+        grouped[key]["normalized_entropy"].append(row["normalized_entropy"])
+        grouped[key]["occupied_clusters"].append(row["occupied_clusters"])
+
+    for (size, method), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
+        compact_rows.append({
+            "size": size,
+            "method": method,
+            "mean_min_dist_avg": sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"]),
+            "p95_min_dist_avg": sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"]),
+            "max_min_dist_avg": sum(vals["max_min_dist"]) / len(vals["max_min_dist"]),
+            "entropy_avg": sum(vals["entropy"]) / len(vals["entropy"]),
+            "normalized_entropy_avg": sum(vals["normalized_entropy"]) / len(vals["normalized_entropy"]),
+            "occupied_clusters_avg": sum(vals["occupied_clusters"]) / len(vals["occupied_clusters"]),
+            "n_repeats": len(vals["mean_min_dist"]),
+        })
+
+    compact_csv = f"{prefix}_coverage_summary_compact.csv"
+    compact_fieldnames = [
+        "size",
+        "method",
+        "mean_min_dist_avg",
+        "p95_min_dist_avg",
+        "max_min_dist_avg",
+        "entropy_avg",
+        "normalized_entropy_avg",
+        "occupied_clusters_avg",
+        "n_repeats",
+    ]
+
+    with open(compact_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=compact_fieldnames)
+        writer.writeheader()
+        writer.writerows(compact_rows)
+
+    logger.info(f"[CoverageSummary] Saved compact coverage summary to {compact_csv}")
+
+
+def run_elbow_analysis(
+    feats,
+    sizes,
+    prefix,
+    seed,
+    elbow_enabled=False,
+    elbow_k_values=None,
+    elbow_max_k=1000,
+    auto_add_elbow_size=False,
+    max_auto_elbow_size=2000,
+    elbow_selection_method="knee",
+):
+    """
+    Run elbow analysis and optionally auto-add a recommended subset size.
+
+    Returns
+    -------
+    sizes : list[int]
+        Possibly updated subset sizes.
+    elbow_best_k : int or None
+        Recommended elbow cluster count, if available.
+    """
+    elbow_best_k = None
+
+    if not elbow_enabled:
+        return sizes, elbow_best_k
+
+    n_inliers = len(feats)
+
+    if elbow_k_values is None:
+        elbow_k_values = suggest_elbow_k_values(
+            n_samples=n_inliers,
+            requested_sizes=sizes,
+            max_k=elbow_max_k,
+        )
+        logger.info(f"[Elbow] Auto-generated k values from n_inliers={n_inliers}: {elbow_k_values}")
+    else:
+        logger.info(f"[Elbow] Using user-provided k values: {elbow_k_values}")
+
+    ks, wcss = compute_kmeans_elbow(
+        feats,
+        k_values=elbow_k_values,
+        random_state=seed,
+    )
+
+    plot_kmeans_elbow(
+        ks,
+        wcss,
+        title="KMeans Elbow on Inlier Feature Space",
+        filename=f"{prefix}_kmeans_elbow.png",
+    )
+
+    if len(ks) > 0:
+        logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
+
+    if elbow_selection_method == "knee":
+        elbow_best_k = recommend_elbow_k(ks, wcss)
+    else:
+        logger.warning(
+            f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
+        )
+        elbow_best_k = recommend_elbow_k(ks, wcss)
+
+    if elbow_best_k is not None:
+        elbow_best_k = min(elbow_best_k, len(feats))
+        logger.info(f"[Elbow] Recommended elbow size: {elbow_best_k}")
+
+        if auto_add_elbow_size:
+            if elbow_best_k <= max_auto_elbow_size:
+                logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
+                sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
+                logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
+            else:
+                logger.warning(
+                    f"[Elbow] Recommended k={elbow_best_k} exceeds "
+                    f"max_auto_elbow_size={max_auto_elbow_size}. Skipping auto-add."
+                )
+    else:
+        logger.warning("[Elbow] Could not determine a recommended elbow size.")
+
+    return sizes, elbow_best_k
+
+def maybe_plot_cluster_map(
+    feats,
+    elbow_best_k,
+    prefix,
+    seed,
+    max_cluster_map_k=500,
+):
+    """
+    Plot cluster map only when elbow_best_k is available and not too large.
+    """
+    if elbow_best_k is None:
+        return
+
+    if elbow_best_k > max_cluster_map_k:
+        logger.warning(
+            f"[ClusterMap] Skipping cluster map because elbow_best_k={elbow_best_k} "
+            f"> max_cluster_map_k={max_cluster_map_k}"
+        )
+        return
+
+    try:
+        cluster_labels, _ = assign_kmeans_labels(
+            feats,
+            n_clusters=elbow_best_k,
+            random_state=seed,
+        )
+
+        plot_cluster_map(
+            feats,
+            cluster_labels,
+            title=f"PCA Cluster Map (k={elbow_best_k})",
+            filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
+            method="pca",
+            random_state=seed,
+        )
+    except Exception as e:
+        logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
 
 def consolidate_dataset(cfg: Dict):
     """
@@ -192,6 +450,9 @@ def consolidate_dataset(cfg: Dict):
 
     # Optional elbow plot config
     create_random_baseline = ds.get("create_random_baseline", False)
+    create_fps_baseline = ds.get("create_fps_baseline", False)
+    max_fps_size = ds.get("max_fps_size", 300)
+
     elbow_enabled = ds.get("plot_elbow", False)
     elbow_k_values = ds.get("elbow_k_values", None)
     elbow_max_k = ds.get("elbow_max_k", 1000)
@@ -200,10 +461,28 @@ def consolidate_dataset(cfg: Dict):
     max_cluster_map_k = ds.get("max_cluster_map_k", 500)
     elbow_selection_method = ds.get("elbow_selection_method", "knee")
 
+    # logger.info(f"[Consolidate] parsing {infile}…")
+    # # 2) Parse stacked XYZ
+    # E, P, F, atoms = parse_stacked_xyz(infile)
+    # labels_full = np.arange(len(E))  
+
     logger.info(f"[Consolidate] parsing {infile}…")
-    # 2) Parse stacked XYZ
-    E, P, F, atoms = parse_stacked_xyz(infile)
-    labels_full = np.arange(len(E))  
+    # 2) Parse stacked XYZ & Gatekeeper Logic
+    if ds.get("spin_state") == "dual":
+        E_s, E_t, dE, P, F_s, F_t, atoms = parse_dual_spin_xyz(infile)
+        target = ds.get("target_state", "singlet")
+        
+        if target == "triplet":
+            E_active, F_active = E_t, F_t
+        else:
+            E_active, F_active = E_s, F_s
+            
+        # Bind the active states to the classic E and F variables so the core pipeline runs untouched
+        E, F = E_active, F_active 
+        labels_full = np.arange(len(E))
+    else:
+        E, P, F, atoms = parse_stacked_xyz(infile)
+        labels_full = np.arange(len(E))
 
     n_frames = len(E)
     n_atoms  = len(atoms)
@@ -244,92 +523,59 @@ def consolidate_dataset(cfg: Dict):
     # 9) Keep only inliers
     labels = labels_full[inliers_mask]
     feats = feats[inliers_mask]
-    E = E[inliers_mask]
-    P = P[inliers_mask]
-    F = F[inliers_mask]
+    if ds.get("spin_state") == "dual":
+        E_s, E_t, dE = E_s[inliers_mask], E_t[inliers_mask], dE[inliers_mask]
+        P, F_s, F_t = P[inliers_mask], F_s[inliers_mask], F_t[inliers_mask]
+       
+        E = E_t if ds.get("target_state") == "triplet" else E_s
+        F = F_t if ds.get("target_state") == "triplet" else F_s
+    else:
+        E, P, F = E[inliers_mask], P[inliers_mask], F[inliers_mask]
+
     logger.info(f"[Filter] kept {len(E)} frames after outlier removal")
 
-    elbow_best_k = None
+    sizes, elbow_best_k = run_elbow_analysis(
+        feats=feats,
+        sizes=sizes,
+        prefix=prefix,
+        seed=seed,
+        elbow_enabled=elbow_enabled,
+        elbow_k_values=elbow_k_values,
+        elbow_max_k=elbow_max_k,
+        auto_add_elbow_size=auto_add_elbow_size,
+        max_auto_elbow_size=max_auto_elbow_size,
+        elbow_selection_method=elbow_selection_method,
+    )
 
-    if elbow_enabled:
-        n_inliers = len(feats)
+    maybe_plot_cluster_map(
+        feats=feats,
+        elbow_best_k=elbow_best_k,
+        prefix=prefix,
+        seed=seed,
+        max_cluster_map_k=max_cluster_map_k,
+    )
 
-        if elbow_k_values is None:
-            elbow_k_values = suggest_elbow_k_values(
-                n_samples=n_inliers,
-                requested_sizes=sizes,
-                max_k=elbow_max_k,
-            )
-            logger.info(f"[Elbow] Auto-generated k values from n_inliers={n_inliers}: {elbow_k_values}")
-        else:
-            logger.info(f"[Elbow] Using user-provided k values: {elbow_k_values}")
+    # Reference clustering for entropy calculation
+    entropy_cluster_labels = None
+    entropy_k = None
 
-        ks, wcss = compute_kmeans_elbow(
-            feats,
-            k_values=elbow_k_values,
-            random_state=seed,
-        )
-
-        plot_kmeans_elbow(
-            ks,
-            wcss,
-            title="KMeans Elbow on Inlier Feature Space",
-            filename=f"{prefix}_kmeans_elbow.png",
-        )
-
-        if len(ks) > 0:
-            logger.info("[Elbow] Finished. Inspect the elbow plot for a good cluster count.")
-
-        # Determine recommended elbow k independently of auto-add
-        if elbow_selection_method == "knee":
-            elbow_best_k = recommend_elbow_k(ks, wcss)
-        else:
-            logger.warning(
-                f"[Elbow] Unsupported method '{elbow_selection_method}'. Using 'knee'."
-            )
-            elbow_best_k = recommend_elbow_k(ks, wcss)
-
+    if len(feats) > 1:
         if elbow_best_k is not None:
-            elbow_best_k = min(elbow_best_k, len(feats))
-            logger.info(f"[Elbow] Recommended elbow size: {elbow_best_k}")
-
-            if auto_add_elbow_size:
-                if elbow_best_k <= max_auto_elbow_size:
-                    logger.info(f"[Elbow] Auto-selected additional subset size: {elbow_best_k}")
-                    sizes = sorted(set(list(sizes) + [int(elbow_best_k)]))
-                    logger.info(f"[Elbow] Final subset sizes after merge: {sizes}")
-                else:
-                    logger.warning(
-                        f"[Elbow] Recommended k={elbow_best_k} exceeds "
-                        f"max_auto_elbow_size={max_auto_elbow_size}. Skipping auto-add."
-                    )
+            entropy_k = min(int(elbow_best_k), len(feats) - 1)
         else:
-            logger.warning("[Elbow] Could not determine a recommended elbow size.")
+            entropy_k = min(100, len(feats) - 1)
 
-    if elbow_best_k is not None:
-        if elbow_best_k <= max_cluster_map_k:
+        if entropy_k >= 2:
             try:
-                cluster_labels, _ = assign_kmeans_labels(
+                entropy_cluster_labels, _ = assign_kmeans_labels(
                     feats,
-                    n_clusters=elbow_best_k,
+                    n_clusters=entropy_k,
                     random_state=seed,
                 )
-
-                plot_cluster_map(
-                    feats,
-                    cluster_labels,
-                    title=f"PCA Cluster Map (k={elbow_best_k})",
-                    filename=f"{prefix}_cluster_map_k{elbow_best_k}.png",
-                    method="pca",
-                    random_state=seed,
-                )
+                logger.info(f"[Entropy] Using reference clustering with k={entropy_k}")
             except Exception as e:
-                logger.warning(f"[ClusterMap] Failed to generate cluster map: {e}")
-        else:
-            logger.warning(
-                f"[ClusterMap] Skipping cluster map because elbow_best_k={elbow_best_k} "
-                f"> max_cluster_map_k={max_cluster_map_k}"
-            )
+                logger.warning(f"[Entropy] Failed to compute reference clustering: {e}")
+                entropy_cluster_labels = None
 
     plot_energy_and_forces(E, F, "postfilter_EF.png")
     plot_pca(
@@ -340,7 +586,14 @@ def consolidate_dataset(cfg: Dict):
     )
 
     # 10) Save full inliers file
-    save_stacked_xyz(f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms)
+
+    if ds.get("spin_state") == "dual":
+        save_stacked_xyz(
+            f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms,
+            spin_state="dual", E_s=E_s, E_t=E_t, dE=dE, F_s=F_s, F_t=F_t
+        )
+    else:
+        save_stacked_xyz(f"{prefix}_inliers_full_dataset.xyz", E, P, F, atoms)
 
     # Precompute 1D atomic_numbers for NPZ
     atomic_numbers_1d = np.array([_ase_atomic_numbers[sym] for sym in atoms],
@@ -348,6 +601,14 @@ def consolidate_dataset(cfg: Dict):
 
     # Collect coverage metrics for CSV + log summary
     coverage_rows = []
+
+    dual_kwargs = {}
+    if ds.get("spin_state") == "dual":
+        dual_kwargs = {
+            "spin_state": "dual",
+            "E_s": E_s, "E_t": E_t, "dE": dE,
+            "F_s": F_s, "F_t": F_t
+        }
 
     # 11) K-means medoid selection for each target size, repeated n_sets times with different seeds
     for set_id in range(n_sets):
@@ -380,6 +641,9 @@ def consolidate_dataset(cfg: Dict):
                 method_name="kmeans",
                 coverage_rows=coverage_rows,
                 random_state=set_seed,
+                entropy_cluster_labels=entropy_cluster_labels,
+                entropy_k=entropy_k,
+                **dual_kwargs
             )
 
             # ==========================================================
@@ -410,49 +674,50 @@ def consolidate_dataset(cfg: Dict):
                     method_name="random",
                     coverage_rows=coverage_rows,
                     random_state=set_seed,
+                    entropy_cluster_labels=entropy_cluster_labels,
+                    entropy_k=entropy_k,
+                    **dual_kwargs
                 )
+
+            # ==========================================================
+            # 3) Optional FPS subset
+            # ==========================================================
+            if create_fps_baseline:
+                if nsel <= max_fps_size:
+                    fps_idxs = select_farthest_point_sampling(
+                        feats,
+                        nsel,
+                        random_state=set_seed,
+                    )
+
+                    logger.info(
+                        f"[FPS] set={set_id} selected {len(fps_idxs)} frames for size {tgt}"
+                    )
+
+                    export_subset_bundle(
+                        feats=feats,
+                        E=E,
+                        P=P,
+                        F=F,
+                        atoms=atoms,
+                        atomic_numbers_1d=atomic_numbers_1d,
+                        sel_idxs=fps_idxs,
+                        prefix=prefix,
+                        set_id=set_id,
+                        tgt=tgt,
+                        method_name="fps",
+                        coverage_rows=coverage_rows,
+                        random_state=set_seed,                
+                        entropy_cluster_labels=entropy_cluster_labels,
+                        entropy_k=entropy_k,
+                        **dual_kwargs
+                    )
+                else:
+                    logger.warning(
+                        f"[FPS] Skipping FPS for size={nsel} because "
+                        f"nsel > max_fps_size={max_fps_size}"
+                    )
+
     # 12) Save coverage summary CSV + print compact summary
-    if coverage_rows:
-        coverage_rows = sorted(
-            coverage_rows,
-            key=lambda r: (r["size"], r["method"], r["set_id"])
-        )
-
-        coverage_csv = f"{prefix}_coverage_summary.csv"
-        fieldnames = [
-            "set_id",
-            "size",
-            "method",
-            "mean_min_dist",
-            "p95_min_dist",
-            "max_min_dist",
-        ]
-
-        with open(coverage_csv, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(coverage_rows)
-
-        logger.info(f"[CoverageSummary] Saved full coverage summary to {coverage_csv}")
-    
-        grouped = {}
-        for row in coverage_rows:
-            key = (row["size"], row["method"])
-            grouped.setdefault(key, {
-                "mean_min_dist": [],
-                "p95_min_dist": [],
-                "max_min_dist": [],
-            })
-            grouped[key]["mean_min_dist"].append(row["mean_min_dist"])
-            grouped[key]["p95_min_dist"].append(row["p95_min_dist"])
-            grouped[key]["max_min_dist"].append(row["max_min_dist"])
-
-        for (size, method), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
-            mean_avg = sum(vals["mean_min_dist"]) / len(vals["mean_min_dist"])
-            p95_avg = sum(vals["p95_min_dist"]) / len(vals["p95_min_dist"])
-            max_avg = sum(vals["max_min_dist"]) / len(vals["max_min_dist"])
-
-            logger.info(
-                f"[CoverageSummary] size={size}, method={method}, "
-                f"mean={mean_avg:.6f}, p95={p95_avg:.6f}, max={max_avg:.6f}"
-            )
+    save_coverage_summary(prefix, coverage_rows)
+    plot_coverage_summary_report(f"{prefix}_coverage_summary_compact.csv")

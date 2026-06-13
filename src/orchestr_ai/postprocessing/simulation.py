@@ -16,7 +16,7 @@ from types import MethodType
 
 from pathlib import Path
 from ase import units
-from ase.io import write
+from ase.io import read, write
 from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
 from ase.neighborlist import neighbor_list
@@ -70,11 +70,40 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                     model.z_table = z_table
                 else:
                     z_table = val
-                break
+                break    
 
-        # 2. Return the official calculator using the correct plural 'models' keyword
-        # We pass the model inside a list as MACE expects for ensembles or single models.
-        return MACECalculator(models=[model], device=str(device), default_dtype="float32")
+        # 2. Return the official calculator using the correct plural 'models' keyword.
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        if mace_head == "triplet_reconstructed":
+            from orchestr_ai.postprocessing.calculators.mace_calculator import (
+                ReconstructedMACECalculator,
+            )
+            scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+            if not scale_metadata_path:
+                scale_metadata_path = "mace_scale_metadata.json"
+
+            return ReconstructedMACECalculator(
+                model=model,
+                device=device,
+                scale_metadata_path=scale_metadata_path,
+            )
+
+        kwargs = {
+            "models": [model],
+            "device": str(device),
+            "default_dtype": "float32",
+        }
+
+        if mace_head:
+            print(f"[MACE] Requested head from config: {mace_head}")
+            kwargs["head"] = mace_head
+        else:
+            print("[MACE] No mace_head specified. Using MACE default head.")
+
+        return MACECalculator(**kwargs)
 
     elif framework in {"nequip", "allegro"}:
         from nequip.ase import NequIPCalculator
@@ -441,12 +470,121 @@ def _write_xyz_frame(atoms, step, md_time, T_set, friction, e_pot, file_handle):
     except IOError as exc:
         print(f"Warning: Failed to write MD trajectory frame {step}: {exc}")
 
+def _load_scale_metadata(config):
+    """Loads scale factor k_E from mace_scale_metadata.json (or config override) if available."""
+    if not isinstance(config, dict):
+        return None
+    import json
+    import os
+    scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+    if not scale_metadata_path:
+        scale_metadata_path = "mace_scale_metadata.json"
+    if os.path.exists(scale_metadata_path):
+        try:
+            with open(scale_metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            return float(meta.get("k_E", 1.0))
+        except Exception as e:
+            print(f"Warning: Failed to load scale metadata from {scale_metadata_path}: {e}")
+    return None
+
+def _get_other_head_energy(atoms, other_head, config):
+    """
+    Safely calculates or retrieves potential energy for other_head.
+    Restores the original calculator head and results to keep MD forces/cache intact.
+    """
+    if atoms.calc is None:
+        return np.nan
+
+    # If it is ReconstructedMACECalculator, we might already have the cached energies:
+    calc_results = getattr(atoms.calc, "results", {})
+    if other_head == "singlet" and "energy_singlet" in calc_results:
+        return calc_results["energy_singlet"]
+    if other_head == "triplet_reconstructed" and "energy_triplet_reconstructed" in calc_results:
+        return calc_results["energy_triplet_reconstructed"]
+
+    reconstruct_triplet = (other_head == "triplet_reconstructed" or other_head == "triplet")
+
+    try:
+        # Save original calculator state
+        old_results = dict(atoms.calc.results) if hasattr(atoms.calc, "results") else {}
+        old_head = getattr(atoms.calc, "head", None)
+
+        from ase.calculators.calculator import all_changes
+        
+        # Calculate energy for delta or standard head
+        target_head = "delta" if (reconstruct_triplet and not hasattr(atoms.calc, "available_heads")) else other_head
+        if hasattr(atoms.calc, "available_heads") and target_head not in atoms.calc.available_heads:
+            if target_head == "triplet_reconstructed" and "delta" in atoms.calc.available_heads:
+                target_head = "delta"
+
+        atoms.calc.head = target_head
+        atoms.calc.calculate(atoms, properties=["energy"], system_changes=all_changes)
+        calculated_energy = atoms.calc.results.get("energy", np.nan)
+
+        if reconstruct_triplet and target_head == "delta":
+            k_E = _load_scale_metadata(config)
+            if k_E is not None and old_results.get("energy") is not None:
+                E_singlet = old_results["energy"]
+                E_delta = calculated_energy
+                calculated_energy = E_singlet - (E_delta / k_E)
+            else:
+                calculated_energy = np.nan
+
+        return calculated_energy
+
+    except Exception as e:
+        print(f"Warning: Failed to compute energy for other head '{other_head}': {e}")
+        return np.nan
+    finally:
+        # Restore original calculator state
+        if old_head is not None:
+            atoms.calc.head = old_head
+        if hasattr(atoms.calc, "results"):
+            atoms.calc.results = old_results
+
+def _load_md_restart_frame(restart_file, reference_atoms=None):
+    """Load the last MD frame and restore velocities for a restart."""
+    if not restart_file:
+        raise ValueError("MD restart requested but no restart_file or trajectory_file_md was provided.")
+
+    restart_path = Path(restart_file)
+    if not restart_path.exists() or restart_path.stat().st_size == 0:
+        raise FileNotFoundError(f"MD restart file is missing or empty: {restart_file}")
+
+    atoms = read(str(restart_path), index=-1)
+    if reference_atoms is not None:
+        if len(atoms) != len(reference_atoms):
+            raise ValueError(
+                f"MD restart frame has {len(atoms)} atoms, but initial_xyz has "
+                f"{len(reference_atoms)} atoms."
+            )
+        if not atoms.cell.rank and reference_atoms.cell.rank:
+            atoms.set_cell(reference_atoms.get_cell())
+        if not np.any(atoms.get_pbc()) and np.any(reference_atoms.get_pbc()):
+            atoms.set_pbc(reference_atoms.get_pbc())
+
+    velocities = atoms.arrays.get("velocities")
+    if velocities is None:
+        velocities = atoms.get_velocities()
+    if velocities is None:
+        raise ValueError(
+            f"MD restart file '{restart_file}' does not contain velocities. "
+            "Restart requires a trajectory written by this MD driver."
+        )
+
+    atoms.set_velocities(np.asarray(velocities, dtype=float))
+    step_offset = int(atoms.info.get("step", 0) or 0)
+    return atoms, step_offset
+
 def print_md_status(
     dyn,
     atoms,
     log_file,
     dt_fs,
     friction,
+    config=None,
+    step_offset=0,
 ):
     """
     Log one line with energies, timing, etc.  **Do not** write XYZ here –
@@ -459,7 +597,7 @@ def print_md_status(
     last_call_time = now
     cumulative_time += step_time
 
-    step = dyn.get_number_of_steps()
+    step = step_offset + dyn.get_number_of_steps()
     md_time = step * dt_fs
     e_pot = atoms.get_potential_energy()
     e_kin = atoms.get_kinetic_energy()
@@ -467,9 +605,12 @@ def print_md_status(
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
     T_set = getattr(dyn, "temperature_K", np.nan)
 
-    # Compute maximum force magnitude
-    forces = atoms.get_forces()
-    max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
+    # Compute max force
+    try:
+        forces = atoms.get_forces()
+        max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
+    except Exception:
+        max_force = np.nan
 
     # Compute simulated steps per second -> ns/day
     step_diff = step - getattr(print_md_status, "last_step", 0)
@@ -480,26 +621,155 @@ def print_md_status(
     else:
         speed = 0.0
 
-    header = (
-        f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
-        f"{'Epot(eV)':>14} | {'Ekin(eV)':>12} | {'Etot(eV)':>14} | "
-        f"{'MaxForce(eV/A)':>14} | {'dt(s)':>8} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
-    )
-    fmt = (
-        "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
-        "{:14.6f} | {:12.6f} | {:14.6f} | "
-        "{:14.6f} | {:8.4f} | {:9.4f} | {:13.4f}"
-    )
+    # Helper to rename long head name
+    def log_name(h):
+        if h == "triplet_reconstructed":
+            return "trip_delta"
+        return h
+
+    # Detect multi-head MACE run
+    is_mace = False
+    if config is not None:
+        framework = config.get("model_framework", "").lower()
+        if framework == "mace":
+            is_mace = True
+
+    has_multihead = False
+    selected_head = None
+    other_head = None
+    available_heads = []
+
+    if is_mace and atoms.calc is not None:
+        if hasattr(atoms.calc, "models") and len(atoms.calc.models) > 0:
+            available_heads = getattr(atoms.calc.models[0], "heads", [])
+        if not available_heads and hasattr(atoms.calc, "available_heads"):
+            available_heads = atoms.calc.available_heads
+        
+        if available_heads:
+            available_heads = [h.strip() for h in available_heads if isinstance(h, str)]
+
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        is_reconstructed = (mace_head == "triplet_reconstructed")
+        is_multi_model = ("singlet" in available_heads and ("triplet" in available_heads or "delta" in available_heads))
+        
+        if is_reconstructed or is_multi_model:
+            has_multihead = True
+            selected_head = mace_head if mace_head else "singlet"
+
+            if selected_head == "singlet":
+                other_head = "triplet" if "triplet" in available_heads else "delta"
+            elif selected_head == "triplet":
+                other_head = "singlet"
+            elif selected_head == "delta":
+                other_head = "singlet"
+            elif selected_head == "triplet_reconstructed":
+                other_head = "singlet"
+            else:
+                other_head = "singlet" if "singlet" in available_heads else None
+
+            if other_head == "delta":
+                k_E = _load_scale_metadata(config)
+                if k_E is not None:
+                    other_head = "triplet_reconstructed"
+
+    epot_other = np.nan
+    if has_multihead and other_head:
+        epot_other = _get_other_head_energy(atoms, other_head, config)
+
+    # Compute delta_gap = Epot_singlet - Epot_triplet
+    delta_gap = np.nan
+    if has_multihead and other_head:
+        e_singlet_val = np.nan
+        e_triplet_val = np.nan
+        
+        # Check active/selected head
+        if selected_head == "singlet":
+            e_singlet_val = e_pot
+        elif selected_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = e_pot
+            
+        # Check other head
+        if other_head == "singlet":
+            e_singlet_val = epot_other
+        elif other_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = epot_other
+            
+        if not np.isnan(e_singlet_val) and not np.isnan(e_triplet_val):
+            delta_gap = e_singlet_val - e_triplet_val
+
+    if has_multihead and other_head:
+        col1_name = f"Epot_{log_name(selected_head)}(eV)"
+        col2_name = f"Epot_{log_name(other_head)}(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_ekin_str = f"{e_kin:.6f}"
+        val_etot_str = f"{e_pot + e_kin:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_epot_other_str = f"{epot_other:.6f}"
+        val_delta_gap_str = f"{delta_gap:.6f}"
+        
+        col1_w = max(11, len(col1_name), len(val_epot_str))
+        ekin_w = max(11, len("Ekin(eV)"), len(val_ekin_str))
+        etot_w = max(11, len("Etot(eV)"), len(val_etot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        col2_w = max(11, len(col2_name), len(val_epot_other_str))
+        gap_w = max(13, len("delta_gap(eV)"), len(val_delta_gap_str))
+
+        header = (
+            f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+            f"{col1_name:>{col1_w}} | {'Ekin(eV)':>{ekin_w}} | {'Etot(eV)':>{etot_w}} | "
+            f"{'MaxForce(eV/A)':>{force_w}} | {'dt(s)':>8} | {col2_name:>{col2_w}} | "
+            f"{'delta_gap(eV)':>{gap_w}} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
+        )
+        fmt = (
+            "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+            f"{{:{col1_w}.6f}} | {{:{ekin_w}.6f}} | {{:{etot_w}.6f}} | "
+            f"{{:{force_w}.6f}} | {{:8.4f}} | {{:{col2_w}.6f}} | "
+            f"{{:{gap_w}.6f}} | {{:9.4f}} | {{:13.4f}}"
+        )
+        values = (
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_pot + e_kin,
+            max_force, step_time, epot_other,
+            delta_gap, cumulative_time, speed
+        )
+    else:
+        col_name = f"Epot_{log_name(selected_head)}(eV)" if selected_head else "Epot(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_ekin_str = f"{e_kin:.6f}"
+        val_etot_str = f"{e_pot + e_kin:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        
+        col_w = max(11, len(col_name), len(val_epot_str))
+        ekin_w = max(11, len("Ekin(eV)"), len(val_ekin_str))
+        etot_w = max(11, len("Etot(eV)"), len(val_etot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+
+        header = (
+            f"{'Step':>6} | {'MD_Time(fs)':>11} | {'T_inst(K)':>9} | {'T_set(K)':>8} | "
+            f"{col_name:>{col_w}} | {'Ekin(eV)':>{ekin_w}} | {'Etot(eV)':>{etot_w}} | "
+            f"{'MaxForce(eV/A)':>{force_w}} | {'dt(s)':>8} | {'cum(s)':>9} | {'Speed(ns/day)':>13}"
+        )
+        fmt = (
+            "{:6d} | {:11.2f} | {:9.2f} | {:8.2f} | "
+            f"{{:{col_w}.6f}} | {{:{ekin_w}.6f}} | {{:{etot_w}.6f}} | "
+            f"{{:{force_w}.6f}} | {{:8.4f}} | {{:9.4f}} | {{:13.4f}}"
+        )
+        values = (
+            step, md_time, temp_inst, T_set,
+            e_pot, e_kin, e_pot + e_kin,
+            max_force, step_time, cumulative_time, speed
+        )
 
     _log_status_line(
         log_file,
         header,
         fmt,
-        (
-            step, md_time, temp_inst, T_set,
-            e_pot, e_kin, e_tot,
-            max_force, step_time, cumulative_time, speed
-        ),
+        values,
     )
 
 
@@ -560,8 +830,8 @@ class MDWriterThread(Thread):
                     
                 elif msg_type == "traj":
                     if f_out:
-                        symbols, positions, velocities, forces, info = msg_data
-                        frame = Atoms(symbols=symbols, positions=positions)
+                        symbols, positions, velocities, forces, info, cell, pbc = msg_data
+                        frame = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
                         if velocities is not None:
                             frame.set_array("velocities", velocities)
                         if forces is not None:
@@ -607,6 +877,16 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     log_file      = md.get("log_file")
     framework     = config.get("model_framework", "schnetpack").lower()
     cutoff        = config.get("cutoff", md.get("cutoff"))
+    restart       = bool(md.get("restart", False))
+    restart_file  = md.get("restart_file", traj_file)
+    step_offset   = 0
+
+    if restart:
+        atoms, step_offset = _load_md_restart_frame(restart_file, atoms)
+        print(
+            f"Restarting MD from {restart_file} "
+            f"at saved step {step_offset}; running {nsteps} additional steps."
+        )
 
     # -----------------------------------------------------------------
     #  calculator + starting velocities (preventing zero kinetic energy)
@@ -634,7 +914,10 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     heating_steps = md.get("heating_steps", 0)
     T_start = md.get("heating_T_start", 10.0)
 
-    if heating_steps > 0:
+    if restart:
+        print("MD restart: using velocities from restart frame; skipping velocity initialization and heating ramp.")
+        heating_steps = 0
+    elif heating_steps > 0:
         print(f"Heating initialized: starting at {T_start} K, ramping to {T0} K over {heating_steps} steps.")
         MaxwellBoltzmannDistribution(atoms, temperature_K=T_start)
     else:
@@ -764,7 +1047,13 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         if log_file:
             dyn.attach(
                 lambda: print_md_status(
-                    dyn, atoms, write_queue, dt_fs, gamma_fs
+                    dyn,
+                    atoms,
+                    write_queue,
+                    dt_fs,
+                    gamma_fs,
+                    config=config,
+                    step_offset=step_offset,
                 ),
                 interval=log_int,
             )
@@ -772,7 +1061,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         # Attach trajectory print callback
         if traj_file and xyz_int > 0:
             def async_write_xyz_frame():
-                step = dyn.get_number_of_steps()
+                step = step_offset + dyn.get_number_of_steps()
                 md_time = step * dt_fs
                 T_set = getattr(dyn, "temperature_K", np.nan)
                 
@@ -799,7 +1088,9 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
                         atoms.get_positions().copy(),
                         velocities,
                         forces,
-                        info
+                        info,
+                        atoms.get_cell().array.copy(),
+                        atoms.get_pbc().copy(),
                     )
                 ))
 

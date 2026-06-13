@@ -1,6 +1,6 @@
 print_config: true
 
-run: 
+run:
   work_dir: ${hydra:runtime.cwd}
   data_dir: ${run.work_dir}/data
   path: ${run.work_dir}/runs
@@ -8,14 +8,16 @@ run:
   id: model2
   ckpt_path: null
 
-globals: 
+globals:
   model_path: best_model
   cutoff: 12.0
-  lr: 0.0005  # changed from 0.001 to 0.0005
-  energy_key: energy
-  forces_key: forces
+  lr: 0.0005
+  E_singlet_key: E_singlet
+  E_triplet_key: E_triplet
+  f_singlet_key: f_singlet
+  f_triplet_key: f_triplet
 
-data: 
+data:
   _target_: schnetpack.data.AtomsDataModule
   datapath: ./consolidated_dataset_1000.db
   data_workdir: null
@@ -29,53 +31,70 @@ data:
   train_sampler_cls: null
   distance_unit: Ang
   property_units:
-    energy: eV
-    forces: eV/Ang
-  transforms: 
-  - _target_: schnetpack.transform.SubtractCenterOfMass
-  - _target_: schnetpack.transform.RemoveOffsets
-    property: energy
-    remove_atomrefs: true
-    remove_mean: true
-  - _target_: schnetpack.transform.MatScipyNeighborList
-    cutoff: ${globals.cutoff}
-  - _target_: schnetpack.transform.CastTo32
+    E_singlet: eV
+    E_triplet: eV
+    f_singlet: eV/Ang
+    f_triplet: eV/Ang
+  transforms:
+    - _target_: schnetpack.transform.SubtractCenterOfMass
+    - _target_: schnetpack.transform.MatScipyNeighborList
+      cutoff: ${globals.cutoff}
+    - _target_: schnetpack.transform.CastTo32
 
 model:
+  _target_: schnetpack.model.NeuralNetworkPotential
+
+  input_modules:
+    - _target_: schnetpack.atomistic.PairwiseDistances
+
   representation:
+    _target_: schnetpack.representation.SchNet
+    n_atom_basis: 128
+    n_interactions: 4
     radial_basis:
       _target_: schnetpack.nn.radial.GaussianRBF
       n_rbf: 40
       cutoff: ${globals.cutoff}
-    _target_: schnetpack.representation.SchNet
-    n_atom_basis: 128
-    n_interactions: 4
     cutoff_fn:
       _target_: schnetpack.nn.cutoff.CosineCutoff
       cutoff: ${globals.cutoff}
-  _target_: schnetpack.model.NeuralNetworkPotential
-  input_modules:
-  - _target_: schnetpack.atomistic.PairwiseDistances
+
   output_modules:
-  - _target_: schnetpack.atomistic.Atomwise
-    output_key: ${globals.energy_key}
-    n_in: ${model.representation.n_atom_basis}
-    aggregation_mode: sum
-  - _target_: schnetpack.atomistic.Forces
-    energy_key: ${globals.energy_key}
-    force_key: ${globals.forces_key}
+    - _target_: schnetpack.atomistic.Atomwise
+      output_key: ${globals.E_singlet_key}
+      n_in: ${model.representation.n_atom_basis}
+      aggregation_mode: sum
+
+    - _target_: schnetpack.atomistic.Atomwise
+      output_key: ${globals.E_triplet_key}
+      n_in: ${model.representation.n_atom_basis}
+      aggregation_mode: sum
+
+    - _target_: orchestr_ai.custom_schnetpack.dual_forces.DualForces
+      energy_key_1: ${globals.E_singlet_key}
+      force_key_1: ${globals.f_singlet_key}
+      energy_key_2: ${globals.E_triplet_key}
+      force_key_2: ${globals.f_triplet_key}
+
+    # - _target_: schnetpack.atomistic.Forces
+    #   energy_key: ${globals.E_singlet_key}
+    #   force_key: ${globals.f_singlet_key}
+
+    # - _target_: schnetpack.atomistic.Forces
+    #   energy_key: ${globals.E_triplet_key}
+    #   force_key: ${globals.f_triplet_key}
+
   postprocessors:
-  - _target_: schnetpack.transform.CastTo64
-  - _target_: schnetpack.transform.AddOffsets
-    property: energy
-    add_mean: false
-    add_atomrefs: true
+    - _target_: schnetpack.transform.CastTo64
 
 task:
+  _target_: schnetpack.AtomisticTask
+
   optimizer_cls: torch.optim.AdamW
   optimizer_args:
     lr: ${globals.lr}
     weight_decay: 0.0
+
   scheduler_cls: schnetpack.train.ReduceLROnPlateau
   scheduler_monitor: val_loss
   scheduler_args:
@@ -87,40 +106,66 @@ task:
     cooldown: 10
     min_lr: 0.0
     smoothing_factor: 0.0
-  _target_: schnetpack.AtomisticTask
+
   outputs:
-  - _target_: schnetpack.task.ModelOutput
-    name: ${globals.energy_key}
-    loss_fn:
-      _target_: torch.nn.MSELoss
-    metrics:
-      mae:
-        _target_: torchmetrics.regression.MeanAbsoluteError
-      rmse:
-        _target_: torchmetrics.regression.MeanSquaredError
-        squared: false
-    loss_weight: 0.05
-  - _target_: schnetpack.task.ModelOutput
-    name: ${globals.forces_key}
-    loss_fn:
-      _target_: torch.nn.MSELoss
-    metrics:
-      mae:
-        _target_: torchmetrics.regression.MeanAbsoluteError
-      rmse:
-        _target_: torchmetrics.regression.MeanSquaredError
-        squared: false
-    loss_weight: 0.95
+    - _target_: schnetpack.task.ModelOutput
+      name: ${globals.E_singlet_key}
+      loss_fn:
+        _target_: torch.nn.MSELoss
+      metrics:
+        mae:
+          _target_: torchmetrics.regression.MeanAbsoluteError
+        rmse:
+          _target_: torchmetrics.regression.MeanSquaredError
+          squared: false
+      loss_weight: 0.05
+
+    - _target_: schnetpack.task.ModelOutput
+      name: ${globals.f_singlet_key}
+      loss_fn:
+        _target_: torch.nn.MSELoss
+      metrics:
+        mae:
+          _target_: torchmetrics.regression.MeanAbsoluteError
+        rmse:
+          _target_: torchmetrics.regression.MeanSquaredError
+          squared: false
+      loss_weight: 0.95
+
+    - _target_: schnetpack.task.ModelOutput
+      name: ${globals.E_triplet_key}
+      loss_fn:
+        _target_: torch.nn.MSELoss
+      metrics:
+        mae:
+          _target_: torchmetrics.regression.MeanAbsoluteError
+        rmse:
+          _target_: torchmetrics.regression.MeanSquaredError
+          squared: false
+      loss_weight: 0.05
+
+    - _target_: schnetpack.task.ModelOutput
+      name: ${globals.f_triplet_key}
+      loss_fn:
+        _target_: torch.nn.MSELoss
+      metrics:
+        mae:
+          _target_: torchmetrics.regression.MeanAbsoluteError
+        rmse:
+          _target_: torchmetrics.regression.MeanSquaredError
+          squared: false
+      loss_weight: 0.95
+
   warmup_steps: 0
 
-trainer: 
+trainer:
   _target_: pytorch_lightning.Trainer
   devices: 1
   min_epochs: null
   max_epochs: 500
   enable_model_summary: true
   profiler: null
-  gradient_clip_val: 1.0    #changed from null to 1.0
+  gradient_clip_val: 1.0
   accumulate_grad_batches: 1
   val_check_interval: 1.0
   check_val_every_n_epoch: 1
@@ -133,8 +178,8 @@ trainer:
   detect_anomaly: false
   precision: 32
   accelerator: auto
-  num_nodes: 1 
-  deterministic: true   # changed from false to true
+  num_nodes: 1
+  deterministic: true
   inference_mode: false
 
 callbacks:
@@ -148,6 +193,7 @@ callbacks:
     dirpath: checkpoints/
     filename: '{epoch:02d}'
     model_path: ${globals.model_path}
+
   early_stopping:
     _target_: pytorch_lightning.callbacks.EarlyStopping
     monitor: val_loss
@@ -155,17 +201,19 @@ callbacks:
     mode: min
     min_delta: 0.0
     check_on_train_epoch_end: false
+
   lr_monitor:
     _target_: pytorch_lightning.callbacks.LearningRateMonitor
     logging_interval: epoch
+
   ema:
     _target_: schnetpack.train.ExponentialMovingAverage
     decay: 0.995
 
-logger: #Aim, WandB, TensorBoard, csv
+logger:
   tensorboard:
     _target_: pytorch_lightning.loggers.tensorboard.TensorBoardLogger
     save_dir: tensorboard/
-    name: ${run.id}_seed_${seed} #changed from default to include run id and seed
+    name: ${run.id}_seed_${seed}
 
 seed: 420

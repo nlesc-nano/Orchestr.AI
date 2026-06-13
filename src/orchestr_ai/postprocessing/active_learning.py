@@ -316,6 +316,9 @@ class _PoolActiveLearner:
         if self.n_hi_total < 10:
             print("[AL] Convergence heuristic: fewer than 10 frames exceed any lower bound.")
             print("[AL] Nothing significant left to label.")
+            self._evaluate_windows()
+            self.final_pool_indices = []
+            self.sel_frames = []
         else:
             self._evaluate_windows()
             self._finalize_selection()
