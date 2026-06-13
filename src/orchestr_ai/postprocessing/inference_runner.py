@@ -82,9 +82,11 @@ class InferenceRunner:
                 )
                 forward_time_s = time.time() - t0_forward
                 
-                # Run triplet
+                # Run the second available head. For singlet+delta models this is a
+                # raw delta-head output, not a physical triplet energy.
+                second_head = "triplet" if "triplet" in self.calculator.available_heads else "delta"
                 t0_prep_t = time.time()
-                self.calculator.head = "triplet"
+                self.calculator.head = second_head
                 inputs_t = self.calculator.prepare_batch(batch_frames)
                 prep_time_t = time.time() - t0_prep_t
                 
@@ -94,6 +96,17 @@ class InferenceRunner:
                     n_atoms_list,
                 )
                 forward_time_t = time.time() - t0_forward_t
+                raw_energies_t = energies_t
+                raw_forces_t = forces_t
+
+                if second_head == "delta" and hasattr(self.calculator, "reconstruction_k_E"):
+                    k_E = float(self.calculator.reconstruction_k_E)
+                    k_F = float(getattr(self.calculator, "reconstruction_k_F", k_E))
+                    energies_t = energies_s - (np.asarray(energies_t, dtype=float) / k_E)
+                    forces_t = [
+                        f_s - (np.asarray(f_d, dtype=float) / k_F)
+                        for f_s, f_d in zip(forces_s, forces_t)
+                    ]
                 
                 # Restore original head
                 self.calculator.head = orig_head
@@ -109,8 +122,8 @@ class InferenceRunner:
                     lat_frame = lat_frame_s
                     lat_atom = lat_atom_s
                 else:
-                    energies_out = energies_t
-                    forces_out = forces_t
+                    energies_out = raw_energies_t if orig_head == "delta" else energies_t
+                    forces_out = raw_forces_t if orig_head == "delta" else forces_t
                     lat_frame = lat_frame_t
                     lat_atom = lat_atom_t
             
@@ -229,6 +242,12 @@ class InferenceRunner:
             and "singlet" in self.calculator.available_heads
             and ("triplet" in self.calculator.available_heads or "delta" in self.calculator.available_heads)
         )
+        has_physical_triplet = has_multihead and (
+            "triplet" in self.calculator.available_heads
+            or hasattr(self.calculator, "k_E")
+            or hasattr(self.calculator, "reconstruction_k_E")
+        )
+        second_head_label = "E_triplet" if has_physical_triplet else "E_delta_head"
 
         for batch_start in range(0, n_frames, self.batch_size):
             batch_frames = frames[batch_start : batch_start + self.batch_size]
@@ -271,19 +290,23 @@ class InferenceRunner:
                             pred_e_s = energies_s[i]
                             diff_e_s = pred_e_s - true_e_s
                             
-                            true_e_t = E_triplet_true[local_idx] if E_triplet_true is not None and local_idx < len(E_triplet_true) else np.nan
+                            true_e_t = (
+                                E_triplet_true[local_idx]
+                                if has_physical_triplet and E_triplet_true is not None and local_idx < len(E_triplet_true)
+                                else np.nan
+                            )
                             pred_e_t = energies_t[i]
                             diff_e_t = pred_e_t - true_e_t
                             
-                            true_diff = true_e_s - true_e_t
-                            pred_diff = pred_e_s - pred_e_t
-                            diff_diff = pred_diff - true_diff
+                            true_diff = true_e_s - true_e_t if has_physical_triplet else np.nan
+                            pred_diff = pred_e_s - pred_e_t if has_physical_triplet else np.nan
+                            diff_diff = pred_diff - true_diff if has_physical_triplet else np.nan
                             
                             if not log_lines_buffer:
                                 header = (
                                     f"{'Frame':>6s} | "
                                     f"{'True_E_s(eV)':>15s} | {'Pred_E_s(eV)':>15s} | {'Diff_s(eV)':>12s} | "
-                                    f"{'True_E_t(eV)':>15s} | {'Pred_E_t(eV)':>15s} | {'Diff_t(eV)':>12s} | "
+                                    f"{'True_' + second_head_label + '(eV)':>22s} | {'Pred_' + second_head_label + '(eV)':>22s} | {'Diff_2(eV)':>12s} | "
                                     f"{'True_delta_gap(eV)':>18s} | {'Pred_delta_gap(eV)':>18s} | {'Diff_delta_gap(eV)':>15s}\n"
                                 )
                                 log_lines_buffer.append(header)
@@ -337,29 +360,34 @@ class InferenceRunner:
                             flush=True,
                         )
                         
-                        # Log triplet
-                        true_e_t = E_triplet_true[first_local_idx] if E_triplet_true is not None and first_local_idx < len(E_triplet_true) else np.nan
+                        # Log physical triplet when available; otherwise log raw delta-head output.
+                        true_e_t = (
+                            E_triplet_true[first_local_idx]
+                            if has_physical_triplet and E_triplet_true is not None and first_local_idx < len(E_triplet_true)
+                            else np.nan
+                        )
                         pred_e_t = energies_t[0]
                         diff_t = pred_e_t - true_e_t
                         print(
                             f"[{self.context_label}]   [Batch {batches_processed + 1}] Frame {first_global_idx:5d} | "
-                            f"Pred E_triplet: {pred_e_t:12.4f} eV | "
-                            f"True E_triplet: {true_e_t:12.4f} eV | "
+                            f"Pred {second_head_label}: {pred_e_t:12.4f} eV | "
+                            f"True {second_head_label}: {true_e_t:12.4f} eV | "
                             f"Diff: {diff_t:10.4f} eV",
                             flush=True,
                         )
                         
                         # Log singlet-triplet difference
-                        pred_diff = pred_e_s - pred_e_t
-                        true_diff = true_e_s - true_e_t
-                        diff_diff = pred_diff - true_diff
-                        print(
-                            f"[{self.context_label}]   [Batch {batches_processed + 1}] Frame {first_global_idx:5d} | "
-                            f"Pred delta_gap: {pred_diff:12.4f} eV | "
-                            f"True delta_gap: {true_diff:12.4f} eV | "
-                            f"Diff: {diff_diff:10.4f} eV",
-                            flush=True,
-                        )
+                        if has_physical_triplet:
+                            pred_diff = pred_e_s - pred_e_t
+                            true_diff = true_e_s - true_e_t
+                            diff_diff = pred_diff - true_diff
+                            print(
+                                f"[{self.context_label}]   [Batch {batches_processed + 1}] Frame {first_global_idx:5d} | "
+                                f"Pred delta_gap: {pred_diff:12.4f} eV | "
+                                f"True delta_gap: {true_diff:12.4f} eV | "
+                                f"Diff: {diff_diff:10.4f} eV",
+                                flush=True,
+                            )
                     else:
                         true_e_first = (
                             true_energies[first_local_idx]
