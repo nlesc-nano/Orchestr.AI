@@ -211,7 +211,16 @@ class InferenceRunner:
                 forces_t,
             )
 
-    def run(self, frames, true_energies=None, true_forces=None, E_singlet_true=None, E_triplet_true=None, frame_indices=None):
+    def run(
+        self,
+        frames,
+        true_energies=None,
+        true_forces=None,
+        E_singlet_true=None,
+        E_triplet_true=None,
+        frame_indices=None,
+        include_multihead=False,
+    ):
         n_frames = len(frames)
         if frame_indices is None:
             frame_indices = np.arange(n_frames, dtype=int)
@@ -224,6 +233,10 @@ class InferenceRunner:
         all_forces_pred = []
         all_latent_frame = []
         all_latent_atom = []
+        all_multihead = {
+            "singlet": {"energy": [], "forces": []},
+            "second": {"energy": [], "forces": [], "name": None},
+        }
 
         cum_eval_time = 0.0
         batches_processed = 0
@@ -248,6 +261,10 @@ class InferenceRunner:
             or hasattr(self.calculator, "reconstruction_k_E")
         )
         second_head_label = "E_triplet" if has_physical_triplet else "E_delta_head"
+        second_head_name = "triplet_reconstructed" if has_physical_triplet else "delta"
+        if has_multihead and "triplet" in self.calculator.available_heads:
+            second_head_name = "triplet"
+        all_multihead["second"]["name"] = second_head_name
 
         for batch_start in range(0, n_frames, self.batch_size):
             batch_frames = frames[batch_start : batch_start + self.batch_size]
@@ -279,6 +296,11 @@ class InferenceRunner:
                 all_forces_pred.extend(forces_list)
                 all_latent_frame.extend(lat_frame)
                 all_latent_atom.extend(lat_atom)
+                if include_multihead and has_multihead:
+                    all_multihead["singlet"]["energy"].extend(np.asarray(energies_s, dtype=float).tolist())
+                    all_multihead["singlet"]["forces"].extend(forces_s)
+                    all_multihead["second"]["energy"].extend(np.asarray(energies_t, dtype=float).tolist())
+                    all_multihead["second"]["forces"].extend(forces_t)
 
                 if self.log_file:
                     for i in range(actual_size):
@@ -450,5 +472,21 @@ class InferenceRunner:
             f"Avg Time/Frame: {cum_eval_time / max(1, n_frames):.5f}s"
         )
         self._log("-------------------------")
+
+        if include_multihead:
+            mh = None
+            if has_multihead:
+                second_name = all_multihead["second"]["name"]
+                mh = {
+                    "singlet": {
+                        "energy": np.asarray(all_multihead["singlet"]["energy"], dtype=float),
+                        "forces": all_multihead["singlet"]["forces"],
+                    },
+                    second_name: {
+                        "energy": np.asarray(all_multihead["second"]["energy"], dtype=float),
+                        "forces": all_multihead["second"]["forces"],
+                    },
+                }
+            return all_energy_pred, all_forces_pred, all_latent_frame, all_latent_atom, mh
 
         return all_energy_pred, all_forces_pred, all_latent_frame, all_latent_atom

@@ -324,7 +324,10 @@ def _init_persistent_worker(gpu_queue):
 
 
 def _evaluate_model_chunk_worker(payload):
-    if len(payload) == 11:
+    include_multihead = False
+    if len(payload) == 12:
+        model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id, frame_indices, E_singlet_true, E_triplet_true, include_multihead = payload
+    elif len(payload) == 11:
         model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id, frame_indices, E_singlet_true, E_triplet_true = payload
     else:
         model_path, framework, config, frames, true_E, true_F, batch_size, gpu_id, frame_indices = payload
@@ -375,6 +378,7 @@ def _evaluate_model_chunk_worker(payload):
         context_label=context_label,
         E_singlet_true=E_singlet_true,
         E_triplet_true=E_triplet_true,
+        include_multihead=include_multihead,
     )
 
     if not keep_resident:
@@ -678,6 +682,7 @@ class EnsembleRunner:
         frame_indices=None,
         E_singlet_true=None,
         E_triplet_true=None,
+        include_multihead=False,
     ):
         try:
             model_obj = _load_eval_model(model_path, self.framework, self.device)
@@ -699,6 +704,7 @@ class EnsembleRunner:
             context_label=f"{os.path.basename(model_path)}|single",
             E_singlet_true=E_singlet_true,
             E_triplet_true=E_triplet_true,
+            include_multihead=include_multihead,
         )
 
     def _evaluate_model_multi_gpu(
@@ -711,6 +717,7 @@ class EnsembleRunner:
         pool=None,
         E_singlet_true=None,
         E_triplet_true=None,
+        include_multihead=False,
     ):
         gpu_ids = _configured_gpu_ids(self.eval_cfg)
         if len(gpu_ids) <= 1:
@@ -723,6 +730,7 @@ class EnsembleRunner:
                 frame_indices=np.arange(len(frames), dtype=int),
                 E_singlet_true=E_singlet_true,
                 E_triplet_true=E_triplet_true,
+                include_multihead=include_multihead,
             )
 
         n_frames = len(frames)
@@ -772,6 +780,7 @@ class EnsembleRunner:
                     idx.astype(int),
                     chunk_E_singlet,
                     chunk_E_triplet,
+                    include_multihead,
                 )
             )
 
@@ -786,15 +795,38 @@ class EnsembleRunner:
         forces_pred = [None] * n_frames
         latent_frame = [None] * n_frames
         latent_atom = [None] * n_frames
+        mh_by_head = {}
 
         for idx, result in zip(chunks, chunk_results):
-            e_chunk, f_chunk, lf_chunk, la_chunk = result
+            if include_multihead:
+                e_chunk, f_chunk, lf_chunk, la_chunk, mh_chunk = result
+            else:
+                e_chunk, f_chunk, lf_chunk, la_chunk = result
+                mh_chunk = None
             for local_i, global_i in enumerate(idx):
                 energy_pred[int(global_i)] = e_chunk[local_i]
                 forces_pred[int(global_i)] = f_chunk[local_i]
                 latent_frame[int(global_i)] = lf_chunk[local_i]
                 latent_atom[int(global_i)] = la_chunk[local_i]
+            if mh_chunk:
+                for head, values in mh_chunk.items():
+                    slot = mh_by_head.setdefault(
+                        head,
+                        {"energy": [None] * n_frames, "forces": [None] * n_frames},
+                    )
+                    for local_i, global_i in enumerate(idx):
+                        slot["energy"][int(global_i)] = values["energy"][local_i]
+                        slot["forces"][int(global_i)] = values["forces"][local_i]
 
+        if include_multihead:
+            mh_out = {
+                head: {
+                    "energy": np.asarray(values["energy"], dtype=float),
+                    "forces": values["forces"],
+                }
+                for head, values in mh_by_head.items()
+            }
+            return energy_pred, forces_pred, latent_frame, latent_atom, mh_out
         return energy_pred, forces_pred, latent_frame, latent_atom
 
     def evaluate(self, frames, true_E=None, true_F=None, cache_file="ensemble_cache.npz", E_singlet_true=None, E_triplet_true=None):
@@ -1147,6 +1179,147 @@ class EnsembleRunner:
             pass
         return result
 
+    def _aggregate_prediction_sets(self, pred_sets, frames):
+        sum_E = sum_E2 = None
+        sum_F = sum_F2 = None
+        sum_L = sum_L2 = None
+        count_E = count_F = count_L = None
+        n_models_done = 0
+
+        for preds_E, preds_F, preds_L_frame in pred_sets:
+            e = np.asarray(preds_E, dtype=float)
+            f = np.concatenate(preds_F, axis=0).astype(float, copy=False)
+            l_frame = _coerce_frame_latents(
+                preds_L_frame,
+                len(frames),
+                context=f"model {n_models_done+1} frame latents",
+            )
+            if sum_E is None:
+                sum_E = np.zeros_like(e, dtype=float)
+                sum_E2 = np.zeros_like(e, dtype=float)
+                sum_F = np.zeros_like(f, dtype=float)
+                sum_F2 = np.zeros_like(f, dtype=float)
+                sum_L = np.zeros_like(l_frame, dtype=float)
+                sum_L2 = np.zeros_like(l_frame, dtype=float)
+                count_E = np.zeros_like(e, dtype=float)
+                count_F = np.zeros_like(f, dtype=float)
+                count_L = np.zeros_like(l_frame, dtype=float)
+
+            e_mask = np.isfinite(e)
+            f_mask = np.isfinite(f)
+            l_mask = np.isfinite(l_frame)
+            sum_E += np.where(e_mask, e, 0.0)
+            sum_E2 += np.where(e_mask, e**2, 0.0)
+            sum_F += np.where(f_mask, f, 0.0)
+            sum_F2 += np.where(f_mask, f**2, 0.0)
+            sum_L += np.where(l_mask, l_frame, 0.0)
+            sum_L2 += np.where(l_mask, l_frame**2, 0.0)
+            count_E += e_mask.astype(float)
+            count_F += f_mask.astype(float)
+            count_L += l_mask.astype(float)
+            n_models_done += 1
+
+        if n_models_done == 0:
+            raise ValueError("No ensemble models were successfully evaluated.")
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu_E = np.where(count_E > 0, sum_E / count_E, np.nan)
+            mu_F = np.where(count_F > 0, sum_F / count_F, np.nan)
+            mu_L_frame = np.where(count_L > 0, sum_L / count_L, np.nan)
+            var_E = np.where(count_E > 1, (sum_E2 - count_E * mu_E**2) / (count_E - 1), 0.0)
+            var_F = np.where(count_F > 1, (sum_F2 - count_F * mu_F**2) / (count_F - 1), 0.0)
+            var_L = np.where(count_L > 1, (sum_L2 - count_L * mu_L_frame**2) / (count_L - 1), 0.0)
+
+        return {
+            "n_models": np.array(n_models_done, dtype=int),
+            "mu_E": mu_E,
+            "sigma_E": np.sqrt(np.maximum(var_E, 0.0)),
+            "mu_F": mu_F,
+            "sigma_F": np.sqrt(np.maximum(var_F, 0.0)),
+            "mu_L_frame": mu_L_frame,
+            "sigma_L_frame": np.sqrt(np.maximum(var_L, 0.0)),
+            "n_atoms_per_frame": np.array([len(fr) for fr in frames], dtype=int),
+        }
+
+    def evaluate_stats_multihead_once(
+        self,
+        frames,
+        cache_file="ensemble_calibration.npz",
+        E_singlet_true=None,
+        E_triplet_true=None,
+        other_head="triplet_reconstructed",
+        other_cache_file=None,
+    ):
+        other_cache_file = other_cache_file or f"ensemble_calibration_{other_head}.npz"
+        force_recompute = self._force_recompute()
+        if not force_recompute and os.path.exists(cache_file) and os.path.exists(other_cache_file):
+            data_a = np.load(cache_file, allow_pickle=True)
+            data_b = np.load(other_cache_file, allow_pickle=True)
+            if (
+                "cache_format" in data_a and str(data_a["cache_format"]) == "ensemble_stats_v1"
+                and "cache_format" in data_b and str(data_b["cache_format"]) == "ensemble_stats_v1"
+            ):
+                print(f"[EnsembleRunner] Loading dual-head aggregate caches from {cache_file} and {other_cache_file}.")
+                return (
+                    {key: data_a[key] for key in data_a.files if key != "cache_format"},
+                    {key: data_b[key] for key in data_b.files if key != "cache_format"},
+                )
+
+        print(f"\n[EnsembleRunner] One-pass dual-head aggregate inference for {len(frames)} frames...")
+        primary_sets = []
+        other_sets = []
+        model_paths_to_run = self._model_paths()
+        pool = None
+        if self._multi_gpu_enabled() and len(model_paths_to_run) > 0:
+            gpu_ids = _configured_gpu_ids(self.eval_cfg)
+            if len(gpu_ids) > 1:
+                ctx = mp.get_context("spawn")
+                gpu_queue = ctx.SimpleQueue()
+                for gid in gpu_ids:
+                    gpu_queue.put(gid)
+                pool = ctx.Pool(
+                    processes=len(gpu_ids),
+                    initializer=_init_persistent_worker,
+                    initargs=(gpu_queue,),
+                )
+        try:
+            for m_idx, model_path in enumerate(model_paths_to_run):
+                print(f"  -> Dual-head aggregating Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+                if self._multi_gpu_enabled():
+                    preds = self._evaluate_model_multi_gpu(
+                        model_path,
+                        frames,
+                        pool=pool,
+                        E_singlet_true=E_singlet_true,
+                        E_triplet_true=E_triplet_true,
+                        include_multihead=True,
+                    )
+                else:
+                    preds = self._evaluate_model_single_gpu(
+                        model_path,
+                        frames,
+                        E_singlet_true=E_singlet_true,
+                        E_triplet_true=E_triplet_true,
+                        include_multihead=True,
+                    )
+                if preds is None:
+                    continue
+                preds_E, preds_F, preds_L_frame, _, mh = preds
+                primary_sets.append((preds_E, preds_F, preds_L_frame))
+                if not mh or other_head not in mh:
+                    raise ValueError(f"Multihead inference did not return head '{other_head}'.")
+                other_sets.append((mh[other_head]["energy"], mh[other_head]["forces"], preds_L_frame))
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+
+        primary = self._aggregate_prediction_sets(primary_sets, frames)
+        other = self._aggregate_prediction_sets(other_sets, frames)
+        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", **primary)
+        self._atomic_savez(other_cache_file, compressed=True, cache_format="ensemble_stats_v1", **other)
+        return primary, other
+
     def evaluate_pool_light(self, frames, cache_file="ensemble_unlabel.npz"):
         force_recompute = self._force_recompute()
         if force_recompute:
@@ -1399,48 +1572,87 @@ class EvaluationPipeline:
     def _run_ensemble_calibration(self):
         """Run ensemble on the calibration set only for pool active learning."""
         orig_mace_head = self.config.get("mace_head")
+        other_head = self._dual_head_other_head(orig_mace_head)
+        if other_head is not None:
+            print(
+                "\n[Calibration] Dual-head AL: collecting primary and secondary "
+                "validation calibration from one ensemble pass."
+            )
+            runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
+            primary_cache, other_cache = runner.evaluate_stats_multihead_once(
+                self.ds["frames"],
+                cache_file="ensemble_calibration.npz",
+                E_singlet_true=self.ds.get("E_singlet_true"),
+                E_triplet_true=self.ds.get("E_triplet_true"),
+                other_head=other_head,
+                other_cache_file=f"ensemble_calibration_{other_head}.npz",
+            )
+            other_E_true, other_F_true = self._truth_for_head(other_head)
+            primary = self._calibration_from_stats_cache(
+                primary_cache,
+                self.ds["E_true"],
+                self.ds["F_true"],
+                tag="ensemble_calibration",
+            )
+            other = self._calibration_from_stats_cache(
+                other_cache,
+                other_E_true,
+                other_F_true,
+                tag=f"ensemble_calibration_{other_head}",
+            )
+            self.stats_ens_other = other[0]
+            self.sigma_comp_other = other[2]
+            self.sigma_E_raw_other = other[3]
+            self.metrics_train_other = other[5]
+            self.metrics_eval_other = other[5]
+            shared_calibrators = self._build_shared_var_calibrators(
+                primary[0], primary[2], primary[3], other[0], other[2], other[3]
+            )
+            primary[5]["calibrators"] = shared_calibrators
+            self.metrics_train_other["calibrators"] = shared_calibrators
+            if str(self.eval_cfg.get("selection_calibration", "var")).lower() != "var":
+                print("[Calibration] Shared dual-head calibration is VAR-based; using selection_calibration='var'.")
+                self.eval_cfg["selection_calibration"] = "var"
+            print("[Calibration] Dual-head AL uses one shared VAR calibration for both heads.")
+            return primary[0], primary[1], primary[2], primary[3], shared_calibrators, primary[5]
+
         primary = self._evaluate_calibration_head(
             cache_file="ensemble_calibration.npz",
             tag="ensemble_calibration",
         )
+        return primary[0], primary[1], primary[2], primary[3], primary[4], primary[5]
 
-        shared_calibrators = primary[4]
-        other_head = self._dual_head_other_head(orig_mace_head)
-        if other_head is not None:
-            print(
-                f"\n[Calibration] Dual-head AL: evaluating validation calibration "
-                f"for secondary head '{other_head}'."
-            )
-            self.config["mace_head"] = other_head
-            try:
-                other_E_true, other_F_true = self._truth_for_head(other_head)
-                other = self._evaluate_calibration_head(
-                    cache_file=f"ensemble_calibration_{other_head}.npz",
-                    tag=f"ensemble_calibration_{other_head}",
-                    true_E=other_E_true,
-                    true_F=other_F_true,
-                )
-                self.stats_ens_other = other[0]
-                self.sigma_comp_other = other[2]
-                self.sigma_E_raw_other = other[3]
-                self.metrics_train_other = other[5]
-                self.metrics_eval_other = other[5]
-                shared_calibrators = self._build_shared_var_calibrators(
-                    primary[0], primary[2], primary[3], other[0], other[2], other[3]
-                )
-                primary[5]["calibrators"] = shared_calibrators
-                self.metrics_train_other["calibrators"] = shared_calibrators
-                if str(self.eval_cfg.get("selection_calibration", "var")).lower() != "var":
-                    print("[Calibration] Shared dual-head calibration is VAR-based; using selection_calibration='var'.")
-                    self.eval_cfg["selection_calibration"] = "var"
-                print("[Calibration] Dual-head AL uses one shared VAR calibration for both heads.")
-            finally:
-                if orig_mace_head is None:
-                    self.config.pop("mace_head", None)
-                else:
-                    self.config["mace_head"] = orig_mace_head
+    def _calibration_from_stats_cache(self, stats_cache, true_E, true_F, tag):
+        if int(stats_cache["n_models"]) < 2:
+            raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
+        mu_E_frame = stats_cache["mu_E"]
+        sigma_E_raw = stats_cache["sigma_E"]
+        mu_F_comp = stats_cache["mu_F"]
+        sigma_F_flat = stats_cache["sigma_F"]
+        mean_L_frame = stats_cache["mu_L_frame"]
 
-        return primary[0], primary[1], primary[2], primary[3], shared_calibrators, primary[5]
+        mf_list, idx = [], 0
+        for fr in self.ds["frames"]:
+            mf_list.append(mu_F_comp[idx:idx+len(fr)])
+            idx += len(fr)
+        stats_ens = MLFFStats(true_E, mu_E_frame, true_F, mf_list, self.ds["train_mask"], self.ds["val_mask"])
+        sigma_comp = sigma_F_flat.flatten()
+        sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+        metrics_cal = calculate_uq_metrics(
+            stats_ens,
+            sigma_comp,
+            sigma_atom,
+            sigma_E_raw,
+            "Train",
+            tag,
+            self.eval_log,
+            energy_per_atom=True,
+            save_plot_data=False,
+        )
+        uq_calibrators = metrics_cal.get("calibrators", {})
+        self._print_active_learning_calibration_summary(metrics_cal)
+        self._run_reference_slope_validation(stats_ens)
+        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal
 
     def _evaluate_calibration_head(self, cache_file, tag, true_E=None, true_F=None):
         """Evaluate one head on validation/calibration frames and fit diagnostics."""
@@ -1865,8 +2077,32 @@ class EvaluationPipeline:
 
         runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
         pool_cache_mode = str(self.eval_cfg.get("pool_cache_mode", "light")).lower()
+        orig_mace_head = self.config.get("mace_head", "triplet_reconstructed")
+        other_head = self._dual_head_other_head(orig_mace_head)
+        has_multihead = other_head is not None
+        used_one_pass_dual_pool = False
 
-        if pool_cache_mode == "raw":
+        if has_multihead and str(self.eval_cfg.get("mode", "all")).lower() == "active_learning":
+            print("[Pool-AL] Dual-head AL: collecting primary and secondary pool predictions from one ensemble pass.")
+            pool_stats, pool_stats_other = runner.evaluate_stats_multihead_once(
+                pool_frames,
+                cache_file="ensemble_unlabel.npz",
+                other_head=other_head,
+                other_cache_file=f"ensemble_unlabel_{other_head}.npz",
+            )
+            mu_E_pool = pool_stats["mu_E"]
+            sigma_E_pool = pool_stats["sigma_E"]
+            mu_F_pool = pool_stats["mu_F"]
+            sigma_F_pool = pool_stats["sigma_F"]
+            mu_L_pool = pool_stats["mu_L_frame"]
+            sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
+            _, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
+            mu_E_pool_other = pool_stats_other["mu_E"]
+            sigma_E_pool_other = pool_stats_other["sigma_E"]
+            sigma_F_pool_other = pool_stats_other["sigma_F"]
+            used_one_pass_dual_pool = True
+            pool_cache_mode = "stats"
+        elif pool_cache_mode == "raw":
             ens_E_pool, ens_F_pool_list, ens_L_pool, _ = runner.evaluate(pool_frames, cache_file="ensemble_unlabel.npz")
 
             ens_F_pool = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_pool_list], dtype=float)
@@ -1934,16 +2170,14 @@ class EvaluationPipeline:
         # Store original head uncertainties for diagnostic separation
         sigma_E_pool_orig = sigma_E_pool.copy() if sigma_E_pool is not None else None
         sigma_F_pool_orig = sigma_F_pool.copy() if sigma_F_pool is not None else None
-        sigma_E_pool_other = None
-        sigma_F_pool_other = None
-        mu_E_pool_other = None
-        orig_mace_head = self.config.get("mace_head", "triplet_reconstructed")
-        other_head = None
+        if not used_one_pass_dual_pool:
+            sigma_E_pool_other = None
+            sigma_F_pool_other = None
+            mu_E_pool_other = None
 
         # Handle multi-head OR active learning if enabled
         al_multihead_mode = self.eval_cfg.get("al_multihead_mode", "reconstructed").lower()
         model_fw = self.config.get("model_framework", "").lower()
-        has_multihead = False
         mace_heads_map = {}
         if model_fw == "mace":
             mace_heads_map = DEFAULT_MACE_HEADS_MAP.copy()
@@ -1952,12 +2186,12 @@ class EvaluationPipeline:
                 if head_name not in mace_heads_map:
                     mace_heads_map[head_name] = {}
                 mace_heads_map[head_name].update(head_cfg)
-            has_multihead = (
+            has_multihead = has_multihead or (
                 "singlet" in mace_heads_map
                 and any(k in mace_heads_map for k in ["triplet", "triplet_reconstructed", "delta"])
             )
 
-        if has_multihead and al_multihead_mode == "dual_head_or":
+        if has_multihead and al_multihead_mode == "dual_head_or" and not used_one_pass_dual_pool:
             if orig_mace_head == "singlet":
                 other_head = "triplet_reconstructed" if "triplet_reconstructed" in mace_heads_map else "triplet"
             else:
