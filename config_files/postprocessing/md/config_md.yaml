@@ -22,6 +22,7 @@ eval:
   plot: False  
   ensemble_folder: "../models_painn"
   ensemble_size: 10 
+  ensemble_force_recompute: false
   test_ensemble: False
   active_learning: "influence"  
 #  plot_smooth_window: 50     # (optional) window for the rolling‐mean plot
@@ -63,4 +64,3 @@ vib:
   vib_output_file: "vibrational_frequencies.txt"
   vdos_plot_file: "vdos_plot.png"
   delta: 10 
-

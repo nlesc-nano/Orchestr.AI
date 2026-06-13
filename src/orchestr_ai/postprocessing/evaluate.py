@@ -7,6 +7,7 @@ Refactored in 2025: Fully object-oriented, removing all legacy code.
 
 import os
 import time
+import shutil
 import multiprocessing as mp
 import numpy as np
 import pandas as pd
@@ -517,6 +518,41 @@ class EnsembleRunner:
             return torch.cuda.is_available() and torch.cuda.device_count() > 1
         return _parse_bool_like(flag, default=False)
 
+    def _force_recompute(self):
+        return _parse_bool_like(self.eval_cfg.get("ensemble_force_recompute", False), default=False)
+
+    @staticmethod
+    def _model_key(model_path):
+        try:
+            stat = os.stat(model_path)
+            return f"{os.path.abspath(model_path)}|{stat.st_size}|{stat.st_mtime_ns}"
+        except OSError:
+            return os.path.abspath(model_path)
+
+    @staticmethod
+    def _atomic_savez(path, compressed=True, **arrays):
+        tmp_path = f"{path}.tmp.npz"
+        if compressed:
+            np.savez_compressed(tmp_path, **arrays)
+        else:
+            np.savez(tmp_path, **arrays)
+        os.replace(tmp_path, path)
+
+    def _clear_resume_artifacts(self, cache_file):
+        checkpoint_file = f"{cache_file}.checkpoint.npz"
+        parts_dir = f"{cache_file}.parts"
+        for path in (cache_file, checkpoint_file):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as exc:
+                print(f"[EnsembleRunner] WARNING: Could not remove {path}: {exc}")
+        if os.path.isdir(parts_dir):
+            try:
+                shutil.rmtree(parts_dir)
+            except OSError as exc:
+                print(f"[EnsembleRunner] WARNING: Could not remove {parts_dir}: {exc}")
+
     def _evaluate_model_single_gpu(
         self,
         model_path,
@@ -647,7 +683,12 @@ class EnsembleRunner:
         return energy_pred, forces_pred, latent_frame, latent_atom
 
     def evaluate(self, frames, true_E=None, true_F=None, cache_file="ensemble_cache.npz", E_singlet_true=None, E_triplet_true=None):
-        if os.path.exists(cache_file):
+        force_recompute = self._force_recompute()
+        if force_recompute:
+            print(f"\n[EnsembleRunner] ensemble_force_recompute=true; rebuilding {cache_file} from scratch.")
+            self._clear_resume_artifacts(cache_file)
+
+        if not force_recompute and os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading cached predictions from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
 
@@ -659,6 +700,8 @@ class EnsembleRunner:
         ens_E, ens_F, ens_L_frame, ens_L_atom = [], [], [], []
 
         model_paths_to_run = self._model_paths()
+        parts_dir = f"{cache_file}.parts"
+        os.makedirs(parts_dir, exist_ok=True)
 
         # Initialize persistent worker pool if multi-GPU is enabled
         pool = None
@@ -680,6 +723,23 @@ class EnsembleRunner:
         try:
             # --- 2. Load and evaluate the found models ---
             for m_idx, model_path in enumerate(model_paths_to_run):
+                model_key = self._model_key(model_path)
+                part_file = os.path.join(parts_dir, f"model_{m_idx:04d}.npz")
+                if not force_recompute and os.path.exists(part_file):
+                    try:
+                        part = np.load(part_file, allow_pickle=True)
+                        cached_key = str(part["model_key"]) if "model_key" in part else ""
+                        if cached_key == model_key:
+                            print(f"  -> Reusing cached raw predictions for Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+                            ens_E.append(part["E"])
+                            ens_F.append(list(part["F"]))
+                            ens_L_frame.append(part["L_frame"])
+                            ens_L_atom.append(None)
+                            continue
+                        print(f"  -> Raw part cache mismatch for Model {m_idx+1}; recomputing.")
+                    except Exception as exc:
+                        print(f"  -> Failed to load raw part cache {part_file}: {exc}; recomputing.")
+
                 print(f"  -> Loading Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
 
                 if self._multi_gpu_enabled():
@@ -710,6 +770,22 @@ class EnsembleRunner:
                 ens_F.append(preds_F)
                 ens_L_frame.append(preds_L_frame)
                 ens_L_atom.append(preds_L_atom)
+                self._atomic_savez(
+                    part_file,
+                    compressed=True,
+                    cache_format="ensemble_raw_model_v1",
+                    model_key=np.array(model_key),
+                    model_path=np.array(model_path),
+                    model_index=np.array(m_idx, dtype=int),
+                    E=np.asarray(preds_E, dtype=float),
+                    F=np.asarray(preds_F, dtype=object),
+                    L_frame=_coerce_frame_latents(
+                        preds_L_frame,
+                        len(frames),
+                        context=f"raw model {m_idx+1} frame latents",
+                    ),
+                )
+                print(f"     Saved raw model checkpoint to {part_file}")
         finally:
             if pool is not None:
                 pool.close()
@@ -729,16 +805,27 @@ class EnsembleRunner:
         ens_L_atom = np.array(ens_L_atom, dtype=object)
 
         print(f"[EnsembleRunner] Saving uncompressed cache to {cache_file} (omitting atom latents)...")
-        np.savez(
+        self._atomic_savez(
             cache_file,
+            compressed=False,
             ens_E=ens_E,
             ens_F=ens_F,
             ens_L_frame=ens_L_frame
         )
+        try:
+            shutil.rmtree(parts_dir)
+        except OSError:
+            pass
         return ens_E, ens_F, ens_L_frame, ens_L_atom
 
     def evaluate_stats(self, frames, true_E=None, true_F=None, cache_file="ensemble.npz", E_singlet_true=None, E_triplet_true=None):
-        if os.path.exists(cache_file):
+        force_recompute = self._force_recompute()
+        checkpoint_file = f"{cache_file}.checkpoint.npz"
+        if force_recompute:
+            print(f"\n[EnsembleRunner] ensemble_force_recompute=true; rebuilding {cache_file} from scratch.")
+            self._clear_resume_artifacts(cache_file)
+
+        if not force_recompute and os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading aggregate cache from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
             if "cache_format" in data and str(data["cache_format"]) == "ensemble_stats_v1":
@@ -747,12 +834,50 @@ class EnsembleRunner:
 
         print(f"\n[EnsembleRunner] Aggregate inference for {len(frames)} labeled frames...")
         model_paths_to_run = self._model_paths()
+        current_model_keys = {self._model_key(path) for path in model_paths_to_run}
 
         sum_E = sum_E2 = None
         sum_F = sum_F2 = None
         sum_L = sum_L2 = None
         count_E = count_F = count_L = None
         n_models_done = 0
+        model_keys_done = []
+        model_paths_done = []
+
+        if not force_recompute and os.path.exists(checkpoint_file):
+            try:
+                ckpt = np.load(checkpoint_file, allow_pickle=True)
+                if "cache_format" in ckpt and str(ckpt["cache_format"]) == "ensemble_stats_checkpoint_v1":
+                    sum_E = ckpt["sum_E"]
+                    sum_E2 = ckpt["sum_E2"]
+                    sum_F = ckpt["sum_F"]
+                    sum_F2 = ckpt["sum_F2"]
+                    sum_L = ckpt["sum_L"]
+                    sum_L2 = ckpt["sum_L2"]
+                    count_E = ckpt["count_E"]
+                    count_F = ckpt["count_F"]
+                    count_L = ckpt["count_L"]
+                    loaded_model_keys_done = [str(x) for x in ckpt["model_keys_done"]]
+                    if not set(loaded_model_keys_done).issubset(current_model_keys):
+                        raise ValueError("checkpoint model list does not match current ensemble files")
+                    n_models_done = int(ckpt["n_models_done"])
+                    model_keys_done = loaded_model_keys_done
+                    model_paths_done = [str(x) for x in ckpt["model_paths_done"]]
+                    print(
+                        f"[EnsembleRunner] Resuming aggregate cache from {checkpoint_file}: "
+                        f"{n_models_done} model(s) already complete."
+                    )
+                else:
+                    print("[EnsembleRunner] Existing checkpoint has unknown format; ignoring.")
+            except Exception as exc:
+                print(f"[EnsembleRunner] Failed to load checkpoint {checkpoint_file}: {exc}; rebuilding.")
+                sum_E = sum_E2 = None
+                sum_F = sum_F2 = None
+                sum_L = sum_L2 = None
+                count_E = count_F = count_L = None
+                n_models_done = 0
+                model_keys_done = []
+                model_paths_done = []
 
         # Initialize persistent worker pool if multi-GPU is enabled
         pool = None
@@ -773,6 +898,11 @@ class EnsembleRunner:
 
         try:
             for m_idx, model_path in enumerate(model_paths_to_run):
+                model_key = self._model_key(model_path)
+                if model_key in model_keys_done:
+                    print(f"  -> Skipping completed Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+                    continue
+
                 print(f"  -> Aggregating Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
 
                 if self._multi_gpu_enabled():
@@ -831,6 +961,28 @@ class EnsembleRunner:
                 count_F += f_mask.astype(float)
                 count_L += l_mask.astype(float)
                 n_models_done += 1
+                model_keys_done.append(model_key)
+                model_paths_done.append(model_path)
+
+                self._atomic_savez(
+                    checkpoint_file,
+                    compressed=True,
+                    cache_format="ensemble_stats_checkpoint_v1",
+                    cache_file=np.array(cache_file),
+                    model_keys_done=np.asarray(model_keys_done, dtype=str),
+                    model_paths_done=np.asarray(model_paths_done, dtype=str),
+                    n_models_done=np.array(n_models_done, dtype=int),
+                    sum_E=sum_E,
+                    sum_E2=sum_E2,
+                    sum_F=sum_F,
+                    sum_F2=sum_F2,
+                    sum_L=sum_L,
+                    sum_L2=sum_L2,
+                    count_E=count_E,
+                    count_F=count_F,
+                    count_L=count_L,
+                )
+                print(f"     Saved aggregate checkpoint to {checkpoint_file}")
 
                 del preds, preds_E, preds_F, preds_L_frame, e, f, l_frame
         finally:
@@ -872,11 +1024,21 @@ class EnsembleRunner:
         }
 
         print(f"[EnsembleRunner] Saving aggregate cache to {cache_file}...")
-        np.savez_compressed(cache_file, cache_format="ensemble_stats_v1", **result)
+        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", **result)
+        try:
+            if os.path.exists(checkpoint_file):
+                os.remove(checkpoint_file)
+        except OSError:
+            pass
         return result
 
     def evaluate_pool_light(self, frames, cache_file="ensemble_unlabel.npz"):
-        if os.path.exists(cache_file):
+        force_recompute = self._force_recompute()
+        if force_recompute:
+            print(f"\n[EnsembleRunner] ensemble_force_recompute=true; rebuilding {cache_file} from scratch.")
+            self._clear_resume_artifacts(cache_file)
+
+        if not force_recompute and os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading light pool cache from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
             if "cache_format" in data and str(data["cache_format"]) == "ensemble_pool_light_v1":
@@ -900,7 +1062,7 @@ class EnsembleRunner:
         }
 
         print(f"[EnsembleRunner] Saving light pool cache to {cache_file}...")
-        np.savez_compressed(cache_file, cache_format="ensemble_pool_light_v1", **result)
+        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_pool_light_v1", **result)
         return result
 
 def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):
@@ -941,7 +1103,21 @@ class EvaluationPipeline:
         os.makedirs("diagnostics", exist_ok=True)
         os.makedirs("uq_plots", exist_ok=True)
         self.eval_log = self.eval_cfg.get("eval_log_file", "eval_log.txt")
-        open(self.eval_log, "w").close() 
+        force_recompute = _parse_bool_like(self.eval_cfg.get("ensemble_force_recompute", False), default=False)
+        has_resume_artifacts = False
+        if not force_recompute:
+            try:
+                has_resume_artifacts = any(
+                    name.endswith(".checkpoint.npz") or name.endswith(".npz.parts")
+                    for name in os.listdir(".")
+                )
+            except OSError:
+                has_resume_artifacts = False
+        if has_resume_artifacts:
+            print(f"[EvaluationPipeline] Resume artifacts found; appending to {self.eval_log}.")
+            open(self.eval_log, "a").close()
+        else:
+            open(self.eval_log, "w").close()
         
         framework = self.config.get("model_framework", "schnetpack").lower()
 
