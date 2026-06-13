@@ -46,6 +46,9 @@ md:
   friction_coefficient: 0.01
   steps: 1000  
   xyz_print_interval: 5  
+  restart: false
+  # restart_file defaults to trajectory_file_md when restart is true.
+  # restart_file: "md_trajectory.xyz"
 
 geo_opt:
   geo_opt_fmax: 0.02
@@ -60,5 +63,4 @@ vib:
   vib_output_file: "vibrational_frequencies.txt"
   vdos_plot_file: "vdos_plot.png"
   delta: 10 
-
 
