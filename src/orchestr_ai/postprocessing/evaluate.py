@@ -1252,6 +1252,15 @@ class EnsembleRunner:
     ):
         other_cache_file = other_cache_file or f"ensemble_calibration_{other_head}.npz"
         force_recompute = self._force_recompute()
+        checkpoint_file = f"{cache_file}.multihead_checkpoint.npz"
+        if force_recompute:
+            for path in (cache_file, other_cache_file, checkpoint_file):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError as exc:
+                    print(f"[EnsembleRunner] WARNING: Could not remove {path}: {exc}")
+
         if not force_recompute and os.path.exists(cache_file) and os.path.exists(other_cache_file):
             data_a = np.load(cache_file, allow_pickle=True)
             data_b = np.load(other_cache_file, allow_pickle=True)
@@ -1268,7 +1277,47 @@ class EnsembleRunner:
         print(f"\n[EnsembleRunner] One-pass dual-head aggregate inference for {len(frames)} frames...")
         primary_sets = []
         other_sets = []
+        model_keys_done = []
+        model_paths_done = []
         model_paths_to_run = self._model_paths()
+
+        if not force_recompute and os.path.exists(checkpoint_file):
+            try:
+                ckpt = np.load(checkpoint_file, allow_pickle=True)
+                if "cache_format" in ckpt and str(ckpt["cache_format"]) == "ensemble_multihead_parts_v1":
+                    current_keys = {self._model_key(path) for path in model_paths_to_run}
+                    loaded_keys = [str(x) for x in ckpt["model_keys_done"]]
+                    if not set(loaded_keys).issubset(current_keys):
+                        raise ValueError("checkpoint model list does not match current ensemble files")
+                    model_keys_done = loaded_keys
+                    model_paths_done = [str(x) for x in ckpt["model_paths_done"]]
+                    primary_E_parts = list(ckpt["primary_E_parts"])
+                    primary_F_parts = list(ckpt["primary_F_parts"])
+                    primary_L_parts = list(ckpt["primary_L_parts"])
+                    other_E_parts = list(ckpt["other_E_parts"])
+                    other_F_parts = list(ckpt["other_F_parts"])
+                    other_L_parts = list(ckpt["other_L_parts"])
+                    primary_sets = [
+                        (primary_E_parts[i], list(primary_F_parts[i]), primary_L_parts[i])
+                        for i in range(len(primary_E_parts))
+                    ]
+                    other_sets = [
+                        (other_E_parts[i], list(other_F_parts[i]), other_L_parts[i])
+                        for i in range(len(other_E_parts))
+                    ]
+                    print(
+                        f"[EnsembleRunner] Resuming one-pass dual-head checkpoint "
+                        f"from {checkpoint_file}: {len(model_keys_done)} model(s) complete."
+                    )
+                else:
+                    print("[EnsembleRunner] Existing multihead checkpoint has unknown format; ignoring.")
+            except Exception as exc:
+                print(f"[EnsembleRunner] Failed to load multihead checkpoint {checkpoint_file}: {exc}; rebuilding.")
+                primary_sets = []
+                other_sets = []
+                model_keys_done = []
+                model_paths_done = []
+
         pool = None
         if self._multi_gpu_enabled() and len(model_paths_to_run) > 0:
             gpu_ids = _configured_gpu_ids(self.eval_cfg)
@@ -1284,6 +1333,11 @@ class EnsembleRunner:
                 )
         try:
             for m_idx, model_path in enumerate(model_paths_to_run):
+                model_key = self._model_key(model_path)
+                if model_key in model_keys_done:
+                    print(f"  -> Skipping completed dual-head Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
+                    continue
+
                 print(f"  -> Dual-head aggregating Model {m_idx+1}/{len(model_paths_to_run)}: {model_path}")
                 if self._multi_gpu_enabled():
                     preds = self._evaluate_model_multi_gpu(
@@ -1309,6 +1363,25 @@ class EnsembleRunner:
                 if not mh or other_head not in mh:
                     raise ValueError(f"Multihead inference did not return head '{other_head}'.")
                 other_sets.append((mh[other_head]["energy"], mh[other_head]["forces"], preds_L_frame))
+                model_keys_done.append(model_key)
+                model_paths_done.append(model_path)
+                self._atomic_savez(
+                    checkpoint_file,
+                    compressed=True,
+                    cache_format="ensemble_multihead_parts_v1",
+                    cache_file=np.array(cache_file),
+                    other_cache_file=np.array(other_cache_file),
+                    other_head=np.array(other_head),
+                    model_keys_done=np.asarray(model_keys_done, dtype=str),
+                    model_paths_done=np.asarray(model_paths_done, dtype=str),
+                    primary_E_parts=np.asarray([p[0] for p in primary_sets], dtype=object),
+                    primary_F_parts=np.asarray([p[1] for p in primary_sets], dtype=object),
+                    primary_L_parts=np.asarray([p[2] for p in primary_sets], dtype=object),
+                    other_E_parts=np.asarray([p[0] for p in other_sets], dtype=object),
+                    other_F_parts=np.asarray([p[1] for p in other_sets], dtype=object),
+                    other_L_parts=np.asarray([p[2] for p in other_sets], dtype=object),
+                )
+                print(f"     Saved one-pass dual-head checkpoint to {checkpoint_file}")
         finally:
             if pool is not None:
                 pool.close()
@@ -1318,6 +1391,11 @@ class EnsembleRunner:
         other = self._aggregate_prediction_sets(other_sets, frames)
         self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", **primary)
         self._atomic_savez(other_cache_file, compressed=True, cache_format="ensemble_stats_v1", **other)
+        try:
+            if os.path.exists(checkpoint_file):
+                os.remove(checkpoint_file)
+        except OSError:
+            pass
         return primary, other
 
     def evaluate_pool_light(self, frames, cache_file="ensemble_unlabel.npz"):
