@@ -51,7 +51,8 @@ from orchestr_ai.postprocessing.plots.al_diagnostics import generate_al_diagnost
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
     fast_filter_by_rdf_kdtree,
-    debug_plot_rdfs
+    debug_plot_rdfs,
+    fast_filter_connectivity_and_arms
 )
 
 def _parse_bool_like(value, default=False):
@@ -2334,16 +2335,56 @@ class EvaluationPipeline:
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
         F_pool_thin = mu_L_pool[thin_idx].astype(float)
 
+        # --- Compute RDF thresholds and physical mask first ---
+        rdf_cache = "rdf_thresholds_cache.npz"
+        if os.path.exists(rdf_cache):
+            print(f"[Pool-AL] Loading cached RDF thresholds...")
+            data = np.load(rdf_cache, allow_pickle=True)
+            if "rdf_thresholds" in data:
+                rdf_thresholds = data["rdf_thresholds"].item()
+            else:
+                rdf_thresholds = {(str(r[0]), str(r[1])): (float(r[2]), float(r[3])) for r in data["thresholds"]}
+        else:
+            print("[Pool-AL] Computing RDF thresholds from validation frames...")
+            rdf_thresholds = compute_rdf_thresholds_from_reference(self.ds["val_frames_ref"], stride=self.eval_cfg.get("rdf_stride", 5))
+            np.savez_compressed(rdf_cache, rdf_thresholds=rdf_thresholds)
+
+        debug_plot_rdfs(self.ds["val_frames_ref"], rdf_thresholds)
+        rdf_ok_mask = fast_filter_by_rdf_kdtree(pool_frames_thin, rdf_thresholds)
+
+        margin = self.eval_cfg.get('detachment_margin', 0.8)
+        arm_tol = float(self.eval_cfg.get('arm_tolerance', 0.5))
+        rdf_ok_mask = fast_filter_connectivity_and_arms(
+            frames=pool_frames_thin,
+            ok_mask=rdf_ok_mask,
+            margin=margin,
+            arm_tol=arm_tol,
+            verbose=True
+        )
+
         # --- Compute SOAP for thinned pool frames ---
         if soap_species is not None:
             print("[Pool-AL] Computing model-independent SOAP descriptors for thinned pool frames...")
-            soap_pool_thin, _ = compute_soap_features(
-                pool_frames_thin,
-                species=soap_species,
-                r_cut=self.eval_cfg.get("soap_rcut", 4.0),
-                n_max=self.eval_cfg.get("soap_nmax", 4),
-                l_max=self.eval_cfg.get("soap_lmax", 4),
-            )
+            physical_indices = np.where(rdf_ok_mask)[0]
+            physical_frames = [pool_frames_thin[i] for i in physical_indices]
+            
+            soap_pool_thin = None
+            if len(physical_frames) > 0:
+                print(f"[Pool-AL] Computing SOAP only for {len(physical_frames)} physical frames out of {len(pool_frames_thin)} total thin frames...")
+                soap_phys, _ = compute_soap_features(
+                    physical_frames,
+                    species=soap_species,
+                    r_cut=self.eval_cfg.get("soap_rcut", 4.0),
+                    n_max=self.eval_cfg.get("soap_nmax", 4),
+                    l_max=self.eval_cfg.get("soap_lmax", 4),
+                )
+                if soap_phys is not None:
+                    n_features = soap_phys.shape[1]
+                    soap_pool_thin = np.zeros((len(pool_frames_thin), n_features))
+                    soap_pool_thin[physical_indices] = soap_phys
+            else:
+                print("[Pool-AL] Warning: No physical frames found in the thinned pool. Skipping SOAP.")
+                
             if soap_pool_thin is not None:
                 F_pool_thin = soap_pool_thin
 
@@ -2618,22 +2659,7 @@ class EvaluationPipeline:
                 expected_abs_F_mean_other = sigma_F_pool_mean_other_thin * _GAUSSIAN_SIGMA_TO_ABS
                 expected_abs_F_max_other = sigma_F_pool_max_other_thin * _GAUSSIAN_SIGMA_TO_ABS
 
-        # RDF filtering
-        rdf_cache = "rdf_thresholds_cache.npz"
-        if os.path.exists(rdf_cache):
-            print(f"[Pool-AL] Loading cached RDF thresholds...")
-            data = np.load(rdf_cache, allow_pickle=True)
-            if "rdf_thresholds" in data:
-                rdf_thresholds = data["rdf_thresholds"].item()
-            else:
-                rdf_thresholds = {(str(r[0]), str(r[1])): (float(r[2]), float(r[3])) for r in data["thresholds"]}
-        else:
-            print("[Pool-AL] Computing RDF thresholds from validation frames...")
-            rdf_thresholds = compute_rdf_thresholds_from_reference(self.ds["val_frames_ref"], stride=self.eval_cfg.get("rdf_stride", 5))
-            np.savez_compressed(rdf_cache, rdf_thresholds=rdf_thresholds)
-
-        debug_plot_rdfs(self.ds["val_frames_ref"], rdf_thresholds)
-        rdf_ok_mask = fast_filter_by_rdf_kdtree(pool_frames_thin, rdf_thresholds)
+        # RDF filtering (already computed pre-SOAP)
 
         # Energy Trace Logging
         import scipy.spatial.distance
@@ -2706,7 +2732,7 @@ class EvaluationPipeline:
                     pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
                     forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
                     mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_orig_thin,
-                    rdf_thresholds=rdf_thresholds,
+                    rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
                     frame_mean_force_pool=frame_mean_force_pool_thin,
@@ -2760,7 +2786,7 @@ class EvaluationPipeline:
                         pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq_other, L_chol_other,
                         forces_train=train_forces_other, sigma_energy=sigma_energy_train_other, sigma_force=sigma_force_train_other,
                         mu_E_frame_train=mu_E_train_other, mu_E_pool=mu_E_pool_other_thin, sigma_E_pool=sigma_E_pool_other_thin,
-                        rdf_thresholds=rdf_thresholds,
+                        rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
                         sigma_F_pool_mean=sigma_F_pool_mean_other_thin, sigma_F_pool_max=sigma_F_pool_max_other_thin,
                         frame_max_force_pool=frame_max_force_pool_thin,
                         frame_mean_force_pool=frame_mean_force_pool_thin,
@@ -2813,7 +2839,7 @@ class EvaluationPipeline:
                     pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
                     forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
                     mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
-                    rdf_thresholds=rdf_thresholds,
+                    rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
                     frame_mean_force_pool=frame_mean_force_pool_thin,

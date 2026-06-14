@@ -69,33 +69,18 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
         )
         
         # 3. Create SOAP vectors frame-by-frame to avoid multiprocessing hangs and show progress
-        from scipy.spatial.distance import pdist
         features_list = []
         n_frames = len(frames)
-        n_features = soap.get_number_of_features()
         print(f"[SOAP] Computing features sequentially for {n_frames} frames...")
         for idx, fr in enumerate(frames):
-            positions = fr.positions
-            # Check for NaN, Inf, or duplicate/overlapping atom coordinates (which cause division by zero in SOAP)
-            is_unstable = False
-            if np.isnan(positions).any() or np.isinf(positions).any():
-                is_unstable = True
-                print(f"  -> [SOAP] Warning: Frame {idx + 1}/{n_frames} has NaN or Inf coordinates. Returning zeros.")
-            elif len(positions) > 1 and np.any(pdist(positions) < 0.01):
-                is_unstable = True
-                print(f"  -> [SOAP] Warning: Frame {idx + 1}/{n_frames} has overlapping atoms (< 0.01 Å). Returning zeros.")
-            
-            if is_unstable:
-                feat_arr = np.zeros(n_features)
-            else:
-                try:
-                    feat = soap.create(fr)
-                    feat_arr = np.asarray(feat)
-                    if feat_arr.ndim > 1:
-                        feat_arr = feat_arr.ravel()
-                except Exception as e:
-                    print(f"  -> [SOAP] Warning: Failed to compute SOAP for frame {idx + 1}/{n_frames}: {e}. Returning zeros.")
-                    feat_arr = np.zeros(n_features)
+            try:
+                feat = soap.create(fr)
+                feat_arr = np.asarray(feat)
+                if feat_arr.ndim > 1:
+                    feat_arr = feat_arr.ravel()
+            except Exception as e:
+                print(f"  -> [SOAP] Warning: Failed to compute SOAP for frame {idx + 1}/{n_frames}: {e}. Returning zeros.")
+                feat_arr = np.zeros(soap.get_number_of_features())
             
             features_list.append(feat_arr)
             if (idx + 1) % max(1, n_frames // 10) == 0 or idx == n_frames - 1:
@@ -617,22 +602,25 @@ class _PoolActiveLearner:
                 f"σF_max>={self.hard_sigma_F_max_min:.4g}"
             )
 
-        # Apply RDF Filter (Catches overlaps)
-        self.rdf_ok_mask = fast_filter_by_rdf_kdtree(self.pool_frames, self.rdf_thresholds)
-    
-        # ---> NEW: Apply Fully Automated Connectivity & Arm Filter <---
-        # Fetch configurations (with safe fallbacks)
-        margin = getattr(self, 'detachment_margin', 0.8)
-        arm_tol = float(getattr(self, 'arm_tolerance', 0.5))
+        # Apply RDF Filter (Catches overlaps) and Connectivity & Arm Filter
+        if hasattr(self, 'rdf_ok_mask') and self.rdf_ok_mask is not None:
+            print(f"[AL] Using pre-computed physical/RDF mask. Physical frames: {self.rdf_ok_mask.sum()}/{len(self.rdf_ok_mask)}")
+        else:
+            self.rdf_ok_mask = fast_filter_by_rdf_kdtree(self.pool_frames, self.rdf_thresholds)
+        
+            # ---> NEW: Apply Fully Automated Connectivity & Arm Filter <---
+            # Fetch configurations (with safe fallbacks)
+            margin = getattr(self, 'detachment_margin', 0.8)
+            arm_tol = float(getattr(self, 'arm_tolerance', 0.5))
 
-        # Update the mask using our dedicated geometric function
-        self.rdf_ok_mask = fast_filter_connectivity_and_arms(
-            frames=self.pool_frames, 
-            ok_mask=self.rdf_ok_mask, 
-            margin=margin, 
-            arm_tol=arm_tol,
-            verbose=True
-        )
+            # Update the mask using our dedicated geometric function
+            self.rdf_ok_mask = fast_filter_connectivity_and_arms(
+                frames=self.pool_frames, 
+                ok_mask=self.rdf_ok_mask, 
+                margin=margin, 
+                arm_tol=arm_tol,
+                verbose=True
+            )
 
         # ---------------------------------------------------------
         ok_idx = np.where(self.rdf_ok_mask)[0]
