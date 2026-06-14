@@ -69,13 +69,34 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
         )
         
         # 3. Create SOAP vectors frame-by-frame to avoid multiprocessing hangs and show progress
+        from scipy.spatial.distance import pdist
         features_list = []
         n_frames = len(frames)
+        n_features = soap.get_number_of_features()
         print(f"[SOAP] Computing features sequentially for {n_frames} frames...")
         for idx, fr in enumerate(frames):
-            feat = soap.create(fr)
-            # Ensure it is at least a 1D/2D array
-            feat_arr = np.asarray(feat)
+            positions = fr.positions
+            # Check for NaN, Inf, or duplicate/overlapping atom coordinates (which cause division by zero in SOAP)
+            is_unstable = False
+            if np.isnan(positions).any() or np.isinf(positions).any():
+                is_unstable = True
+                print(f"  -> [SOAP] Warning: Frame {idx + 1}/{n_frames} has NaN or Inf coordinates. Returning zeros.")
+            elif len(positions) > 1 and np.any(pdist(positions) < 0.01):
+                is_unstable = True
+                print(f"  -> [SOAP] Warning: Frame {idx + 1}/{n_frames} has overlapping atoms (< 0.01 Å). Returning zeros.")
+            
+            if is_unstable:
+                feat_arr = np.zeros(n_features)
+            else:
+                try:
+                    feat = soap.create(fr)
+                    feat_arr = np.asarray(feat)
+                    if feat_arr.ndim > 1:
+                        feat_arr = feat_arr.ravel()
+                except Exception as e:
+                    print(f"  -> [SOAP] Warning: Failed to compute SOAP for frame {idx + 1}/{n_frames}: {e}. Returning zeros.")
+                    feat_arr = np.zeros(n_features)
+            
             features_list.append(feat_arr)
             if (idx + 1) % max(1, n_frames // 10) == 0 or idx == n_frames - 1:
                 print(f"  -> SOAP progress: {idx + 1}/{n_frames} frames completed...")
