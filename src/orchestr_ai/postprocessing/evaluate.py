@@ -1529,8 +1529,9 @@ class EvaluationPipeline:
             self.neighbour_list = setup_neighbor_list(config)
 
         eval_mode = str(self.eval_cfg.get("mode", "all")).lower()
+        plot_uq_config = self.eval_cfg.get("uq_plots") if "uq_plots" in self.eval_cfg else self.eval_cfg.get("plot")
         self.do_plot = _parse_bool_like(
-            self.eval_cfg.get("plot"),
+            plot_uq_config,
             default=(eval_mode == "uq_stats"),
         )
         
@@ -2855,7 +2856,8 @@ class EvaluationPipeline:
             al_csv_path = self.eval_cfg.get("al_diagnostics_csv", "al_pool_diagnostics.csv")
             write_pool_al_diagnostics_csv(al_diagnostics_runs, al_csv_path)
             plot_al_default = str(self.eval_cfg.get("mode", "all")).lower() == "active_learning"
-            if _parse_bool_like(self.eval_cfg.get("plot_AL"), default=plot_al_default):
+            plot_al_config = self.eval_cfg.get("al_plots") if "al_plots" in self.eval_cfg else self.eval_cfg.get("plot_AL")
+            if _parse_bool_like(plot_al_config, default=plot_al_default):
                 al_plot_dir = self.eval_cfg.get("al_plot_dir", "al_plots")
                 os.makedirs(al_plot_dir, exist_ok=True)
                 generate_al_diagnostic_plots(
