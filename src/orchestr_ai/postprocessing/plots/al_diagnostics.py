@@ -181,6 +181,57 @@ def _apply_robust_ylim(ax, y, arrays, *, floor_zero=False, threshold_values=()):
     return limits
 
 
+def _realistic_trace_limits(y, arrays, *, floor_zero=False, pad=0.05):
+    y = np.asarray(y, dtype=float)
+    mask = _realistic_mask(arrays, y)
+    vals = y[mask] if mask.shape == y.shape else y[np.isfinite(y)]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        vals = y[np.isfinite(y)]
+    if vals.size == 0:
+        return None
+    lo = float(np.nanmin(vals))
+    hi = float(np.nanmax(vals))
+    if floor_zero:
+        lo = 0.0
+        hi_limit = hi * 1.05 if hi > 0.0 else 0.05
+        return 0.0, hi_limit
+    else:
+        if hi > 0.0:
+            hi_limit = hi * 1.05
+        elif hi < 0.0:
+            hi_limit = hi * 0.95
+        else:
+            hi_limit = 0.05
+        span = hi_limit - lo
+        if span <= 0:
+            span = 1.0
+        lo_limit = lo - span * pad
+        return lo_limit, hi_limit
+
+
+def _apply_trace_ylim(ax, y, arrays, *, floor_zero=False):
+    limits = _realistic_trace_limits(y, arrays, floor_zero=floor_zero)
+    if limits is None:
+        return None
+    ax.set_ylim(*limits)
+    finite = np.isfinite(y)
+    clipped = int(np.sum(finite & ((y < limits[0]) | (y > limits[1]))))
+    if clipped:
+        ax.text(
+            0.995, 0.94, f"{clipped} outlier(s) outside y-range",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.8),
+        )
+    return limits
+
+
+def _plotly_trace_range(fig, row, y, arrays, *, floor_zero=False):
+    limits = _realistic_trace_limits(y, arrays, floor_zero=floor_zero)
+    if limits is not None:
+        fig.update_yaxes(range=list(limits), row=row, col=1)
+
+
 def _apply_cap_ylim(ax, y, cap, *, pad=0.05):
     if not np.isfinite(cap) or cap <= 0:
         return None
@@ -217,22 +268,23 @@ def _apply_score_ylim(ax, score, arrays, thresholds):
     mask = _in_cap_mask(arrays, thresholds) & np.isfinite(score)
     vals = score[mask]
     if vals.size == 0:
-        return _apply_robust_ylim(ax, score, arrays, floor_zero=True)
-    ymax = float(np.nanpercentile(vals, 99.0))
-    shortlist_vals = score[mask & arrays["shortlist"]]
-    if shortlist_vals.size:
-        ymax = max(ymax, float(np.nanmax(shortlist_vals)))
+        mask_realistic = arrays["geom_ok"] & arrays["caps_ok"] & np.isfinite(score)
+        vals = score[mask_realistic]
+    if vals.size == 0:
+        vals = score[np.isfinite(score)]
+    ymax = float(np.nanmax(vals)) if vals.size else 1.0
     if not np.isfinite(ymax) or ymax <= 0:
         ymax = 1.0
-    ax.set_ylim(0.0, ymax * 1.08)
-    clipped = int(np.sum(np.isfinite(score) & (score > ymax * 1.08)))
+    limit = ymax * 1.05
+    ax.set_ylim(0.0, limit)
+    clipped = int(np.sum(np.isfinite(score) & (score > limit)))
     if clipped:
         ax.text(
             0.995, 0.94, f"{clipped} outlier(s) outside y-range",
             transform=ax.transAxes, ha="right", va="top", fontsize=8,
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.8),
         )
-    return 0.0, ymax * 1.08
+    return 0.0, limit
 
 
 def _threshold_values(thresholds, keys, scale=1.0):
@@ -339,14 +391,14 @@ def _plotly_score_range(fig, row, score, arrays, thresholds):
     mask = _in_cap_mask(arrays, thresholds) & np.isfinite(score)
     vals = score[mask]
     if vals.size == 0:
-        return _plotly_range(fig, row, score, arrays, floor_zero=True)
-    ymax = float(np.nanpercentile(vals, 99.0))
-    shortlist_vals = score[mask & arrays["shortlist"]]
-    if shortlist_vals.size:
-        ymax = max(ymax, float(np.nanmax(shortlist_vals)))
+        mask_realistic = arrays["geom_ok"] & arrays["caps_ok"] & np.isfinite(score)
+        vals = score[mask_realistic]
+    if vals.size == 0:
+        vals = score[np.isfinite(score)]
+    ymax = float(np.nanmax(vals)) if vals.size else 1.0
     if not np.isfinite(ymax) or ymax <= 0:
         ymax = 1.0
-    fig.update_yaxes(range=[0.0, ymax * 1.08], row=row, col=1)
+    fig.update_yaxes(range=[0.0, ymax * 1.05], row=row, col=1)
 
 
 def plot_al_trace_state(rows, metadata, state, out_dir="al_plots", window=50, drop_first=True, dpi=300):
@@ -373,21 +425,19 @@ def plot_al_trace_state(rows, metadata, state, out_dir="al_plots", window=50, dr
     else:
         dE_limits = dE
     _mark_events(axes[0], x, dE, arrays, show_label=True)
-    _apply_robust_ylim(axes[0], dE, arrays)
+    _apply_trace_ylim(axes[0], dE, arrays, floor_zero=False)
     axes[0].set_ylabel("ΔE (eV)")
     axes[0].set_title(f"Energy relative to {e_ref_label}: E - {e_ref:.6g} eV", fontsize=10)
     axes[0].legend(loc="best", fontsize=8, ncol=4)
 
     axes[1].plot(x, arrays["Fmax"], lw=1.0, color="#1b7837")
-    fmax_keys = [("thr_Fmag", "#636363", "low"), ("thr_Fmag_hi_eff", "#969696", "upper cap"), ("train_Fmax_hard_cap", "#b2182b", "hard cap")]
-    _threshold_lines(axes[1], thr, fmax_keys)
     _mark_events(axes[1], x, arrays["Fmax"], arrays)
-    _apply_robust_ylim(axes[1], arrays["Fmax"], arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in fmax_keys]))
+    _apply_trace_ylim(axes[1], arrays["Fmax"], arrays, floor_zero=True)
     axes[1].set_ylabel("Fmax (eV/Å)")
 
     axes[2].plot(x, arrays["Fmean"], lw=1.0, color="#5aae61")
     _mark_events(axes[2], x, arrays["Fmean"], arrays)
-    _apply_robust_ylim(axes[2], arrays["Fmean"], arrays, floor_zero=True)
+    _apply_trace_ylim(axes[2], arrays["Fmean"], arrays, floor_zero=True)
     axes[2].set_ylabel("Fmean (eV/Å)")
 
     _plot_status_track(axes[3], x, arrays)
@@ -475,17 +525,15 @@ def plot_al_trace_state_interactive(rows, metadata, state, out_dir="al_plots", w
     else:
         dE_limits = dE
     _add_plotly_events(fig, 1, x, dE, arrays, go)
-    _plotly_range(fig, 1, dE, arrays)
+    _plotly_trace_range(fig, 1, dE, arrays, floor_zero=False)
 
-    fmax_keys = [("thr_Fmag", "#636363", "Fmax low"), ("thr_Fmag_hi_eff", "#969696", "Fmax upper cap"), ("train_Fmax_hard_cap", "#b2182b", "Fmax hard cap")]
     fig.add_trace(go.Scatter(x=x, y=arrays["Fmax"], mode="lines", name="Fmax", line=dict(color="#1b7837")), row=2, col=1)
-    _add_plotly_thresholds(fig, 2, x, thr, fmax_keys)
     _add_plotly_events(fig, 2, x, arrays["Fmax"], arrays, go)
-    _plotly_range(fig, 2, arrays["Fmax"], arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in fmax_keys]))
+    _plotly_trace_range(fig, 2, arrays["Fmax"], arrays, floor_zero=True)
 
     fig.add_trace(go.Scatter(x=x, y=arrays["Fmean"], mode="lines", name="Fmean", line=dict(color="#5aae61")), row=3, col=1)
     _add_plotly_events(fig, 3, x, arrays["Fmean"], arrays, go)
-    _plotly_range(fig, 3, arrays["Fmean"], arrays, floor_zero=True)
+    _plotly_trace_range(fig, 3, arrays["Fmean"], arrays, floor_zero=True)
 
     for label, mask, ypos, color in (("Shortlist", arrays["shortlist"], 5, "black"), ("Uncertain", arrays["force_inf"], 4, "#d95f02"), ("OOD", arrays["ood"], 3, "#7b3294"), ("Failed caps", arrays["geom_ok"] & ~arrays["caps_ok"], 2, "#e66101"), ("Failed geom", ~arrays["geom_ok"], 1, "#b2182b")):
         if np.any(mask):
