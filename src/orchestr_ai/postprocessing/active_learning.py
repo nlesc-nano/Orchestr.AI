@@ -820,14 +820,26 @@ class _PoolActiveLearner:
                   f"Uncertain: {len(high):3d} | OOD: {len(ood_high):3d} | "
                   f"Novel: {cand_mask.sum():3d} | Sel: {len(selected_local):2d}")
             if len(win_good) > len(win_phys):
-                print(f"       Drops: E_hi={drop_E_hi}, CI={drop_CI}, sE_hi={drop_sE_hi}, "
-                      f"sFmax_hi={drop_sFmax_hi}, sFmean_hi={drop_sFmean_hi}, Fmag_hi={drop_Fmag_hi}")
+                reasons = []
+                if drop_E_hi: reasons.append(f"Energy Ceiling={drop_E_hi}")
+                if drop_CI: reasons.append(f"CI Overlap={drop_CI}")
+                if drop_sE_hi: reasons.append(f"σE Ceiling={drop_sE_hi}")
+                if drop_sFmax_hi: reasons.append(f"σFmax Ceiling={drop_sFmax_hi}")
+                if drop_sFmean_hi: reasons.append(f"σFmean Ceiling={drop_sFmean_hi}")
+                if drop_Fmag_hi: reasons.append(f"Force Ceiling={drop_Fmag_hi}")
+                print(f"       Ceiling Drops: {', '.join(reasons)}")
             if len(high) > 0:
                 trig_sE = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min)
                 trig_sFmean = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min)
                 trig_sFmax = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_F_pool_max[i] >= _thr_fmax)
                 trig_ood = len(ood_high)
-                print(f"       Triggers: sE={trig_sE}, sFmax={trig_sFmax}, sFmean={trig_sFmean}, OOD={trig_ood}")
+                
+                reasons_trig = []
+                if trig_sE: reasons_trig.append(f"σE Floor={trig_sE}")
+                if trig_sFmax: reasons_trig.append(f"σFmax Floor={trig_sFmax}")
+                if trig_sFmean: reasons_trig.append(f"σFmean Floor={trig_sFmean}")
+                if trig_ood: reasons_trig.append(f"OOD={trig_ood}")
+                print(f"       Floor Triggers: {', '.join(reasons_trig)}")
             # ------------------------------------------------------------
 
             # Save Records
