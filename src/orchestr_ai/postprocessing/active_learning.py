@@ -822,9 +822,16 @@ class _PoolActiveLearner:
             if len(win_good) > len(win_phys):
                 print(f"       Drops: E_hi={drop_E_hi}, CI={drop_CI}, sE_hi={drop_sE_hi}, "
                       f"sFmax_hi={drop_sFmax_hi}, sFmean_hi={drop_sFmean_hi}, Fmag_hi={drop_Fmag_hi}")
+            if len(high) > 0:
+                trig_sE = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min)
+                trig_sFmean = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min)
+                trig_sFmax = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_F_pool_max[i] >= _thr_fmax)
+                trig_ood = len(ood_high)
+                print(f"       Triggers: sE={trig_sE}, sFmax={trig_sFmax}, sFmean={trig_sFmean}, OOD={trig_ood}")
             # ------------------------------------------------------------
 
             # Save Records
+            ood_high_set = set(ood_high)
             for j_local, pidx in enumerate(win_all):
                 self.all_frame_records[pidx] = {
                     "pool_idx": pidx, "window": f"{w0}-{win[-1]+1}",
@@ -842,7 +849,7 @@ class _PoolActiveLearner:
                     "exp_abs_F_mean": self.expected_abs_F_mean[pidx],
                     "exp_abs_F_max": self.expected_abs_F_max[pidx],
                     "cal_support": self.calibration_in_support[pidx],
-                    "ood_risk": self.ood_risk_mask[pidx],
+                    "ood_risk": pidx in ood_high_set,
                     "Fmax": self.frame_max_force_pool[pidx],
                     "Fmean": self.frame_mean_force_pool[pidx],
                     "mu_E_atom": self.mu_E_atom_pool[pidx],
