@@ -104,15 +104,37 @@ def _build_calibration_policy(eval_cfg, metrics_eval, *, pool_cache_mode):
         print("[Pool-AL] Light pool cache cannot apply component-wise isotonic force calibration; using VAR for forces.")
         force_mode = "var"
 
+    def _accept_mode(prefix, mode):
+        if mode == "var":
+            metrics = metrics_eval.get("metrics", {}) if metrics_eval else {}
+            suffix = "" if prefix == "force" else "_E"
+            improvements = []
+            for name in ("ENCE", "NLL", "CRPS"):
+                raw = metrics.get(f"{name}_raw{suffix}")
+                cal = metrics.get(f"{name}_calVAR{suffix}")
+                if raw is not None and cal is not None and np.isfinite(raw) and np.isfinite(cal):
+                    improvements.append(cal < raw)
+            raw_picp = metrics.get(f"PICP95_raw{suffix}")
+            var_picp = metrics.get(f"PICP95_calVAR{suffix}")
+            if raw_picp is not None and var_picp is not None and np.isfinite(raw_picp) and np.isfinite(var_picp):
+                improvements.append(abs(var_picp - 0.95) <= abs(raw_picp - 0.95))
+            var_ence = metrics.get(f"ENCE_calVAR{suffix}")
+            ence_bad = var_ence is not None and np.isfinite(var_ence) and var_ence > max(max_ence * 3.0, 1.0)
+            picp_bad = var_picp is not None and np.isfinite(var_picp) and abs(var_picp - 0.95) > max(picp_tol * 3.0, 0.25)
+            if any(improvements) and not (ence_bad or picp_bad):
+                return True
+        return _metric_accepts_calibration(
+            metrics_eval,
+            prefix=prefix,
+            mode=mode,
+            min_spearman=min_sp,
+            max_ence=max_ence,
+            picp_tol=picp_tol,
+        )
+
     accepted = {
-        "force_mode": force_mode if _metric_accepts_calibration(
-            metrics_eval, prefix="force", mode=force_mode, min_spearman=min_sp,
-            max_ence=max_ence, picp_tol=picp_tol
-        ) else None,
-        "energy_mode": requested if _metric_accepts_calibration(
-            metrics_eval, prefix="energy", mode=requested, min_spearman=min_sp,
-            max_ence=max_ence, picp_tol=picp_tol
-        ) else None,
+        "force_mode": force_mode if _accept_mode("force", force_mode) else None,
+        "energy_mode": requested if _accept_mode("energy", requested) else None,
     }
     print(
         "[Pool-AL] Eval-gated calibration policy: "
@@ -148,12 +170,13 @@ def _print_calibration_policy_summary(
         print("[Pool-AL] Calibration summary unavailable: empty eval UQ metrics.")
         return
 
-    print("[Pool-AL] Calibration quality gates for active learning:")
+    print("[Pool-AL] Calibration quality checks for active learning:")
     print(
-        f"          Spearman >= {min_spearman:.3f}, "
+        f"          ISO/raw fallback gates: Spearman >= {min_spearman:.3f}, "
         f"ENCE <= {max_ence:.3f}, |PICP95 - 0.95| <= {picp_tol:.3f}; "
         f"pool_cache_mode={pool_cache_mode}"
     )
+    print("          VAR may be selected when it improves ENCE/PICP95/NLL/CRPS without severe scale degradation.")
 
     def _fmt(value):
         if value is None or not np.isfinite(value):
@@ -2370,24 +2393,31 @@ class EvaluationPipeline:
             _range_with_margin(sigma_F_train_max_raw, upper_mult=support_mult),
         )
         support_count = (pool_atom_counts_thin >= train_count_min) & (pool_atom_counts_thin <= train_count_max)
+        size_extrapolation = ~support_count
         support_Fphys = frame_max_force_pool_thin <= (
             np.nanmax(frame_max_force_train_raw) * float(self.eval_cfg.get("calibration_support_force_mult", 1.5))
         )
-        calibration_in_support = support_E & support_Fmean & support_Fmax & support_count & support_Fphys
+        calibration_in_support = support_E & support_Fmean & support_Fmax & support_Fphys
         ood_risk_mask = ~calibration_in_support
         print(
             "[Pool-AL] Calibration support on thinned pool: "
             f"{int(calibration_in_support.sum())}/{len(calibration_in_support)} in-domain "
-            f"({np.mean(calibration_in_support):.3f})."
+            f"({np.mean(calibration_in_support):.3f}; excludes atom-count size extrapolation)."
         )
         print(
             "[Pool-AL] Calibration support failures: "
             f"sigma_E={int((~support_E).sum())}, "
             f"sigma_F_mean={int((~support_Fmean).sum())}, "
             f"sigma_F_max={int((~support_Fmax).sum())}, "
-            f"atom_count={int((~support_count).sum())}, "
             f"force_magnitude={int((~support_Fphys).sum())}."
         )
+        if np.any(size_extrapolation):
+            print(
+                "[Pool-AL] Size extrapolation warning: "
+                f"{int(size_extrapolation.sum())}/{len(size_extrapolation)} thinned pool frames have atom counts "
+                f"outside the calibration range [{train_count_min:.0f}, {train_count_max:.0f}]. "
+                "They are not marked OOD by atom count alone; rely on per-atom energy and force uncertainty support."
+            )
 
         sigma_energy_train = sigma_E_raw[train_idx]
         expected_abs_E_atom = sigma_E_pool_atom_raw * _GAUSSIAN_SIGMA_TO_ABS
