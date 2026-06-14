@@ -45,7 +45,9 @@ from orchestr_ai.postprocessing.active_learning import (
     calibrate_sigma_force_frames,
     scale_pool_force_summaries,
     validate_consecutive_reference_deltas,
+    write_pool_al_diagnostics_csv,
 )
+from orchestr_ai.postprocessing.plots.al_diagnostics import generate_al_diagnostic_plots
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
     fast_filter_by_rdf_kdtree,
@@ -2159,6 +2161,10 @@ class EvaluationPipeline:
         other_head = self._dual_head_other_head(orig_mace_head)
         has_multihead = other_head is not None
         used_one_pass_dual_pool = False
+        al_diagnostics_runs = []
+        mu_E_pool_other = None
+        sigma_E_pool_other = None
+        sigma_F_pool_other = None
 
         if has_multihead and str(self.eval_cfg.get("mode", "all")).lower() == "active_learning":
             print("[Pool-AL] Dual-head AL: collecting primary and secondary pool predictions from one ensemble pass.")
@@ -2441,9 +2447,12 @@ class EvaluationPipeline:
         sigma_F_pool_orig_thin = None
 
         sigma_E_pool_other_thin = None
+        mu_E_pool_other_thin = None
         sigma_F_pool_other_thin = None
         if sigma_E_pool_other is not None:
             sigma_E_pool_other_thin = sigma_E_pool_other[thin_idx].astype(float)
+        if mu_E_pool_other is not None:
+            mu_E_pool_other_thin = mu_E_pool_other[thin_idx].astype(float)
 
         # --- Secondary head calibration setup if dual_head_or is active ---
         calibration_in_support_other = calibration_in_support
@@ -2683,7 +2692,8 @@ class EvaluationPipeline:
                     hard_floors_from_calibrated_train=_parse_bool_like(
                         self.eval_cfg.get("hard_floors_from_calibrated_train"), bool(force_mode or energy_mode)
                     ),
-                    base=f"al_pool_{orig_mace_head}"
+                    base=f"al_pool_{orig_mace_head}", state=orig_mace_head,
+                    pool_indices=thin_idx, diagnostics_collector=al_diagnostics_runs
                 )
                 save_selected_frames(f"to_DFT_labelling_from_pool_{orig_mace_head}.xyz", sel_rel_thin_orig, sigma_E_pool_orig, orig_mace_head)
             except Exception as e:
@@ -2705,7 +2715,7 @@ class EvaluationPipeline:
                     _, sel_rel_thin_other = adaptive_learning_mig_pool_windowed(
                         pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq_other, L_chol_other,
                         forces_train=train_forces_other, sigma_energy=sigma_energy_train_other, sigma_force=sigma_force_train_other,
-                        mu_E_frame_train=mu_E_train_other, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_other_thin,
+                        mu_E_frame_train=mu_E_train_other, mu_E_pool=mu_E_pool_other_thin, sigma_E_pool=sigma_E_pool_other_thin,
                         rdf_thresholds=rdf_thresholds,
                         sigma_F_pool_mean=sigma_F_pool_mean_other_thin, sigma_F_pool_max=sigma_F_pool_max_other_thin,
                         frame_max_force_pool=frame_max_force_pool_thin,
@@ -2735,7 +2745,8 @@ class EvaluationPipeline:
                         hard_floors_from_calibrated_train=_parse_bool_like(
                             self.eval_cfg.get("hard_floors_from_calibrated_train"), bool(force_mode_other or energy_mode_other)
                         ),
-                        base=f"al_pool_{other_head}"
+                        base=f"al_pool_{other_head}", state=other_head,
+                        pool_indices=thin_idx, diagnostics_collector=al_diagnostics_runs
                     )
                     save_selected_frames(f"to_DFT_labelling_from_pool_{other_head}.xyz", sel_rel_thin_other, sigma_E_pool_other, other_head)
                 except Exception as e:
@@ -2786,12 +2797,28 @@ class EvaluationPipeline:
                     hard_floors_from_calibrated_train=_parse_bool_like(
                         self.eval_cfg.get("hard_floors_from_calibrated_train"), bool(force_mode or energy_mode)
                     ),
+                    state=orig_mace_head, pool_indices=thin_idx,
+                    diagnostics_collector=al_diagnostics_runs,
                 )
                 save_selected_frames(f"to_DFT_labelling_from_pool_{orig_mace_head}.xyz", sel_rel_thin_orig, sigma_E_pool, orig_mace_head)
                 sel_rel_thin = sel_rel_thin_orig
             except Exception as e:
                 print(f"[Pool-AL] WARNING: Failed to run single head selection pass: {e}")
                 sel_rel_thin = []
+
+        if al_diagnostics_runs:
+            al_csv_path = self.eval_cfg.get("al_diagnostics_csv", "al_pool_diagnostics.csv")
+            write_pool_al_diagnostics_csv(al_diagnostics_runs, al_csv_path)
+            if _parse_bool_like(self.eval_cfg.get("plot_AL"), False):
+                al_plot_dir = self.eval_cfg.get("al_plot_dir", "al_plots")
+                os.makedirs(al_plot_dir, exist_ok=True)
+                generate_al_diagnostic_plots(
+                    al_csv_path,
+                    out_dir=al_plot_dir,
+                    window=int(self.eval_cfg.get("al_plot_smoothing_window", 50)),
+                    drop_first=_parse_bool_like(self.eval_cfg.get("al_plot_drop_first"), True),
+                    dpi=int(self.eval_cfg.get("al_plot_dpi", 300)),
+                )
 
         # Output
         sel_global_idx = thin_idx[sel_rel_thin]

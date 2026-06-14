@@ -9,6 +9,7 @@ This module implements:
   2. A highly modular Class-based Pool Active Learner for OOD sampling.
 """
 
+import csv
 import os
 import time
 import numpy as np
@@ -324,8 +325,78 @@ class _PoolActiveLearner:
             self._finalize_selection()
 
         self._write_diagnostics()
+        self._collect_csv_diagnostics()
         self._print_summary()
         return self.sel_frames, self.final_pool_indices
+
+    def _threshold_metadata(self):
+        return {
+            "thr_sigma_E_low": getattr(self, "thr_sigma_E_low", np.nan),
+            "thr_sigma_E_hi_eff": getattr(self, "thr_sigma_E_hi_eff", np.nan),
+            "thr_sigma_F": getattr(self, "thr_sigma_F", np.nan),
+            "thr_sigma_F_hi_eff": getattr(self, "thr_sigma_F_hi_eff", np.nan),
+            "thr_sigma_Fmean": getattr(self, "thr_sigma_Fmean", np.nan),
+            "thr_sigma_Fmean_hi_eff": getattr(self, "thr_sigma_Fmean_hi_eff", np.nan),
+            "thr_Fmag": getattr(self, "thr_Fmag", np.nan),
+            "thr_Fmag_hi_eff": getattr(self, "thr_Fmag_hi_eff", np.nan),
+            "hard_sigma_E_atom_min": getattr(self, "hard_sigma_E_atom_min", np.nan),
+            "hard_sigma_F_mean_min": getattr(self, "hard_sigma_F_mean_min", np.nan),
+            "hard_sigma_F_max_min": getattr(self, "hard_sigma_F_max_min", np.nan),
+            "train_Fmax_hard_cap": getattr(self, "train_Fmax_hard_cap", np.nan),
+            "calibration_support_fraction": float(np.mean(self.calibration_in_support)) if hasattr(self, "calibration_in_support") else np.nan,
+        }
+
+    def _csv_diagnostic_rows(self):
+        state = str(getattr(self, "state", getattr(self, "base", "unknown")))
+        pool_indices = getattr(self, "pool_indices", None)
+        if pool_indices is None:
+            pool_indices = np.arange(len(self.pool_frames), dtype=int)
+        pool_indices = np.asarray(pool_indices, dtype=int)
+        shortlist_set = set(self.final_pool_indices)
+        rows = []
+        for pidx in sorted(self.all_frame_records.keys()):
+            R = self.all_frame_records[pidx]
+            n_atoms = float(self.pool_atom_counts[pidx]) if hasattr(self, "pool_atom_counts") else float(len(self.pool_frames[pidx]))
+            rows.append({
+                "state": state,
+                "idx": int(pool_indices[pidx]) if pidx < len(pool_indices) else int(pidx),
+                "pool_row": int(pidx),
+                "window": R["window"],
+                "n_atoms": int(n_atoms),
+                "geom_ok": int(R["rdf_ok"]),
+                "caps_ok": int(R["pass_caps"]),
+                "force_inf": int(R["force_inf"]),
+                "gamma_gate": int(R["gamma_gate"]),
+                "gamma0": float(R["gamma0"]),
+                "dM": float(R["dM"]),
+                "Dgain": float(R["dgain_train"]),
+                "raw_score": float(R["raw_score_window"]),
+                "E_pred": float(R["mu_E"]),
+                "E_pred_atom": float(R["mu_E_atom"]),
+                "sigma_E": float(R["sigma_E"]),
+                "sigma_E_atom": float(R["sigma_E_atom"]),
+                "sigma_F_max": float(R["sigma_F_max"]),
+                "sigma_F_mean": float(R["sigma_F_mean"]),
+                "Eabs_exp": float(R["exp_abs_E_atom"]),
+                "Fabs_mean": float(R["exp_abs_F_mean"]),
+                "Fabs_max": float(R["exp_abs_F_max"]),
+                "cal_ok": int(R["cal_support"]),
+                "ood": int(R["ood_risk"]),
+                "Fmax": float(R["Fmax"]),
+                "selected": int(R["selected"]),
+                "shortlist": int(pidx in shortlist_set),
+            })
+        return rows
+
+    def _collect_csv_diagnostics(self):
+        collector = getattr(self, "diagnostics_collector", None)
+        if collector is None:
+            return
+        collector.append({
+            "state": str(getattr(self, "state", getattr(self, "base", "unknown"))),
+            "thresholds": self._threshold_metadata(),
+            "rows": self._csv_diagnostic_rows(),
+        })
 
     def _setup_latent_space(self):
         self.G_train = scipy.linalg.solve_triangular(self.L, self.F_train.T, lower=True).T
@@ -740,6 +811,8 @@ class _PoolActiveLearner:
                     "gamma0": gamma_all[j_local], "dM": dM_all[j_local],
                     "dgain_train": np.log1p(quad_all[j_local]),
                     "raw_score_window": gamma_all[j_local] * np.log1p(quad_all[j_local]),
+                    "mu_E": self.mu_E_pool[pidx],
+                    "sigma_E": self.sigma_E_pool[pidx],
                     "sigma_E_atom": self.sigma_E_atom_pool[pidx],
                     "sigma_F_max": self.sigma_F_pool_max[pidx],
                     "sigma_F_mean": self.sigma_F_pool_mean[pidx],
@@ -851,6 +924,44 @@ def adaptive_learning_mig_pool_windowed(*args, **kwargs):
         "sigma_force", "mu_E_frame_train", "mu_E_pool", "sigma_E_pool", "mu_F_pool", 
         "sigma_F_pool", "rdf_thresholds"], args)), **kwargs)
     return learner.run()
+
+
+def write_pool_al_diagnostics_csv(runs, path="al_pool_diagnostics.csv"):
+    """Write stacked per-frame pool AL diagnostics for one or more electronic states."""
+    fieldnames = [
+        "state", "idx", "pool_row", "window", "n_atoms",
+        "geom_ok", "caps_ok", "force_inf", "gamma_gate",
+        "gamma0", "dM", "Dgain", "raw_score",
+        "E_pred", "E_pred_atom", "sigma_E", "sigma_E_atom",
+        "sigma_F_max", "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max",
+        "cal_ok", "ood", "Fmax", "selected", "shortlist",
+    ]
+    states = [str(run.get("state", "unknown")) for run in runs]
+    rows = []
+    for run in runs:
+        rows.extend(run.get("rows", []))
+
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        fh.write("# Pool Active Learning Diagnostics\n")
+        fh.write("# format = al_diagnostics_v2\n")
+        fh.write("# generated_by = Orchestr.AI\n")
+        fh.write(f"# states = {','.join(states)}\n")
+        if rows:
+            fh.write(f"# n_rows = {len(rows)}\n")
+            fh.write(f"# n_pool_frames = {len(set(int(r['idx']) for r in rows))}\n")
+        for run in runs:
+            state = str(run.get("state", "unknown"))
+            for key, value in sorted(run.get("thresholds", {}).items()):
+                try:
+                    value = float(value)
+                    fh.write(f"# threshold[state={state}].{key} = {value:.10g}\n")
+                except (TypeError, ValueError):
+                    fh.write(f"# threshold[state={state}].{key} = {value}\n")
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    print(f"[AL] Wrote stacked diagnostics CSV to '{path}' ({len(rows)} rows).")
 
 class UQCalibrator:
     """Handles Isotonic Regression mapping for Bias and Uncertainty Calibration."""
