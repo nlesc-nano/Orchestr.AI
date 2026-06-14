@@ -651,9 +651,9 @@ class _PoolActiveLearner:
 
             # 3. Final effective thresholds (bounded by the hard caps)
             # Decoupled from pool percentiles to prevent outlier contamination
-            self.thr_sigma_E_hi_eff = floor_E_user * 3.0
-            self.thr_sigma_F_hi_eff = floor_Fmax_user * 3.0
-            self.thr_sigma_Fmean_hi_eff = floor_Fmean_user * 3.0
+            self.thr_sigma_E_hi_eff = floor_E_user * 2.5
+            self.thr_sigma_F_hi_eff = floor_Fmax_user * 2.5
+            self.thr_sigma_Fmean_hi_eff = floor_Fmean_user * 2.5
             self.thr_Fmag_hi_eff = min(max(pool_Fmag_hi, self.thr_Fmag * 2.0), max_allowed_Fmag_hi)
 
             # Ensure it never drops below the absolute low percentiles either
@@ -669,9 +669,9 @@ class _PoolActiveLearner:
             floor_Fmax_user = getattr(self, 'user_hard_sigma_F_max_min', 0.15)
             floor_Fmean_user = getattr(self, 'user_hard_sigma_F_mean_min', 0.075)
 
-            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, floor_E_user * 3.0)
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, floor_Fmax_user * 3.0)
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, floor_Fmean_user * 3.0)
+            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, floor_E_user * 2.5)
+            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, floor_Fmax_user * 2.5)
+            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, floor_Fmean_user * 2.5)
             self.thr_Fmag_hi_eff = max(self.thr_Fmag, 2.0 * self.frame_max_force_train.max())
             self.allowed_offset_eff = 2.0 / float(np.nanmedian(self.train_atom_counts))
 
@@ -752,6 +752,11 @@ class _PoolActiveLearner:
                 i for i in win_phys
                 if self.ood_risk_mask[i]
                 and self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap
+                and (
+                    self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min
+                    or self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min
+                    or self.sigma_F_pool_max[i] >= _thr_fmax
+                )
             ]
             if ood_high:
                 high = sorted(set(high).union(ood_high))
