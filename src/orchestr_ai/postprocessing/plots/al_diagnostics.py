@@ -31,7 +31,7 @@ def read_al_diagnostics_csv(path):
                 text = stripped.lstrip("#").strip()
                 if "=" not in text:
                     continue
-                key, value = [part.strip() for part in text.split("=", 1)]
+                key, value = [part.strip() for part in text.rsplit("=", 1)]
                 if key.startswith("threshold[state=") and "]." in key:
                     state = key.split("threshold[state=", 1)[1].split("]", 1)[0]
                     threshold_key = key.split("].", 1)[1]
@@ -537,11 +537,24 @@ def plot_al_uncertainty_state_interactive(rows, metadata, state, out_dir="al_plo
     return out_path
 
 
-def plot_al_multihead_comparison(rows_by_state, out_dir="al_plots", dpi=300):
+def plot_al_multihead_comparison(rows_by_state, metadata, out_dir="al_plots", dpi=300):
     if len(rows_by_state) < 2:
         return None
     os.makedirs(out_dir, exist_ok=True)
     fig, axes = plt.subplots(4, 1, figsize=(10.5, 11.0), sharex=True, constrained_layout=True)
+    
+    caps_E = [_thresholds_for_state(metadata, state).get("thr_sigma_E_hi_eff", np.nan) for state in rows_by_state]
+    caps_F = [_thresholds_for_state(metadata, state).get("thr_sigma_F_hi_eff", np.nan) for state in rows_by_state]
+    caps_Fmean = [_thresholds_for_state(metadata, state).get("thr_sigma_Fmean_hi_eff", np.nan) for state in rows_by_state]
+    
+    finite_caps_E = [c for c in caps_E if np.isfinite(c) and c > 0]
+    finite_caps_F = [c for c in caps_F if np.isfinite(c) and c > 0]
+    finite_caps_Fmean = [c for c in caps_Fmean if np.isfinite(c) and c > 0]
+    
+    cap_E = max(finite_caps_E) if finite_caps_E else np.nan
+    cap_F = max(finite_caps_F) if finite_caps_F else np.nan
+    cap_Fmean = max(finite_caps_Fmean) if finite_caps_Fmean else np.nan
+
     colors = ["#2166ac", "#b2182b", "#1b7837", "#762a83"]
     for color, (state, rows) in zip(colors, rows_by_state.items()):
         arrays = _state_arrays(rows)
@@ -556,6 +569,13 @@ def plot_al_multihead_comparison(rows_by_state, out_dir="al_plots", dpi=300):
     axes[2].set_ylabel("σFmean (meV/Å)")
     axes[3].set_ylabel("Shortlist")
     axes[3].set_xlabel("Pool frame index")
+    
+    if np.isfinite(cap_E):
+        axes[0].set_ylim(0.0, cap_E * 1000.0 * 1.05)
+    if np.isfinite(cap_F):
+        axes[1].set_ylim(0.0, cap_F * 1000.0 * 1.05)
+    if np.isfinite(cap_Fmean):
+        axes[2].set_ylim(0.0, cap_Fmean * 1000.0 * 1.05)
     for ax in axes[:3]:
         ax.legend(loc="best", fontsize=8)
     if axes[3].collections:
@@ -570,7 +590,7 @@ def plot_al_multihead_comparison(rows_by_state, out_dir="al_plots", dpi=300):
     return out_path
 
 
-def plot_al_multihead_comparison_interactive(rows_by_state, out_dir="al_plots"):
+def plot_al_multihead_comparison_interactive(rows_by_state, metadata, out_dir="al_plots"):
     if len(rows_by_state) < 2:
         return None
     go, make_subplots = _plotly_imports()
@@ -578,6 +598,19 @@ def plot_al_multihead_comparison_interactive(rows_by_state, out_dir="al_plots"):
         return None
     os.makedirs(out_dir, exist_ok=True)
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.045, subplot_titles=("Energy uncertainty", "Maximum force uncertainty", "Mean force uncertainty", "Shortlisted frames"))
+    
+    caps_E = [_thresholds_for_state(metadata, state).get("thr_sigma_E_hi_eff", np.nan) for state in rows_by_state]
+    caps_F = [_thresholds_for_state(metadata, state).get("thr_sigma_F_hi_eff", np.nan) for state in rows_by_state]
+    caps_Fmean = [_thresholds_for_state(metadata, state).get("thr_sigma_Fmean_hi_eff", np.nan) for state in rows_by_state]
+    
+    finite_caps_E = [c for c in caps_E if np.isfinite(c) and c > 0]
+    finite_caps_F = [c for c in caps_F if np.isfinite(c) and c > 0]
+    finite_caps_Fmean = [c for c in caps_Fmean if np.isfinite(c) and c > 0]
+    
+    cap_E = max(finite_caps_E) if finite_caps_E else np.nan
+    cap_F = max(finite_caps_F) if finite_caps_F else np.nan
+    cap_Fmean = max(finite_caps_Fmean) if finite_caps_Fmean else np.nan
+
     colors = ["#2166ac", "#b2182b", "#1b7837", "#762a83"]
     for color, (state, rows) in zip(colors, rows_by_state.items()):
         arrays = _state_arrays(rows)
@@ -587,6 +620,14 @@ def plot_al_multihead_comparison_interactive(rows_by_state, out_dir="al_plots"):
         fig.add_trace(go.Scatter(x=x, y=arrays["sigma_F_mean"] * 1000.0, mode="lines", name=state, line=dict(color=color), showlegend=False), row=3, col=1)
         if np.any(arrays["shortlist"]):
             fig.add_trace(go.Scatter(x=x[arrays["shortlist"]], y=np.full(np.sum(arrays["shortlist"]), state), mode="markers", name=f"{state} shortlist", marker=dict(color=color, size=8)), row=4, col=1)
+            
+    if np.isfinite(cap_E):
+        fig.update_yaxes(range=[0.0, cap_E * 1000.0 * 1.05], row=1, col=1)
+    if np.isfinite(cap_F):
+        fig.update_yaxes(range=[0.0, cap_F * 1000.0 * 1.05], row=2, col=1)
+    if np.isfinite(cap_Fmean):
+        fig.update_yaxes(range=[0.0, cap_Fmean * 1000.0 * 1.05], row=3, col=1)
+
     fig.update_yaxes(title_text="σE/atom (meV)", row=1, col=1)
     fig.update_yaxes(title_text="σFmax (meV/Å)", row=2, col=1)
     fig.update_yaxes(title_text="σFmean (meV/Å)", row=3, col=1)
@@ -622,10 +663,10 @@ def generate_al_diagnostic_plots(csv_path, out_dir="al_plots", window=50, drop_f
             if html:
                 outputs.append(html)
     if state is None:
-        comparison = plot_al_multihead_comparison(rows_by_state, out_dir=out_dir, dpi=dpi)
+        comparison = plot_al_multihead_comparison(rows_by_state, metadata, out_dir=out_dir, dpi=dpi)
         if comparison:
             outputs.append(comparison)
-        comparison_html = plot_al_multihead_comparison_interactive(rows_by_state, out_dir=out_dir)
+        comparison_html = plot_al_multihead_comparison_interactive(rows_by_state, metadata, out_dir=out_dir)
         if comparison_html:
             outputs.append(comparison_html)
     return outputs
