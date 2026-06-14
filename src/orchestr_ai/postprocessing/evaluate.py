@@ -1439,7 +1439,7 @@ class EnsembleRunner:
         print(f"\n[EnsembleRunner] Light aggregate inference for {len(frames)} pool frames...")
         stats = self.evaluate_stats(frames, cache_file=cache_file)
         sigma_F_mean, sigma_F_max = _force_summary_from_flat(stats["sigma_F"], frames)
-        _, frame_max_force = _force_summary_from_flat(stats["mu_F"], frames)
+        frame_mean_force, frame_max_force = _force_summary_from_flat(stats["mu_F"], frames)
 
         result = {
             "n_models": stats["n_models"],
@@ -1448,6 +1448,7 @@ class EnsembleRunner:
             "mu_L_frame": stats["mu_L_frame"],
             "sigma_F_mean": sigma_F_mean,
             "sigma_F_max": sigma_F_max,
+            "frame_mean_force": frame_mean_force,
             "frame_max_force": frame_max_force,
             "n_atoms_per_frame": stats["n_atoms_per_frame"],
         }
@@ -2212,7 +2213,7 @@ class EvaluationPipeline:
             sigma_F_pool = pool_stats["sigma_F"]
             mu_L_pool = pool_stats["mu_L_frame"]
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
-            _, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
+            frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
             mu_E_pool_other = pool_stats_other["mu_E"]
             sigma_E_pool_other = pool_stats_other["sigma_E"]
             sigma_F_pool_other = pool_stats_other["sigma_F"]
@@ -2229,7 +2230,7 @@ class EvaluationPipeline:
             sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
             mu_L_pool = np.mean(ens_L_pool, axis=0)
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
-            _, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
+            frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
         elif pool_cache_mode == "stats":
             pool_stats = runner.evaluate_stats(pool_frames, cache_file="ensemble_unlabel.npz")
 
@@ -2239,7 +2240,7 @@ class EvaluationPipeline:
             sigma_F_pool = pool_stats["sigma_F"]
             mu_L_pool = pool_stats["mu_L_frame"]
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
-            _, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
+            frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
         else:
             pool_light = runner.evaluate_pool_light(pool_frames, cache_file="ensemble_unlabel.npz")
 
@@ -2248,6 +2249,7 @@ class EvaluationPipeline:
             mu_L_pool = pool_light["mu_L_frame"]
             sigma_F_pool_mean = pool_light["sigma_F_mean"]
             sigma_F_pool_max = pool_light["sigma_F_max"]
+            frame_mean_force_pool = pool_light.get("frame_mean_force", np.full(len(pool_frames), np.nan))
             frame_max_force_pool = pool_light["frame_max_force"]
             sigma_F_pool = None
 
@@ -2349,6 +2351,7 @@ class EvaluationPipeline:
         F_train_thin = mean_L_frame[self.ds["train_idx"]].astype(float)
         sigma_F_pool_mean_thin = sigma_F_pool_mean[thin_idx].astype(float)
         sigma_F_pool_max_thin = sigma_F_pool_max[thin_idx].astype(float)
+        frame_mean_force_pool_thin = frame_mean_force_pool[thin_idx].astype(float)
         frame_max_force_pool_thin = frame_max_force_pool[thin_idx].astype(float)
 
         use_cal = _parse_bool_like(self.eval_cfg.get("use_calibrated_selection"), True)
@@ -2705,6 +2708,7 @@ class EvaluationPipeline:
                     rdf_thresholds=rdf_thresholds,
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
+                    frame_mean_force_pool=frame_mean_force_pool_thin,
                     calibration_in_support=calibration_in_support,
                     ood_risk_mask=ood_risk_mask,
                     expected_abs_E_atom=expected_abs_E_atom,
@@ -2758,6 +2762,7 @@ class EvaluationPipeline:
                         rdf_thresholds=rdf_thresholds,
                         sigma_F_pool_mean=sigma_F_pool_mean_other_thin, sigma_F_pool_max=sigma_F_pool_max_other_thin,
                         frame_max_force_pool=frame_max_force_pool_thin,
+                        frame_mean_force_pool=frame_mean_force_pool_thin,
                         calibration_in_support=calibration_in_support_other,
                         ood_risk_mask=ood_risk_mask_other,
                         expected_abs_E_atom=expected_abs_E_atom_other,
@@ -2810,6 +2815,7 @@ class EvaluationPipeline:
                     rdf_thresholds=rdf_thresholds,
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
+                    frame_mean_force_pool=frame_mean_force_pool_thin,
                     calibration_in_support=calibration_in_support,
                     ood_risk_mask=ood_risk_mask,
                     expected_abs_E_atom=expected_abs_E_atom,

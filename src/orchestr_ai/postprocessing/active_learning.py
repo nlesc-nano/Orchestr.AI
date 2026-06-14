@@ -383,6 +383,7 @@ class _PoolActiveLearner:
                 "cal_ok": int(R["cal_support"]),
                 "ood": int(R["ood_risk"]),
                 "Fmax": float(R["Fmax"]),
+                "Fmean": float(R["Fmean"]),
                 "selected": int(R["selected"]),
                 "shortlist": int(pidx in shortlist_set),
             })
@@ -474,11 +475,16 @@ class _PoolActiveLearner:
             self.sigma_F_pool_mean = np.asarray(self.sigma_F_pool_mean, dtype=float)
             self.sigma_F_pool_max = np.asarray(self.sigma_F_pool_max, dtype=float)
             self.frame_max_force_pool = np.asarray(self.frame_max_force_pool, dtype=float)
+            self.frame_mean_force_pool = np.asarray(
+                getattr(self, "frame_mean_force_pool", np.full(len(self.pool_frames), np.nan)),
+                dtype=float,
+            )
 
             if not (
                 len(self.sigma_F_pool_mean)
                 == len(self.sigma_F_pool_max)
                 == len(self.frame_max_force_pool)
+                == len(self.frame_mean_force_pool)
                 == len(self.pool_frames)
             ):
                 raise ValueError("Pool force summary arrays must contain one value per pool frame")
@@ -519,6 +525,7 @@ class _PoolActiveLearner:
             self.sigma_F_pool_max = _frame_sigma_max(self.sigma_F_pool_frames)
             self.sigma_F_pool_mean = _frame_sigma_mean_norm(self.sigma_F_pool_frames)
             self.frame_max_force_pool = _frame_force_max(self.mu_F_pool_frames)
+            self.frame_mean_force_pool = _frame_sigma_mean_norm(self.mu_F_pool_frames)
 
         # Baseline Thresholds (optional stratification by cluster size for mixed train sets)
         stratify = bool(getattr(self, "stratify_train_by_size", False))
@@ -822,6 +829,7 @@ class _PoolActiveLearner:
                     "cal_support": self.calibration_in_support[pidx],
                     "ood_risk": self.ood_risk_mask[pidx],
                     "Fmax": self.frame_max_force_pool[pidx],
+                    "Fmean": self.frame_mean_force_pool[pidx],
                     "mu_E_atom": self.mu_E_atom_pool[pidx],
                     "selected": pidx in picks_abs
                 }
@@ -934,7 +942,7 @@ def write_pool_al_diagnostics_csv(runs, path="al_pool_diagnostics.csv"):
         "gamma0", "dM", "Dgain", "raw_score",
         "E_pred", "E_pred_atom", "sigma_E", "sigma_E_atom",
         "sigma_F_max", "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max",
-        "cal_ok", "ood", "Fmax", "selected", "shortlist",
+        "cal_ok", "ood", "Fmax", "Fmean", "selected", "shortlist",
     ]
     states = [str(run.get("state", "unknown")) for run in runs]
     rows = []

@@ -51,7 +51,7 @@ def _state_arrays(rows):
     keys_float = [
         "idx", "pool_row", "n_atoms", "gamma0", "dM", "Dgain", "raw_score",
         "E_pred", "E_pred_atom", "sigma_E", "sigma_E_atom", "sigma_F_max",
-        "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max", "Fmax",
+        "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max", "Fmax", "Fmean",
     ]
     keys_bool = ["geom_ok", "caps_ok", "force_inf", "gamma_gate", "cal_ok", "ood", "selected", "shortlist"]
     out = {key: np.array([_to_float(row.get(key)) for row in rows], dtype=float) for key in keys_float}
@@ -73,13 +73,10 @@ def _rolling_mean(x, y, window=50, drop_first=True):
     y_valid = y[mask]
     if y_valid.size == 0:
         return x_valid, y_valid
-    window = max(1, int(window))
-    half = window // 2
+    half = max(1, int(window)) // 2
     smooth = np.empty_like(y_valid, dtype=float)
     for i in range(y_valid.size):
-        lo = max(0, i - half)
-        hi = min(y_valid.size, i + half + 1)
-        smooth[i] = np.nanmean(y_valid[lo:hi])
+        smooth[i] = np.nanmean(y_valid[max(0, i - half): min(y_valid.size, i + half + 1)])
     return x_valid, smooth
 
 
@@ -95,11 +92,61 @@ def _energy_reference(arrays):
     return 0.0, "0"
 
 
+def _realistic_mask(arrays, y):
+    return arrays["geom_ok"] & arrays["caps_ok"] & np.isfinite(y)
+
+
+def _robust_limits(y, arrays, *, floor_zero=False, threshold_values=(), pad=0.12):
+    y = np.asarray(y, dtype=float)
+    mask = _realistic_mask(arrays, y)
+    vals = y[mask]
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 3:
+        vals = y[np.isfinite(y)]
+    if vals.size == 0:
+        return None
+    lo, hi = np.nanpercentile(vals, [1.0, 99.0])
+    finite_thr = [float(v) for v in threshold_values if np.isfinite(v)]
+    if finite_thr:
+        lo = min(lo, min(finite_thr))
+        hi = max(hi, max(finite_thr))
+    if floor_zero:
+        lo = 0.0
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None
+    if hi <= lo:
+        delta = max(abs(hi), 1.0) * 0.1
+        lo -= delta
+        hi += delta
+    span = hi - lo
+    return lo - span * pad, hi + span * pad
+
+
+def _apply_robust_ylim(ax, y, arrays, *, floor_zero=False, threshold_values=()):
+    limits = _robust_limits(y, arrays, floor_zero=floor_zero, threshold_values=threshold_values)
+    if limits is None:
+        return None
+    ax.set_ylim(*limits)
+    finite = np.isfinite(y)
+    clipped = int(np.sum(finite & ((y < limits[0]) | (y > limits[1]))))
+    if clipped:
+        ax.text(
+            0.995, 0.94, f"{clipped} outlier(s) outside y-range",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.8),
+        )
+    return limits
+
+
+def _threshold_values(thresholds, keys, scale=1.0):
+    return [thresholds.get(key, np.nan) * scale for key in keys]
+
+
 def _threshold_lines(ax, thresholds, keys, scale=1.0):
     for key, color, label in keys:
         value = thresholds.get(key, np.nan)
         if np.isfinite(value):
-            ax.axhline(value * scale, ls="--", lw=1.0, color=color, alpha=0.8, label=label)
+            ax.axhline(value * scale, ls="--", lw=1.0, color=color, alpha=0.85, label=label)
 
 
 def _mark_events(ax, x, y, arrays, *, show_label=False):
@@ -133,82 +180,6 @@ def _plot_status_track(ax, x, arrays):
     ax.legend(loc="upper right", fontsize=8, ncol=4)
 
 
-def plot_al_state(rows, metadata, state, out_dir="al_plots", window=50, drop_first=True, dpi=300):
-    arrays = _state_arrays(rows)
-    thr = metadata.get("thresholds", {}).get(state, {})
-    x = arrays["idx"]
-    os.makedirs(out_dir, exist_ok=True)
-
-    fig, axes = plt.subplots(6, 1, figsize=(11.0, 15.0), sharex=True, constrained_layout=True)
-    fig.suptitle(f"Pool active-learning diagnostics: {state}", fontsize=14, fontweight="bold")
-
-    e_ref, e_ref_label = _energy_reference(arrays)
-    dE = arrays["E_pred"] - e_ref
-    sE = arrays["sigma_E"]
-    xs, dE_smooth = _rolling_mean(x, dE, window=window, drop_first=drop_first)
-    _, sE_smooth = _rolling_mean(x, sE, window=window, drop_first=drop_first)
-    axes[0].plot(x, dE, lw=0.7, color="#4d4d4d", alpha=0.28, label="raw")
-    axes[0].plot(xs, dE_smooth, lw=1.8, color="#2166ac", label=f"{window}-frame running mean")
-    if sE_smooth.size == dE_smooth.size:
-        axes[0].fill_between(xs, dE_smooth - sE_smooth, dE_smooth + sE_smooth, color="#67a9cf", alpha=0.25, label="± sigma_E")
-    _mark_events(axes[0], x, dE, arrays, show_label=True)
-    axes[0].set_ylabel("ΔE (eV)")
-    axes[0].set_title(f"Energy relative to {e_ref_label}: E - {e_ref:.6g} eV", fontsize=10)
-    axes[0].legend(loc="best", fontsize=8, ncol=4)
-
-    sigma_e_mev = arrays["sigma_E_atom"] * 1000.0
-    axes[1].plot(x, sigma_e_mev, lw=1.0, color="#2166ac")
-    _threshold_lines(axes[1], thr, [
-        ("thr_sigma_E_low", "#636363", "low"),
-        ("thr_sigma_E_hi_eff", "#969696", "upper cap"),
-        ("hard_sigma_E_atom_min", "#b2182b", "hard floor"),
-    ], scale=1000.0)
-    _mark_events(axes[1], x, sigma_e_mev, arrays)
-    axes[1].set_ylabel("σE/atom (meV)")
-
-    axes[2].plot(x, arrays["Fmax"], lw=1.0, color="#1b7837")
-    _threshold_lines(axes[2], thr, [
-        ("thr_Fmag", "#636363", "low"),
-        ("thr_Fmag_hi_eff", "#969696", "upper cap"),
-        ("train_Fmax_hard_cap", "#b2182b", "hard cap"),
-    ])
-    _mark_events(axes[2], x, arrays["Fmax"], arrays)
-    axes[2].set_ylabel("Fmax (eV/Å)")
-
-    sigma_fmax_mev = arrays["sigma_F_max"] * 1000.0
-    axes[3].plot(x, sigma_fmax_mev, lw=1.0, color="#762a83")
-    _threshold_lines(axes[3], thr, [
-        ("thr_sigma_F", "#636363", "low"),
-        ("thr_sigma_F_hi_eff", "#969696", "upper cap"),
-        ("hard_sigma_F_max_min", "#b2182b", "hard floor"),
-    ], scale=1000.0)
-    _mark_events(axes[3], x, sigma_fmax_mev, arrays)
-    axes[3].set_ylabel("σFmax (meV/Å)")
-
-    sigma_fmean_mev = arrays["sigma_F_mean"] * 1000.0
-    axes[4].plot(x, sigma_fmean_mev, lw=1.0, color="#af8dc3")
-    _threshold_lines(axes[4], thr, [
-        ("thr_sigma_Fmean", "#636363", "low"),
-        ("thr_sigma_Fmean_hi_eff", "#969696", "upper cap"),
-        ("hard_sigma_F_mean_min", "#b2182b", "hard floor"),
-    ], scale=1000.0)
-    _mark_events(axes[4], x, sigma_fmean_mev, arrays)
-    axes[4].set_ylabel("σFmean (meV/Å)")
-
-    _plot_status_track(axes[5], x, arrays)
-    axes[5].set_ylabel("AL status")
-    axes[5].set_xlabel("Pool frame index")
-
-    for ax in axes:
-        ax.grid(True, alpha=0.25)
-
-    out_path = os.path.join(out_dir, f"al_trace_{state}.png")
-    fig.savefig(out_path, dpi=dpi)
-    plt.close(fig)
-    print(f"[AL Plot] Saved {out_path}")
-    return out_path
-
-
 def _plotly_imports():
     try:
         import plotly.graph_objects as go
@@ -228,20 +199,19 @@ def _add_plotly_thresholds(fig, row, x, thresholds, keys, scale=1.0):
         value = thresholds.get(key, np.nan)
         if np.isfinite(value):
             fig.add_scatter(
-                x=[x0, x1], y=[value * scale, value * scale],
-                mode="lines", line=dict(color=color, dash="dash", width=1),
+                x=[x0, x1], y=[value * scale, value * scale], mode="lines",
+                line=dict(color=color, dash="dash", width=1),
                 name=f"{label}: {value * scale:.4g}", row=row, col=1,
             )
 
 
 def _add_plotly_events(fig, row, x, y, arrays, go):
-    events = [
+    for label, mask, symbol, color in (
         ("OOD", arrays["ood"], "triangle-up", "#7b3294"),
         ("Failed caps", arrays["geom_ok"] & ~arrays["caps_ok"], "x", "#e66101"),
         ("Failed geom", ~arrays["geom_ok"], "x", "#b2182b"),
         ("Shortlist", arrays["shortlist"], "circle", "black"),
-    ]
-    for label, mask, symbol, color in events:
+    ):
         if np.any(mask):
             fig.add_trace(
                 go.Scatter(
@@ -252,19 +222,119 @@ def _add_plotly_events(fig, row, x, y, arrays, go):
             )
 
 
-def plot_al_state_interactive(rows, metadata, state, out_dir="al_plots", window=50, drop_first=True):
+def _plotly_range(fig, row, y, arrays, *, floor_zero=False, threshold_values=()):
+    limits = _robust_limits(y, arrays, floor_zero=floor_zero, threshold_values=threshold_values)
+    if limits is not None:
+        fig.update_yaxes(range=list(limits), row=row, col=1)
+
+
+def plot_al_trace_state(rows, metadata, state, out_dir="al_plots", window=50, drop_first=True, dpi=300):
+    arrays = _state_arrays(rows)
+    thr = metadata.get("thresholds", {}).get(state, {})
+    x = arrays["idx"]
+    os.makedirs(out_dir, exist_ok=True)
+    fig, axes = plt.subplots(4, 1, figsize=(11.0, 10.5), sharex=True, constrained_layout=True)
+    fig.suptitle(f"Pool AL physical trace: {state}", fontsize=14, fontweight="bold")
+
+    e_ref, e_ref_label = _energy_reference(arrays)
+    dE = arrays["E_pred"] - e_ref
+    sE = arrays["sigma_E"]
+    xs, dE_smooth = _rolling_mean(x, dE, window=window, drop_first=drop_first)
+    _, sE_smooth = _rolling_mean(x, sE, window=window, drop_first=drop_first)
+    axes[0].plot(x, dE, lw=0.7, color="#4d4d4d", alpha=0.28, label="raw")
+    axes[0].plot(xs, dE_smooth, lw=1.9, color="#2166ac", label=f"{window}-frame running mean")
+    if sE_smooth.size == dE_smooth.size:
+        axes[0].fill_between(xs, dE_smooth - sE_smooth, dE_smooth + sE_smooth, color="#67a9cf", alpha=0.38, label="± σE")
+        axes[0].plot(xs, dE_smooth + sE_smooth, lw=0.6, color="#67a9cf", alpha=0.6)
+        axes[0].plot(xs, dE_smooth - sE_smooth, lw=0.6, color="#67a9cf", alpha=0.6)
+    _mark_events(axes[0], x, dE, arrays, show_label=True)
+    _apply_robust_ylim(axes[0], dE, arrays)
+    axes[0].set_ylabel("ΔE (eV)")
+    axes[0].set_title(f"Energy relative to {e_ref_label}: E - {e_ref:.6g} eV", fontsize=10)
+    axes[0].legend(loc="best", fontsize=8, ncol=4)
+
+    axes[1].plot(x, arrays["Fmax"], lw=1.0, color="#1b7837")
+    fmax_keys = [("thr_Fmag", "#636363", "low"), ("thr_Fmag_hi_eff", "#969696", "upper cap"), ("train_Fmax_hard_cap", "#b2182b", "hard cap")]
+    _threshold_lines(axes[1], thr, fmax_keys)
+    _mark_events(axes[1], x, arrays["Fmax"], arrays)
+    _apply_robust_ylim(axes[1], arrays["Fmax"], arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in fmax_keys]))
+    axes[1].set_ylabel("Fmax (eV/Å)")
+
+    axes[2].plot(x, arrays["Fmean"], lw=1.0, color="#5aae61")
+    _mark_events(axes[2], x, arrays["Fmean"], arrays)
+    _apply_robust_ylim(axes[2], arrays["Fmean"], arrays, floor_zero=True)
+    axes[2].set_ylabel("Fmean (eV/Å)")
+
+    _plot_status_track(axes[3], x, arrays)
+    axes[3].set_ylabel("AL status")
+    axes[3].set_xlabel("Pool frame index")
+    for ax in axes:
+        ax.grid(True, alpha=0.25)
+    out_path = os.path.join(out_dir, f"al_trace_{state}.png")
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+    print(f"[AL Plot] Saved {out_path}")
+    return out_path
+
+
+def plot_al_uncertainty_state(rows, metadata, state, out_dir="al_plots", dpi=300):
+    arrays = _state_arrays(rows)
+    thr = metadata.get("thresholds", {}).get(state, {})
+    x = arrays["idx"]
+    os.makedirs(out_dir, exist_ok=True)
+    fig, axes = plt.subplots(5, 1, figsize=(11.0, 12.5), sharex=True, constrained_layout=True)
+    fig.suptitle(f"Pool AL uncertainty/acquisition: {state}", fontsize=14, fontweight="bold")
+
+    sigma_e_mev = arrays["sigma_E_atom"] * 1000.0
+    e_keys = [("thr_sigma_E_low", "#636363", "low"), ("thr_sigma_E_hi_eff", "#969696", "upper cap"), ("hard_sigma_E_atom_min", "#b2182b", "hard floor")]
+    axes[0].plot(x, sigma_e_mev, lw=1.0, color="#2166ac")
+    _threshold_lines(axes[0], thr, e_keys, scale=1000.0)
+    _mark_events(axes[0], x, sigma_e_mev, arrays)
+    _apply_robust_ylim(axes[0], sigma_e_mev, arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in e_keys], scale=1000.0))
+    axes[0].set_ylabel("σE/atom (meV)")
+
+    sigma_fmax_mev = arrays["sigma_F_max"] * 1000.0
+    fmax_keys = [("thr_sigma_F", "#636363", "low"), ("thr_sigma_F_hi_eff", "#969696", "upper cap"), ("hard_sigma_F_max_min", "#b2182b", "hard floor")]
+    axes[1].plot(x, sigma_fmax_mev, lw=1.0, color="#762a83")
+    _threshold_lines(axes[1], thr, fmax_keys, scale=1000.0)
+    _mark_events(axes[1], x, sigma_fmax_mev, arrays)
+    _apply_robust_ylim(axes[1], sigma_fmax_mev, arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in fmax_keys], scale=1000.0))
+    axes[1].set_ylabel("σFmax (meV/Å)")
+
+    sigma_fmean_mev = arrays["sigma_F_mean"] * 1000.0
+    fmean_keys = [("thr_sigma_Fmean", "#636363", "low"), ("thr_sigma_Fmean_hi_eff", "#969696", "upper cap"), ("hard_sigma_F_mean_min", "#b2182b", "hard floor")]
+    axes[2].plot(x, sigma_fmean_mev, lw=1.0, color="#af8dc3")
+    _threshold_lines(axes[2], thr, fmean_keys, scale=1000.0)
+    _mark_events(axes[2], x, sigma_fmean_mev, arrays)
+    _apply_robust_ylim(axes[2], sigma_fmean_mev, arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in fmean_keys], scale=1000.0))
+    axes[2].set_ylabel("σFmean (meV/Å)")
+
+    axes[3].plot(x, arrays["raw_score"], lw=1.0, color="#8c510a")
+    _mark_events(axes[3], x, arrays["raw_score"], arrays)
+    _apply_robust_ylim(axes[3], arrays["raw_score"], arrays, floor_zero=True)
+    axes[3].set_ylabel("acquisition score")
+    axes[3].set_title("Acquisition score = leverage/novelty ranking used for final diverse selection", fontsize=10)
+
+    _plot_status_track(axes[4], x, arrays)
+    axes[4].set_ylabel("AL status")
+    axes[4].set_xlabel("Pool frame index")
+    for ax in axes:
+        ax.grid(True, alpha=0.25)
+    out_path = os.path.join(out_dir, f"al_uncertainty_{state}.png")
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+    print(f"[AL Plot] Saved {out_path}")
+    return out_path
+
+
+def plot_al_trace_state_interactive(rows, metadata, state, out_dir="al_plots", window=50, drop_first=True):
     go, make_subplots = _plotly_imports()
     if go is None:
         return None
     arrays = _state_arrays(rows)
     thr = metadata.get("thresholds", {}).get(state, {})
     x = arrays["idx"]
-    os.makedirs(out_dir, exist_ok=True)
-
-    fig = make_subplots(
-        rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.035,
-        subplot_titles=("Relative energy", "Energy uncertainty", "Maximum force", "Maximum force uncertainty", "Mean force uncertainty", "AL status"),
-    )
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.055, subplot_titles=("Relative energy", "Maximum force", "Mean force", "AL status"))
     e_ref, e_ref_label = _energy_reference(arrays)
     dE = arrays["E_pred"] - e_ref
     sE = arrays["sigma_E"]
@@ -274,45 +344,65 @@ def plot_al_state_interactive(rows, metadata, state, out_dir="al_plots", window=
     fig.add_trace(go.Scatter(x=xs, y=dE_smooth, mode="lines", name=f"ΔE {window}-frame mean", line=dict(color="#2166ac", width=2)), row=1, col=1)
     if sE_smooth.size == dE_smooth.size:
         fig.add_trace(go.Scatter(x=xs, y=dE_smooth + sE_smooth, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=xs, y=dE_smooth - sE_smooth, mode="lines", fill="tonexty", fillcolor="rgba(103,169,207,0.25)", line=dict(width=0), name="± sigma_E", hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=xs, y=dE_smooth - sE_smooth, mode="lines", fill="tonexty", fillcolor="rgba(103,169,207,0.38)", line=dict(width=0), name="± σE", hoverinfo="skip"), row=1, col=1)
     _add_plotly_events(fig, 1, x, dE, arrays, go)
+    _plotly_range(fig, 1, dE, arrays)
 
-    sigma_e_mev = arrays["sigma_E_atom"] * 1000.0
-    fig.add_trace(go.Scatter(x=x, y=sigma_e_mev, mode="lines", name="σE/atom", line=dict(color="#2166ac")), row=2, col=1)
-    _add_plotly_thresholds(fig, 2, x, thr, [("thr_sigma_E_low", "#636363", "σE low"), ("thr_sigma_E_hi_eff", "#969696", "σE upper cap"), ("hard_sigma_E_atom_min", "#b2182b", "σE hard floor")], scale=1000.0)
-    _add_plotly_events(fig, 2, x, sigma_e_mev, arrays, go)
+    fmax_keys = [("thr_Fmag", "#636363", "Fmax low"), ("thr_Fmag_hi_eff", "#969696", "Fmax upper cap"), ("train_Fmax_hard_cap", "#b2182b", "Fmax hard cap")]
+    fig.add_trace(go.Scatter(x=x, y=arrays["Fmax"], mode="lines", name="Fmax", line=dict(color="#1b7837")), row=2, col=1)
+    _add_plotly_thresholds(fig, 2, x, thr, fmax_keys)
+    _add_plotly_events(fig, 2, x, arrays["Fmax"], arrays, go)
+    _plotly_range(fig, 2, arrays["Fmax"], arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in fmax_keys]))
 
-    fig.add_trace(go.Scatter(x=x, y=arrays["Fmax"], mode="lines", name="Fmax", line=dict(color="#1b7837")), row=3, col=1)
-    _add_plotly_thresholds(fig, 3, x, thr, [("thr_Fmag", "#636363", "Fmax low"), ("thr_Fmag_hi_eff", "#969696", "Fmax upper cap"), ("train_Fmax_hard_cap", "#b2182b", "Fmax hard cap")])
-    _add_plotly_events(fig, 3, x, arrays["Fmax"], arrays, go)
+    fig.add_trace(go.Scatter(x=x, y=arrays["Fmean"], mode="lines", name="Fmean", line=dict(color="#5aae61")), row=3, col=1)
+    _add_plotly_events(fig, 3, x, arrays["Fmean"], arrays, go)
+    _plotly_range(fig, 3, arrays["Fmean"], arrays, floor_zero=True)
 
-    sigma_fmax_mev = arrays["sigma_F_max"] * 1000.0
-    fig.add_trace(go.Scatter(x=x, y=sigma_fmax_mev, mode="lines", name="σFmax", line=dict(color="#762a83")), row=4, col=1)
-    _add_plotly_thresholds(fig, 4, x, thr, [("thr_sigma_F", "#636363", "σFmax low"), ("thr_sigma_F_hi_eff", "#969696", "σFmax upper cap"), ("hard_sigma_F_max_min", "#b2182b", "σFmax hard floor")], scale=1000.0)
-    _add_plotly_events(fig, 4, x, sigma_fmax_mev, arrays, go)
-
-    sigma_fmean_mev = arrays["sigma_F_mean"] * 1000.0
-    fig.add_trace(go.Scatter(x=x, y=sigma_fmean_mev, mode="lines", name="σFmean", line=dict(color="#af8dc3")), row=5, col=1)
-    _add_plotly_thresholds(fig, 5, x, thr, [("thr_sigma_Fmean", "#636363", "σFmean low"), ("thr_sigma_Fmean_hi_eff", "#969696", "σFmean upper cap"), ("hard_sigma_F_mean_min", "#b2182b", "σFmean hard floor")], scale=1000.0)
-    _add_plotly_events(fig, 5, x, sigma_fmean_mev, arrays, go)
-
-    status_events = [("Shortlist", arrays["shortlist"], 4, "black"), ("OOD", arrays["ood"], 3, "#7b3294"), ("Failed caps", arrays["geom_ok"] & ~arrays["caps_ok"], 2, "#e66101"), ("Failed geom", ~arrays["geom_ok"], 1, "#b2182b")]
-    for label, mask, ypos, color in status_events:
+    for label, mask, ypos, color in (("Shortlist", arrays["shortlist"], 4, "black"), ("OOD", arrays["ood"], 3, "#7b3294"), ("Failed caps", arrays["geom_ok"] & ~arrays["caps_ok"], 2, "#e66101"), ("Failed geom", ~arrays["geom_ok"], 1, "#b2182b")):
         if np.any(mask):
-            fig.add_trace(go.Scatter(x=x[mask], y=np.full(np.sum(mask), ypos), mode="markers", name=label, marker=dict(color=color, size=8), hovertemplate="frame=%{x}<extra>" + label + "</extra>"), row=6, col=1)
-
+            fig.add_trace(go.Scatter(x=x[mask], y=np.full(np.sum(mask), ypos), mode="markers", name=label, marker=dict(color=color, size=8)), row=4, col=1)
     fig.update_yaxes(title_text="ΔE (eV)", row=1, col=1)
-    fig.update_yaxes(title_text="σE/atom (meV)", row=2, col=1)
-    fig.update_yaxes(title_text="Fmax (eV/Å)", row=3, col=1)
-    fig.update_yaxes(title_text="σFmax (meV/Å)", row=4, col=1)
-    fig.update_yaxes(title_text="σFmean (meV/Å)", row=5, col=1)
-    fig.update_yaxes(title_text="AL status", tickmode="array", tickvals=[1, 2, 3, 4], ticktext=["failed geom", "failed caps", "OOD", "shortlist"], row=6, col=1)
-    fig.update_xaxes(title_text="Pool frame index", row=6, col=1)
-    fig.update_layout(
-        title=f"Pool active-learning diagnostics: {state}<br><sup>Energy reference: {e_ref_label}, E_ref={e_ref:.6g} eV</sup>",
-        height=1200, width=1150, hovermode="x unified", template="plotly_white",
-    )
+    fig.update_yaxes(title_text="Fmax (eV/Å)", row=2, col=1)
+    fig.update_yaxes(title_text="Fmean (eV/Å)", row=3, col=1)
+    fig.update_yaxes(title_text="AL status", tickmode="array", tickvals=[1, 2, 3, 4], ticktext=["failed geom", "failed caps", "OOD", "shortlist"], row=4, col=1)
+    fig.update_xaxes(title_text="Pool frame index", row=4, col=1)
+    fig.update_layout(title=f"Pool AL physical trace: {state}<br><sup>Energy reference: {e_ref_label}, E_ref={e_ref:.6g} eV</sup>", height=900, width=1150, hovermode="x unified", template="plotly_white")
     out_path = os.path.join(out_dir, f"al_trace_{state}.html")
+    fig.write_html(out_path, include_plotlyjs="cdn")
+    print(f"[AL Plot] Saved {out_path}")
+    return out_path
+
+
+def plot_al_uncertainty_state_interactive(rows, metadata, state, out_dir="al_plots"):
+    go, make_subplots = _plotly_imports()
+    if go is None:
+        return None
+    arrays = _state_arrays(rows)
+    thr = metadata.get("thresholds", {}).get(state, {})
+    x = arrays["idx"]
+    fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.045, subplot_titles=("Energy uncertainty", "Maximum force uncertainty", "Mean force uncertainty", "Acquisition score", "AL status"))
+    panels = [
+        (1, arrays["sigma_E_atom"] * 1000.0, "σE/atom", "#2166ac", [("thr_sigma_E_low", "#636363", "σE low"), ("thr_sigma_E_hi_eff", "#969696", "σE upper cap"), ("hard_sigma_E_atom_min", "#b2182b", "σE hard floor")], 1000.0, "σE/atom (meV)"),
+        (2, arrays["sigma_F_max"] * 1000.0, "σFmax", "#762a83", [("thr_sigma_F", "#636363", "σFmax low"), ("thr_sigma_F_hi_eff", "#969696", "σFmax upper cap"), ("hard_sigma_F_max_min", "#b2182b", "σFmax hard floor")], 1000.0, "σFmax (meV/Å)"),
+        (3, arrays["sigma_F_mean"] * 1000.0, "σFmean", "#af8dc3", [("thr_sigma_Fmean", "#636363", "σFmean low"), ("thr_sigma_Fmean_hi_eff", "#969696", "σFmean upper cap"), ("hard_sigma_F_mean_min", "#b2182b", "σFmean hard floor")], 1000.0, "σFmean (meV/Å)"),
+    ]
+    for row, y, name, color, keys, scale, ylabel in panels:
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=name, line=dict(color=color)), row=row, col=1)
+        _add_plotly_thresholds(fig, row, x, thr, keys, scale=scale)
+        _add_plotly_events(fig, row, x, y, arrays, go)
+        _plotly_range(fig, row, y, arrays, floor_zero=True, threshold_values=_threshold_values(thr, [k[0] for k in keys], scale=scale))
+        fig.update_yaxes(title_text=ylabel, row=row, col=1)
+    fig.add_trace(go.Scatter(x=x, y=arrays["raw_score"], mode="lines", name="acquisition score", line=dict(color="#8c510a")), row=4, col=1)
+    _add_plotly_events(fig, 4, x, arrays["raw_score"], arrays, go)
+    _plotly_range(fig, 4, arrays["raw_score"], arrays, floor_zero=True)
+    fig.update_yaxes(title_text="acquisition score", row=4, col=1)
+    for label, mask, ypos, color in (("Shortlist", arrays["shortlist"], 4, "black"), ("OOD", arrays["ood"], 3, "#7b3294"), ("Failed caps", arrays["geom_ok"] & ~arrays["caps_ok"], 2, "#e66101"), ("Failed geom", ~arrays["geom_ok"], 1, "#b2182b")):
+        if np.any(mask):
+            fig.add_trace(go.Scatter(x=x[mask], y=np.full(np.sum(mask), ypos), mode="markers", name=label, marker=dict(color=color, size=8)), row=5, col=1)
+    fig.update_yaxes(title_text="AL status", tickmode="array", tickvals=[1, 2, 3, 4], ticktext=["failed geom", "failed caps", "OOD", "shortlist"], row=5, col=1)
+    fig.update_xaxes(title_text="Pool frame index", row=5, col=1)
+    fig.update_layout(title=f"Pool AL uncertainty/acquisition: {state}", height=1050, width=1150, hovermode="x unified", template="plotly_white")
+    out_path = os.path.join(out_dir, f"al_uncertainty_{state}.html")
     fig.write_html(out_path, include_plotlyjs="cdn")
     print(f"[AL Plot] Saved {out_path}")
     return out_path
@@ -344,7 +434,7 @@ def plot_al_multihead_comparison(rows_by_state, out_dir="al_plots", dpi=300):
     for ax in axes:
         ax.grid(True, alpha=0.25)
     fig.suptitle("Multihead active-learning comparison", fontsize=14, fontweight="bold")
-    out_path = os.path.join(out_dir, "al_trace_multihead_comparison.png")
+    out_path = os.path.join(out_dir, "al_uncertainty_multihead_comparison.png")
     fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
     print(f"[AL Plot] Saved {out_path}")
@@ -373,8 +463,8 @@ def plot_al_multihead_comparison_interactive(rows_by_state, out_dir="al_plots"):
     fig.update_yaxes(title_text="σFmean (meV/Å)", row=3, col=1)
     fig.update_yaxes(title_text="Shortlist", row=4, col=1)
     fig.update_xaxes(title_text="Pool frame index", row=4, col=1)
-    fig.update_layout(title="Multihead active-learning comparison", height=900, width=1150, hovermode="x unified", template="plotly_white")
-    out_path = os.path.join(out_dir, "al_trace_multihead_comparison.html")
+    fig.update_layout(title="Multihead AL uncertainty comparison", height=900, width=1150, hovermode="x unified", template="plotly_white")
+    out_path = os.path.join(out_dir, "al_uncertainty_multihead_comparison.html")
     fig.write_html(out_path, include_plotlyjs="cdn")
     print(f"[AL Plot] Saved {out_path}")
     return out_path
@@ -392,9 +482,14 @@ def generate_al_diagnostic_plots(csv_path, out_dir="al_plots", window=50, drop_f
         rows_by_state = {state: rows_by_state.get(state, [])}
     outputs = []
     for state_name, state_rows in rows_by_state.items():
-        if state_rows:
-            outputs.append(plot_al_state(state_rows, metadata, state_name, out_dir=out_dir, window=window, drop_first=drop_first, dpi=dpi))
-            html = plot_al_state_interactive(state_rows, metadata, state_name, out_dir=out_dir, window=window, drop_first=drop_first)
+        if not state_rows:
+            continue
+        outputs.append(plot_al_trace_state(state_rows, metadata, state_name, out_dir=out_dir, window=window, drop_first=drop_first, dpi=dpi))
+        outputs.append(plot_al_uncertainty_state(state_rows, metadata, state_name, out_dir=out_dir, dpi=dpi))
+        for html in (
+            plot_al_trace_state_interactive(state_rows, metadata, state_name, out_dir=out_dir, window=window, drop_first=drop_first),
+            plot_al_uncertainty_state_interactive(state_rows, metadata, state_name, out_dir=out_dir),
+        ):
             if html:
                 outputs.append(html)
     if state is None:
