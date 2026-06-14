@@ -68,9 +68,19 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
             sparse=False
         )
         
-        # 3. Create SOAP vectors (use multi-processing if many frames)
-        n_jobs = -1 if len(frames) > 5 else 1
-        features = soap.create(frames, n_jobs=n_jobs)
+        # 3. Create SOAP vectors frame-by-frame to avoid multiprocessing hangs and show progress
+        features_list = []
+        n_frames = len(frames)
+        print(f"[SOAP] Computing features sequentially for {n_frames} frames...")
+        for idx, fr in enumerate(frames):
+            feat = soap.create(fr)
+            # Ensure it is at least a 1D/2D array
+            feat_arr = np.asarray(feat)
+            features_list.append(feat_arr)
+            if (idx + 1) % max(1, n_frames // 10) == 0 or idx == n_frames - 1:
+                print(f"  -> SOAP progress: {idx + 1}/{n_frames} frames completed...")
+        
+        features = np.vstack(features_list)
         
         # Make sure it's 2D array
         if features.ndim == 1:
