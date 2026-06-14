@@ -1470,7 +1470,12 @@ class EvaluationPipeline:
         # Directories & Logs
         os.makedirs("diagnostics", exist_ok=True)
         os.makedirs("uq_plots", exist_ok=True)
-        self.eval_log = self.eval_cfg.get("eval_log_file", "eval_log.txt")
+        self.eval_log = self.eval_cfg.get(
+            "metrics_log_file",
+            self.eval_cfg.get("eval_log_file", "eval_log.txt"),
+        )
+        if "metrics_log_file" not in self.eval_cfg and "eval_log_file" in self.eval_cfg:
+            print("[Eval] 'eval_log_file' is deprecated; use 'metrics_log_file' instead.")
         force_recompute = _parse_bool_like(self.eval_cfg.get("ensemble_force_recompute", False), default=False)
         has_resume_artifacts = False
         if not force_recompute:
@@ -1499,7 +1504,11 @@ class EvaluationPipeline:
 
             self.neighbour_list = setup_neighbor_list(config)
 
-        self.do_plot = self.eval_cfg.get("plot", False)
+        eval_mode = str(self.eval_cfg.get("mode", "all")).lower()
+        self.do_plot = _parse_bool_like(
+            self.eval_cfg.get("plot"),
+            default=(eval_mode == "uq_stats"),
+        )
         
         self.pool_xyz_path = self.eval_cfg.get("unlabeled_pool_path", None)
         self.al_val_flag = None if self.pool_xyz_path else self.eval_cfg.get("active_learning", None)
@@ -2809,7 +2818,8 @@ class EvaluationPipeline:
         if al_diagnostics_runs:
             al_csv_path = self.eval_cfg.get("al_diagnostics_csv", "al_pool_diagnostics.csv")
             write_pool_al_diagnostics_csv(al_diagnostics_runs, al_csv_path)
-            if _parse_bool_like(self.eval_cfg.get("plot_AL"), False):
+            plot_al_default = str(self.eval_cfg.get("mode", "all")).lower() == "active_learning"
+            if _parse_bool_like(self.eval_cfg.get("plot_AL"), default=plot_al_default):
                 al_plot_dir = self.eval_cfg.get("al_plot_dir", "al_plots")
                 os.makedirs(al_plot_dir, exist_ok=True)
                 generate_al_diagnostic_plots(

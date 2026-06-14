@@ -21,8 +21,8 @@ eval:
   calibration_source: "validation"
   selection_calibration: "var"
   purge_redundant_validation: true
-  eval_output_file: "output.xyz"
-  eval_log_file: "eval_log.txt"
+  prediction_output_file: "output.xyz"
+  metrics_log_file: "eval_log.txt"
 #  unlabeled_pool_path: "md_trajectory.xyz"
   error_estimate: False 
   plot: False  
