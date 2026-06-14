@@ -564,6 +564,10 @@ class _PoolActiveLearner:
         self.thr_Fmag = np.percentile(fm_ref, self.percentile_F_low)
         self.train_Fmax_hard_cap = float(fm_ref.max()) * float(self.hard_Fmax_train_mult)
 
+        self.user_hard_sigma_E_atom_min = float(getattr(self, "hard_sigma_E_atom_min", 0.001))
+        self.user_hard_sigma_F_mean_min = float(getattr(self, "hard_sigma_F_mean_min", 0.075))
+        self.user_hard_sigma_F_max_min = float(getattr(self, "hard_sigma_F_max_min", 0.15))
+
         if bool(getattr(self, "hard_floors_from_calibrated_train", False)):
             pct = float(self.percentile_F_low)
             self.hard_sigma_E_atom_min = float(
@@ -636,6 +640,9 @@ class _PoolActiveLearner:
             floor_E = getattr(self, 'hard_sigma_E_atom_min', 0.0)
             floor_Fmax = getattr(self, 'hard_sigma_F_max_min', 0.0)
             floor_Fmean = getattr(self, 'hard_sigma_F_mean_min', 0.0)
+            floor_E_user = getattr(self, 'user_hard_sigma_E_atom_min', 0.001)
+            floor_Fmax_user = getattr(self, 'user_hard_sigma_F_max_min', 0.15)
+            floor_Fmean_user = getattr(self, 'user_hard_sigma_F_mean_min', 0.075)
 
             unc_mult = 15.0
             max_allowed_E_hi = max(self.sigma_E_atom_train.max() * unc_mult, floor_E * 5.0)
@@ -643,10 +650,10 @@ class _PoolActiveLearner:
             force_hi_mult = 3.0
 
             # 3. Final effective thresholds (bounded by the hard caps)
-            # The ceiling must be at least the pool percentile, but NEVER lower than 2x the Floor!
-            self.thr_sigma_E_hi_eff = min(max(pool_E_hi, floor_E * 2.0), max_allowed_E_hi)
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, floor_Fmax * force_hi_mult)
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, floor_Fmean * force_hi_mult)
+            # Decoupled from pool percentiles to prevent outlier contamination
+            self.thr_sigma_E_hi_eff = floor_E_user * 3.0
+            self.thr_sigma_F_hi_eff = floor_Fmax_user * 3.0
+            self.thr_sigma_Fmean_hi_eff = floor_Fmean_user * 3.0
             self.thr_Fmag_hi_eff = min(max(pool_Fmag_hi, self.thr_Fmag * 2.0), max_allowed_Fmag_hi)
 
             # Ensure it never drops below the absolute low percentiles either
@@ -658,9 +665,13 @@ class _PoolActiveLearner:
             self.allowed_offset_eff = max(0.0, np.percentile(self.mu_E_atom_pool[calib_idx], 5) - np.percentile(self.mu_E_atom_train, 95)) + 0.05
 
         else:
-            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, 0.01)
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, 3.0 * getattr(self, 'hard_sigma_F_max_min', 0.0))
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, 3.0 * getattr(self, 'hard_sigma_F_mean_min', 0.0))
+            floor_E_user = getattr(self, 'user_hard_sigma_E_atom_min', 0.001)
+            floor_Fmax_user = getattr(self, 'user_hard_sigma_F_max_min', 0.15)
+            floor_Fmean_user = getattr(self, 'user_hard_sigma_F_mean_min', 0.075)
+
+            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, floor_E_user * 3.0)
+            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, floor_Fmax_user * 3.0)
+            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, floor_Fmean_user * 3.0)
             self.thr_Fmag_hi_eff = max(self.thr_Fmag, 2.0 * self.frame_max_force_train.max())
             self.allowed_offset_eff = 2.0 / float(np.nanmedian(self.train_atom_counts))
 

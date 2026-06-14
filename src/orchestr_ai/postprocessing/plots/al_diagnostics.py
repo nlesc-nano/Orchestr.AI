@@ -44,15 +44,47 @@ def read_al_diagnostics_csv(path):
             if stripped:
                 data_lines.append(line)
         if data_lines:
-            rows = list(csv.DictReader(data_lines))
+            header_line = data_lines[0].strip()
+            if "," in header_line:
+                rows = list(csv.DictReader(data_lines))
+            else:
+                headers = header_line.split()
+                for line in data_lines[1:]:
+                    parts = line.strip().split()
+                    if len(parts) >= len(headers):
+                        rows.append(dict(zip(headers, parts)))
     metadata["thresholds"] = dict(metadata["thresholds"])
     return rows, metadata
 
 
 def _thresholds_for_state(metadata, state):
     thresholds = dict(metadata.get("global_thresholds", {}))
-    thresholds.update(metadata.get("thresholds", {}).get(state, {}))
+    # Normalize state-specific merges (e.g. map triplet_reconstructed to triplet if needed)
+    state_thr = metadata.get("thresholds", {}).get(state, {})
+    if not state_thr and "reconstructed" in str(state):
+        alt_state = str(state).replace("_reconstructed", "")
+        state_thr = metadata.get("thresholds", {}).get(alt_state, {})
+    for k, v in state_thr.items():
+        if np.isfinite(v):
+            thresholds[k] = v
     return thresholds
+
+
+def _get_mapped(row, key):
+    mapping = {
+        "sigma_E_atom": ["sigma_E_atom", "σE_atom", "sE_atom", "sigmaE_atom"],
+        "sigma_F_max": ["sigma_F_max", "σF_max", "sF_max", "sigmaF_max"],
+        "sigma_F_mean": ["sigma_F_mean", "σF_mean", "sF_mean", "sigmaF_mean"],
+        "gamma_gate": ["gamma_gate", "γ_gate"],
+        "geom_ok": ["geom_ok", "rdf_ok"],
+        "caps_ok": ["caps_ok", "pass_caps"],
+        "cal_ok": ["cal_ok", "cal_support"],
+    }
+    candidates = mapping.get(key, [key])
+    for c in candidates:
+        if c in row:
+            return row[c]
+    return row.get(key)
 
 
 def _state_arrays(rows):
@@ -62,9 +94,9 @@ def _state_arrays(rows):
         "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max", "Fmax", "Fmean",
     ]
     keys_bool = ["geom_ok", "caps_ok", "force_inf", "gamma_gate", "cal_ok", "ood", "selected", "shortlist"]
-    out = {key: np.array([_to_float(row.get(key)) for row in rows], dtype=float) for key in keys_float}
+    out = {key: np.array([_to_float(_get_mapped(row, key)) for row in rows], dtype=float) for key in keys_float}
     for key in keys_bool:
-        out[key] = _to_bool_array([row.get(key, "0") for row in rows])
+        out[key] = _to_bool_array([_get_mapped(row, key) or "0" for row in rows])
     order = np.argsort(out["idx"])
     for key, values in out.items():
         out[key] = values[order]
@@ -341,7 +373,7 @@ def plot_al_trace_state(rows, metadata, state, out_dir="al_plots", window=50, dr
     else:
         dE_limits = dE
     _mark_events(axes[0], x, dE, arrays, show_label=True)
-    _apply_robust_ylim(axes[0], dE_limits, arrays)
+    _apply_robust_ylim(axes[0], dE, arrays)
     axes[0].set_ylabel("ΔE (eV)")
     axes[0].set_title(f"Energy relative to {e_ref_label}: E - {e_ref:.6g} eV", fontsize=10)
     axes[0].legend(loc="best", fontsize=8, ncol=4)
@@ -443,7 +475,7 @@ def plot_al_trace_state_interactive(rows, metadata, state, out_dir="al_plots", w
     else:
         dE_limits = dE
     _add_plotly_events(fig, 1, x, dE, arrays, go)
-    _plotly_range(fig, 1, dE_limits, arrays)
+    _plotly_range(fig, 1, dE, arrays)
 
     fmax_keys = [("thr_Fmag", "#636363", "Fmax low"), ("thr_Fmag_hi_eff", "#969696", "Fmax upper cap"), ("train_Fmax_hard_cap", "#b2182b", "Fmax hard cap")]
     fig.add_trace(go.Scatter(x=x, y=arrays["Fmax"], mode="lines", name="Fmax", line=dict(color="#1b7837")), row=2, col=1)
