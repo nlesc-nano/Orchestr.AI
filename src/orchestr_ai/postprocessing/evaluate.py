@@ -2283,7 +2283,7 @@ class EvaluationPipeline:
 
         runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
         pool_cache_mode = str(self.eval_cfg.get("pool_cache_mode", "light")).lower()
-        orig_mace_head = self.config.get("mace_head", "triplet_reconstructed")
+        orig_mace_head = self.config.get("mace_head", "default")
         other_head = self._dual_head_other_head(orig_mace_head)
         has_multihead = other_head is not None
         used_one_pass_dual_pool = False
