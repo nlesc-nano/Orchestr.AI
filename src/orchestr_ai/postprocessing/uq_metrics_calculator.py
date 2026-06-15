@@ -329,6 +329,7 @@ def run_uq_metrics(
     ensemble_size: Optional[int] = None,
     calibrators: Optional[Dict[str, Any]] = None,
     energy_per_atom: bool = False,
+    save_plot_data: bool = True,
 ) -> Dict:
     """
     Compute, calibrate (variance + isotonic) & log UQ metrics.
@@ -707,70 +708,71 @@ def run_uq_metrics(
     
     # --- Save npz for downstream plotting ------------------------------
     npz_path = None
-    try:
-        scalar_metrics = {m.name: m.value for m in metrics}
-        p_thresholds = np.linspace(0.0, 1.0, 21)
+    if save_plot_data:
+        try:
+            scalar_metrics = {m.name: m.value for m in metrics}
+            p_thresholds = np.linspace(0.0, 1.0, 21)
 
-        rmse_force = float(np.sqrt(np.mean(delta_c**2)))
-        rmv_force  = float(np.sqrt(np.mean(sigma_c**2)))
-        scalar_metrics.update({
-            "rmse_force": rmse_force,
-            "rmv_force":  rmv_force,
-        })
-        if delta_e is not None:
-            rmse_energy = float(np.sqrt(np.mean(delta_e**2)))
-            rmv_energy  = float(np.sqrt(np.mean(sigma_e**2)))
+            rmse_force = float(np.sqrt(np.mean(delta_c**2)))
+            rmv_force  = float(np.sqrt(np.mean(sigma_c**2)))
             scalar_metrics.update({
-                "rmse_energy": rmse_energy,
-                "rmv_energy":  rmv_energy,
+                "rmse_force": rmse_force,
+                "rmv_force":  rmv_force,
             })
+            if delta_e is not None:
+                rmse_energy = float(np.sqrt(np.mean(delta_e**2)))
+                rmv_energy  = float(np.sqrt(np.mean(sigma_e**2)))
+                scalar_metrics.update({
+                    "rmse_energy": rmse_energy,
+                    "rmv_energy":  rmv_energy,
+                })
 
-        # Forces
-        coverage_uncal     = np.array([picp(delta_c, sigma_c, alpha=1-p) for p in p_thresholds])
-        coverage_cal_var   = np.array([picp(delta_c, sigma_c_cal_var, alpha=1-p) for p in p_thresholds])
-        coverage_cal_iso   = np.array([picp(delta_c, sigma_c_cal_iso, alpha=1-p) for p in p_thresholds])
-
-        # Energies (if present)
-        if delta_e is not None:
-            coverage_uncal_e   = np.array([picp(delta_e, sigma_e, alpha=1-p) for p in p_thresholds])
-            coverage_cal_var_e = np.array([picp(delta_e, sigma_e_cal_var, alpha=1-p) for p in p_thresholds])
-            coverage_cal_iso_e = np.array([picp(delta_e, sigma_e_cal_iso, alpha=1-p) for p in p_thresholds])
-        else:
-            coverage_uncal_e   = np.array([])
-            coverage_cal_var_e = np.array([])
-            coverage_cal_iso_e = np.array([])
-
-        base = f"uq_plot_data_{split.lower()}_{tag.lower()}"
-        if ensemble_size:
-            base += f"_ens{ensemble_size}"
-        npz_path = Path("uq_plots") / f"{base}.npz"
-        npz_path.parent.mkdir(exist_ok=True)
-
-        np.savez_compressed(
-            npz_path,
             # Forces
-            delta_comp=delta_c,
-            sigma_comp_uncal=sigma_c,
-            sigma_comp_cal_var=sigma_c_cal_var, 
-            sigma_comp_cal_iso=sigma_c_cal_iso,
-            # Energies
-            delta_energy=delta_e,
-            sigma_energy_uncal=sigma_e,
-            sigma_energy_cal_var=sigma_e_cal_var,
-            sigma_energy_cal_iso=sigma_e_cal_iso,
-            # Scalar metrics & coverage
-            scalar_metrics=scalar_metrics,
-            p_thresholds=p_thresholds,
-            coverage_uncal=coverage_uncal,
-            coverage_cal_var=coverage_cal_var,
-            coverage_cal_iso=coverage_cal_iso,
-            coverage_uncal_e=coverage_uncal_e,
-            coverage_cal_var_e=coverage_cal_var_e,
-            coverage_cal_iso_e=coverage_cal_iso_e,
-        )
-        _LOGGER.info("  saved ➜ %s", npz_path)
-    except Exception as exc:
-        _LOGGER.warning("could not save plot data: %s", exc)
+            coverage_uncal     = np.array([picp(delta_c, sigma_c, alpha=1-p) for p in p_thresholds])
+            coverage_cal_var   = np.array([picp(delta_c, sigma_c_cal_var, alpha=1-p) for p in p_thresholds])
+            coverage_cal_iso   = np.array([picp(delta_c, sigma_c_cal_iso, alpha=1-p) for p in p_thresholds])
+
+            # Energies (if present)
+            if delta_e is not None:
+                coverage_uncal_e   = np.array([picp(delta_e, sigma_e, alpha=1-p) for p in p_thresholds])
+                coverage_cal_var_e = np.array([picp(delta_e, sigma_e_cal_var, alpha=1-p) for p in p_thresholds])
+                coverage_cal_iso_e = np.array([picp(delta_e, sigma_e_cal_iso, alpha=1-p) for p in p_thresholds])
+            else:
+                coverage_uncal_e   = np.array([])
+                coverage_cal_var_e = np.array([])
+                coverage_cal_iso_e = np.array([])
+
+            base = f"uq_plot_data_{split.lower()}_{tag.lower()}"
+            if ensemble_size:
+                base += f"_ens{ensemble_size}"
+            npz_path = Path("uq_plots") / f"{base}.npz"
+            npz_path.parent.mkdir(exist_ok=True)
+
+            np.savez_compressed(
+                npz_path,
+                # Forces
+                delta_comp=delta_c,
+                sigma_comp_uncal=sigma_c,
+                sigma_comp_cal_var=sigma_c_cal_var,
+                sigma_comp_cal_iso=sigma_c_cal_iso,
+                # Energies
+                delta_energy=delta_e,
+                sigma_energy_uncal=sigma_e,
+                sigma_energy_cal_var=sigma_e_cal_var,
+                sigma_energy_cal_iso=sigma_e_cal_iso,
+                # Scalar metrics & coverage
+                scalar_metrics=scalar_metrics,
+                p_thresholds=p_thresholds,
+                coverage_uncal=coverage_uncal,
+                coverage_cal_var=coverage_cal_var,
+                coverage_cal_iso=coverage_cal_iso,
+                coverage_uncal_e=coverage_uncal_e,
+                coverage_cal_var_e=coverage_cal_var_e,
+                coverage_cal_iso_e=coverage_cal_iso_e,
+            )
+            _LOGGER.info("  saved ➜ %s", npz_path)
+        except Exception as exc:
+            _LOGGER.warning("could not save plot data: %s", exc)
 
     # --- Return dict for further processing -----------------------------
     # Return fitted calibrators so they can be re-used on other splits (train->eval)
@@ -807,6 +809,7 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
     ensemble_size: Optional[int] = None,
     calibrators: Optional[Dict[str, Any]] = None,
     energy_per_atom: bool = False,
+    save_plot_data: bool = True,
 ):
     """Thin wrapper that forwards to :func:`run_uq_metrics`.
 
@@ -825,4 +828,5 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
         ensemble_size=ensemble_size,
         calibrators=calibrators,
         energy_per_atom=energy_per_atom,
+        save_plot_data=save_plot_data,
     )

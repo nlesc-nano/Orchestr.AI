@@ -17,6 +17,7 @@ from .active_learning import (
     generate_al_traditional_plots,
 )
 from .mlff import plot_mlff_stats
+from .al_diagnostics import generate_al_diagnostic_plots, read_al_diagnostics_csv
 
 __all__ = [
     "plot_scalar_metrics",
@@ -34,4 +35,6 @@ __all__ = [
     "generate_al_influence_plots",
     "generate_al_traditional_plots",
     "plot_mlff_stats",
+    "generate_al_diagnostic_plots",
+    "read_al_diagnostics_csv",
 ]

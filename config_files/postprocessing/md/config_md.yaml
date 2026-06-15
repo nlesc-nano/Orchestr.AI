@@ -11,17 +11,24 @@ initial_xyz: "../CsPbBr3_opt.xyz"
 run_type: "MD"  # Change to "GEO_OPT" for geometry optimization
 
 eval:
+  mode: "uq_stats"  # "uq_stats", "active_learning", or legacy "all"
   batch_size: 16  
   uncertainty: ["ensemble"]  
   training_data: "../consolidated_dataset_100.xyz"  # Replace with actual path
-  eval_input_xyz: "../consolidated_dataset_150.xyz"
-  eval_output_file: "output.xyz"
-  eval_log_file: "eval_log.txt"
+  validation_data: "../consolidated_dataset_150.xyz"
+#  eval_input_xyz: "../consolidated_dataset_150.xyz"  # Deprecated; use validation_data.
+  calibration_data: null
+  calibration_source: "validation"
+  selection_calibration: "var"
+  purge_redundant_validation: true
+  prediction_output_file: "output.xyz"
+  metrics_log_file: "eval_log.txt"
 #  unlabeled_pool_path: "md_trajectory.xyz"
   error_estimate: False 
   plot: False  
   ensemble_folder: "../models_painn"
   ensemble_size: 10 
+  ensemble_force_recompute: false
   test_ensemble: False
   active_learning: "influence"  
 #  plot_smooth_window: 50     # (optional) window for the rolling‐mean plot
@@ -46,6 +53,9 @@ md:
   friction_coefficient: 0.01
   steps: 1000  
   xyz_print_interval: 5  
+  restart: false
+  # restart_file defaults to trajectory_file_md when restart is true.
+  # restart_file: "md_trajectory.xyz"
 
 geo_opt:
   geo_opt_fmax: 0.02
@@ -60,5 +70,3 @@ vib:
   vib_output_file: "vibrational_frequencies.txt"
   vdos_plot_file: "vdos_plot.png"
   delta: 10 
-
-

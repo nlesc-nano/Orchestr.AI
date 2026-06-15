@@ -16,7 +16,7 @@ from types import MethodType
 
 from pathlib import Path
 from ase import units
-from ase.io import write
+from ase.io import read, write
 from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
 from ase.neighborlist import neighbor_list
@@ -610,6 +610,40 @@ def _get_other_head_energy(atoms, other_head, config):
         if hasattr(atoms.calc, "results"):
             atoms.calc.results = old_results
 
+def _load_md_restart_frame(restart_file, reference_atoms=None):
+    """Load the last MD frame and restore velocities for a restart."""
+    if not restart_file:
+        raise ValueError("MD restart requested but no restart_file or trajectory_file_md was provided.")
+
+    restart_path = Path(restart_file)
+    if not restart_path.exists() or restart_path.stat().st_size == 0:
+        raise FileNotFoundError(f"MD restart file is missing or empty: {restart_file}")
+
+    atoms = read(str(restart_path), index=-1)
+    if reference_atoms is not None:
+        if len(atoms) != len(reference_atoms):
+            raise ValueError(
+                f"MD restart frame has {len(atoms)} atoms, but initial_xyz has "
+                f"{len(reference_atoms)} atoms."
+            )
+        if not atoms.cell.rank and reference_atoms.cell.rank:
+            atoms.set_cell(reference_atoms.get_cell())
+        if not np.any(atoms.get_pbc()) and np.any(reference_atoms.get_pbc()):
+            atoms.set_pbc(reference_atoms.get_pbc())
+
+    velocities = atoms.arrays.get("velocities")
+    if velocities is None:
+        velocities = atoms.get_velocities()
+    if velocities is None:
+        raise ValueError(
+            f"MD restart file '{restart_file}' does not contain velocities. "
+            "Restart requires a trajectory written by this MD driver."
+        )
+
+    atoms.set_velocities(np.asarray(velocities, dtype=float))
+    step_offset = int(atoms.info.get("step", 0) or 0)
+    return atoms, step_offset
+
 def print_md_status(
     dyn,
     atoms,
@@ -617,6 +651,7 @@ def print_md_status(
     dt_fs,
     friction,
     config=None,
+    step_offset=0,
 ):
     """
     Log one line with energies, timing, etc.  **Do not** write XYZ here –
@@ -629,7 +664,7 @@ def print_md_status(
     last_call_time = now
     cumulative_time += step_time
 
-    step = dyn.get_number_of_steps()
+    step = step_offset + dyn.get_number_of_steps()
     md_time = step * dt_fs
     e_pot = atoms.get_potential_energy()
     e_kin = atoms.get_kinetic_energy()
@@ -862,8 +897,8 @@ class MDWriterThread(Thread):
                     
                 elif msg_type == "traj":
                     if f_out:
-                        symbols, positions, velocities, forces, info = msg_data
-                        frame = Atoms(symbols=symbols, positions=positions)
+                        symbols, positions, velocities, forces, info, cell, pbc = msg_data
+                        frame = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
                         if velocities is not None:
                             frame.set_array("velocities", velocities)
                         if forces is not None:
@@ -912,6 +947,16 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     center        = md.get("confinement_center",  None)
     framework     = config.get("model_framework", "schnetpack").lower()
     cutoff        = config.get("cutoff", md.get("cutoff"))
+    restart       = bool(md.get("restart", False))
+    restart_file  = md.get("restart_file", traj_file)
+    step_offset   = 0
+
+    if restart:
+        atoms, step_offset = _load_md_restart_frame(restart_file, atoms)
+        print(
+            f"Restarting MD from {restart_file} "
+            f"at saved step {step_offset}; running {nsteps} additional steps."
+        )
 
     # -----------------------------------------------------------------
     #  calculator + starting velocities (preventing zero kinetic energy)
@@ -946,7 +991,10 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
     heating_steps = md.get("heating_steps", 0)
     T_start = md.get("heating_T_start", 10.0)
 
-    if heating_steps > 0:
+    if restart:
+        print("MD restart: using velocities from restart frame; skipping velocity initialization and heating ramp.")
+        heating_steps = 0
+    elif heating_steps > 0:
         print(f"Heating initialized: starting at {T_start} K, ramping to {T0} K over {heating_steps} steps.")
         MaxwellBoltzmannDistribution(atoms, temperature_K=T_start)
     else:
@@ -1076,7 +1124,13 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         if log_file:
             dyn.attach(
                 lambda: print_md_status(
-                    dyn, atoms, write_queue, dt_fs, gamma_fs, config=config
+                    dyn,
+                    atoms,
+                    write_queue,
+                    dt_fs,
+                    gamma_fs,
+                    config=config,
+                    step_offset=step_offset,
                 ),
                 interval=log_int,
             )
@@ -1084,7 +1138,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         # Attach trajectory print callback
         if traj_file and xyz_int > 0:
             def async_write_xyz_frame():
-                step = dyn.get_number_of_steps()
+                step = step_offset + dyn.get_number_of_steps()
                 md_time = step * dt_fs
                 T_set = getattr(dyn, "temperature_K", np.nan)
                 
@@ -1111,7 +1165,9 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
                         atoms.get_positions().copy(),
                         velocities,
                         forces,
-                        info
+                        info,
+                        atoms.get_cell().array.copy(),
+                        atoms.get_pbc().copy(),
                     )
                 ))
 
