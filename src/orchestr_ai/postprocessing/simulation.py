@@ -1328,6 +1328,10 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     vdos_plot_file = vib_config.get("vdos_plot_file", "vdos_plot.png")
     delta = vib_config.get("delta", 0.01)
     vib_cache_name = vib_config.get("cache_name", "vib")
+    normal_modes_file = vib_config.get(
+        "normal_modes_file",
+        vib_output_file.replace(".txt", "_normal_modes.npz"),
+    )
 
     print("Setting up calculator for Vibrational Analysis...")
     # Correct instantiation
@@ -1409,6 +1413,62 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         print(f"Vibrational frequencies saved to {vib_output_file}")
     except IOError as e:
         print(f"Warning: Failed to write frequencies file: {e}")
+
+    # === Save Normal Modes ===
+    try:
+        vib_data = vib.get_vibrations()
+        modes = np.asarray(vib_data.get_modes(all_atoms=True), dtype=np.float64)
+        mode_norm2_by_atom = np.sum(modes**2, axis=2)
+        energies_eV = np.asarray(vib_data.get_energies(), dtype=np.complex128)
+        raw_frequencies_cm = np.asarray(ase_frequencies_cm, dtype=np.complex128)
+        field_names = np.asarray([
+            "frequencies_cm",
+            "raw_frequencies_cm",
+            "energies_eV",
+            "modes_cartesian",
+            "mode_norm2_by_atom",
+            "symbols",
+            "masses",
+            "positions",
+            "atomic_numbers",
+            "vib_indices",
+            "delta_angstrom",
+        ])
+        field_descriptions = np.asarray([
+            "Signed frequencies in cm^-1; imaginary modes are stored as negative real values.",
+            "Raw ASE frequencies in cm^-1, preserving complex values for imaginary modes.",
+            "Raw ASE vibrational energies in eV, preserving complex values.",
+            "Cartesian normal modes with shape (n_modes, n_atoms, 3).",
+            "Per-mode per-atom squared displacement weights with shape (n_modes, n_atoms).",
+            "Chemical symbols for all atoms in the optimized structure.",
+            "Atomic masses in amu for all atoms in the optimized structure.",
+            "Optimized Cartesian positions in Angstrom.",
+            "Atomic numbers for all atoms in the optimized structure.",
+            "Atom indices included in the ASE finite-difference Hessian.",
+            "Finite-difference displacement used by ASE Vibrations, in Angstrom.",
+        ])
+
+        np.savez_compressed(
+            normal_modes_file,
+            schema=np.asarray("orchestr_ai.vibrational_modes.v1"),
+            field_names=field_names,
+            field_descriptions=field_descriptions,
+            frequencies_cm=frequencies_cm.astype(np.float64),
+            raw_frequencies_cm=raw_frequencies_cm,
+            energies_eV=energies_eV,
+            modes_cartesian=modes,
+            mode_norm2_by_atom=mode_norm2_by_atom,
+            symbols=np.asarray(atoms.get_chemical_symbols()),
+            masses=np.asarray(atoms.get_masses(), dtype=np.float64),
+            positions=np.asarray(atoms.get_positions(), dtype=np.float64),
+            atomic_numbers=np.asarray(atoms.get_atomic_numbers(), dtype=np.int64),
+            vib_indices=np.asarray(vib.indices, dtype=np.int64),
+            delta_angstrom=float(delta),
+        )
+        print(f"Normal modes saved to {normal_modes_file}")
+    except Exception as e:
+        print(f"Warning: Failed to write normal modes file: {e}")
+        traceback.print_exc()
 
     # === Save Molden File (Use ASE's built-in method if possible) ===
     molden_file = vib_output_file.replace(".txt", ".molden")

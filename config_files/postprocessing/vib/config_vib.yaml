@@ -59,5 +59,6 @@ vib:
   log_file_vib: "vib_opt.log"
   vib_output_file: "vibrational_frequencies.txt"
   vdos_plot_file: "vdos_plot.png"
+  normal_modes_file: "vibrational_normal_modes.npz"
   delta: 0.01
   cache_name: "vib"
