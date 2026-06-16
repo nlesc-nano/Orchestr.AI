@@ -148,7 +148,27 @@ def main():
             logging.info("NequIP/Allegro model path passed to calculator.")
         else:
             best = torch.load(model_path, map_location=device, weights_only=False)
-            best = best.to(device=device, dtype=torch.float32)
+            # Determine precision dynamically (GEO_OPT and VIB use float64)
+            default_dtype = config.get("default_dtype") or config.get("default_precision")
+            if default_dtype is None:
+                run_type_str = str(config.get("run_type", "MD")).upper()
+                if run_type_str in {"GEO_OPT", "VIB"}:
+                    default_dtype = "float64"
+                else:
+                    default_dtype = "float32"
+            
+            torch_dtype = torch.float64 if default_dtype == "float64" else torch.float32
+            
+            if not isinstance(best, torch.jit.ScriptModule):
+                try:
+                    best = best.to(device=device, dtype=torch_dtype)
+                    logging.info(f"Successfully cast model parameters to {torch_dtype}")
+                except Exception as e:
+                    logging.warning(f"Could not cast model to {torch_dtype}: {e}. Falling back to default cast.")
+                    best = best.to(device=device)
+            else:
+                logging.info("Model is a JIT ScriptModule. Skipping dtype casting.")
+                best = best.to(device=device)
 
             if hasattr(best, "postprocessors"):
                 try:
