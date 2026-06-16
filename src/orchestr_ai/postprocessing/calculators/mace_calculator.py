@@ -331,7 +331,8 @@ class ReconstructedMACECalculator(MACECalculator):
         kwargs["head"] = self.base_head
 
         # Initialize base MACECalculator using 'models' parameter
-        super().__init__(models=[model], device=str(device), default_dtype="float32", **kwargs)
+        dtype = kwargs.pop("default_dtype", "float32")
+        super().__init__(models=[model], device=str(device), default_dtype=dtype, **kwargs)
 
         # Set default head to base_head initially
         self.head = self.base_head

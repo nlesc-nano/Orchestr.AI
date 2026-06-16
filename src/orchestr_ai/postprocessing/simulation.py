@@ -77,6 +77,17 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         if isinstance(mace_head, str):
             mace_head = mace_head.strip()
 
+        # Check for user-defined dtype or default based on run_type (GEO_OPT/VIB use double precision)
+        default_dtype = config.get("default_dtype") or config.get("default_precision")
+        if default_dtype is None:
+            run_type = str(config.get("run_type", "EVAL")).upper()
+            if run_type in {"GEO_OPT", "VIB"}:
+                default_dtype = "float64"
+            else:
+                default_dtype = "float32"
+
+        print(f"[MACE] Initializing calculator with precision default_dtype='{default_dtype}'")
+
         if mace_head == "triplet_reconstructed":
             from orchestr_ai.postprocessing.calculators.mace_calculator import (
                 ReconstructedMACECalculator,
@@ -89,12 +100,13 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                 model=model,
                 device=device,
                 scale_metadata_path=scale_metadata_path,
+                default_dtype=default_dtype,
             )
 
         kwargs = {
             "models": [model],
             "device": str(device),
-            "default_dtype": "float32",
+            "default_dtype": default_dtype,
         }
 
         if mace_head:
