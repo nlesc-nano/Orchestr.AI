@@ -20,7 +20,7 @@ from ase.io import read, write
 from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
 from ase.neighborlist import neighbor_list
-from ase.optimize import BFGSLineSearch
+from ase.optimize import BFGSLineSearch, FIRE, LBFGS
 from ase.vibrations import Vibrations
 
 # --- Global Timing Variables ---
@@ -77,14 +77,8 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         if isinstance(mace_head, str):
             mace_head = mace_head.strip()
 
-        # Check for user-defined dtype or default based on run_type (GEO_OPT/VIB use double precision)
-        default_dtype = config.get("default_dtype") or config.get("default_precision")
-        if default_dtype is None:
-            run_type = str(config.get("run_type", "EVAL")).upper()
-            if run_type in {"GEO_OPT", "VIB"}:
-                default_dtype = "float64"
-            else:
-                default_dtype = "float32"
+        # Check for user-defined dtype or default to float64
+        default_dtype = config.get("default_dtype") or config.get("default_precision") or "float64"
 
         print(f"[MACE] Initializing calculator with precision default_dtype='{default_dtype}'")
 
@@ -525,7 +519,17 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
 
     print(f"Running Geometry Optimization (fmax={geo_opt_fmax}, steps={geo_opt_steps})...")
     # Use atoms directly, no need for Optimizable wrapper unless constraints change
-    optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.04)
+    opt_type = str(geo_config.get("optimizer", "bfgs")).lower().strip()
+    if opt_type == "lbfgs":
+        print("Using LBFGS optimizer (forces-only).")
+        optimizer = LBFGS(atoms, logfile=None, maxstep=0.04)
+    elif opt_type == "fire":
+        print("Using FIRE optimizer (forces-only).")
+        optimizer = FIRE(atoms, logfile=None, maxstep=0.04)
+    else:
+        print("Using BFGSLineSearch optimizer (energy + forces).")
+        optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.04)
+
     # Pass optimizer itself to the logger function
     optimizer.attach(
         lambda opt=optimizer: log_geo_opt_status(opt, atoms, log_file, trajectory_file, config=config),
@@ -1286,7 +1290,19 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     atoms.calc = calc
 
     print(f"Running tight Geometry Optimization for Vibrations (fmax={vib_opt_fmax}, steps={vib_opt_steps})...")
-    optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02) # Smaller maxstep for tighter opt
+    
+    geo_config = config.get("geo_opt", {})
+    opt_type = str(vib_config.get("optimizer", geo_config.get("optimizer", "bfgs"))).lower().strip()
+    if opt_type == "lbfgs":
+        print("Using LBFGS optimizer (forces-only) for pre-vibrational optimization.")
+        optimizer = LBFGS(atoms, logfile=None, maxstep=0.02)
+    elif opt_type == "fire":
+        print("Using FIRE optimizer (forces-only) for pre-vibrational optimization.")
+        optimizer = FIRE(atoms, logfile=None, maxstep=0.02)
+    else:
+        print("Using BFGSLineSearch optimizer (energy + forces) for pre-vibrational optimization.")
+        optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02)
+
     # Attach logger using the vib log file
     optimizer.attach(
         lambda opt=optimizer: log_vib_opt_status(opt, atoms, log_file_vib, trajectory_file_vib, config=config),
