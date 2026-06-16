@@ -1327,6 +1327,7 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     vib_output_file = vib_config.get("vib_output_file", "vibrational_frequencies.txt")
     vdos_plot_file = vib_config.get("vdos_plot_file", "vdos_plot.png")
     delta = vib_config.get("delta", 0.01)
+    vib_cache_name = vib_config.get("cache_name", "vib")
 
     print("Setting up calculator for Vibrational Analysis...")
     # Correct instantiation
@@ -1364,9 +1365,9 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
 
     print("Tight Geometry Optimization Finished.")
 
-    print(f"Calculating Vibrations (delta={delta} Ang)...")
+    print(f"Calculating Vibrations (delta={delta} Ang, cache='{vib_cache_name}')...")
     try:
-        vib = Vibrations(atoms, delta=delta)
+        vib = Vibrations(atoms, delta=delta, name=vib_cache_name)
         vib.run()
         print("Vibrations calculation finished.")
     except Exception as e:
@@ -1376,25 +1377,24 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         return None
 
     # === Process Vibrational Modes ===
-    # Standard ASE conversion factor for Vibrations frequencies (which are in meV)
-    meV_to_cm1 = units.invcm # Should be ~8.06554
-    frequencies_meV = vib.get_frequencies()
+    # ASE Vibrations.get_frequencies() already returns cm^-1.
+    ase_frequencies_cm = vib.get_frequencies()
     frequencies_cm = []
     imag_modes_count = 0
 
-    for f_meV in frequencies_meV:
-        if isinstance(f_meV, complex):
+    for freq in ase_frequencies_cm:
+        if isinstance(freq, complex):
             # Check imaginary part magnitude - threshold might need adjustment
-            if abs(f_meV.imag) > 1e-4:
+            if abs(freq.imag) > 1e-4:
                 # Mark imaginary modes with negative sign
-                frequencies_cm.append(-abs(f_meV.imag * meV_to_cm1))
+                frequencies_cm.append(-abs(freq.imag))
                 imag_modes_count += 1
             else:
                 # Treat as real if imaginary part is negligible
-                frequencies_cm.append(f_meV.real * meV_to_cm1)
+                frequencies_cm.append(freq.real)
         else:
             # Handle real frequencies directly
-            frequencies_cm.append(f_meV * meV_to_cm1)
+            frequencies_cm.append(freq)
 
     frequencies_cm = np.array(frequencies_cm)
     print(f"Found {imag_modes_count} imaginary modes (marked negative).")
