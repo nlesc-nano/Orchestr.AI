@@ -334,7 +334,8 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file, config=None)
     if step == 0:
         log_geo_opt_status.last_epot = None
         
-    e_pot = atoms.get_potential_energy()
+    e_pot_raw = atoms.get_potential_energy()
+    e_pot = _get_logged_potential_energy(atoms, fallback=e_pot_raw)
     forces = atoms.get_forces(apply_constraint=False) # Get forces after energy
     max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
 
@@ -623,6 +624,36 @@ def _load_scale_metadata(config):
             print(f"Warning: Failed to load scale metadata from {scale_metadata_path}: {e}")
     return None
 
+
+def _sum_result_energy(results, *, per_atom_key="energies", scalar_key="energy"):
+    """Return a float64 log energy from calculator results when possible."""
+    if not isinstance(results, dict):
+        return np.nan
+
+    per_atom = results.get(per_atom_key)
+    if per_atom is not None:
+        arr = np.asarray(per_atom, dtype=np.float64)
+        if arr.size and np.all(np.isfinite(arr)):
+            return float(arr.sum(dtype=np.float64))
+
+    scalar = results.get(scalar_key)
+    if scalar is None:
+        return np.nan
+    try:
+        return float(np.asarray(scalar, dtype=np.float64).reshape(-1)[0])
+    except Exception:
+        return np.nan
+
+
+def _get_logged_potential_energy(atoms, fallback=None):
+    """Prefer per-atom MACE energies to avoid float32 total-energy quantization in logs."""
+    if atoms.calc is not None and hasattr(atoms.calc, "results"):
+        energy = _sum_result_energy(atoms.calc.results)
+        if np.isfinite(energy):
+            return energy
+    return float(fallback) if fallback is not None else np.nan
+
+
 def _get_other_head_energy(atoms, other_head, config):
     """
     Safely calculates or retrieves potential energy for other_head.
@@ -633,6 +664,18 @@ def _get_other_head_energy(atoms, other_head, config):
 
     # If it is ReconstructedMACECalculator, we might already have the cached energies:
     calc_results = getattr(atoms.calc, "results", {})
+    if other_head == "singlet" and "energies_singlet" in calc_results:
+        return _sum_result_energy(
+            calc_results,
+            per_atom_key="energies_singlet",
+            scalar_key="energy_singlet",
+        )
+    if other_head == "triplet_reconstructed" and "energies_triplet_reconstructed" in calc_results:
+        return _sum_result_energy(
+            calc_results,
+            per_atom_key="energies_triplet_reconstructed",
+            scalar_key="energy_triplet_reconstructed",
+        )
     if other_head == "singlet" and "energy_singlet" in calc_results:
         return calc_results["energy_singlet"]
     if other_head == "triplet_reconstructed" and "energy_triplet_reconstructed" in calc_results:
@@ -655,12 +698,12 @@ def _get_other_head_energy(atoms, other_head, config):
 
         atoms.calc.head = target_head
         atoms.calc.calculate(atoms, properties=["energy"], system_changes=all_changes)
-        calculated_energy = atoms.calc.results.get("energy", np.nan)
+        calculated_energy = _sum_result_energy(atoms.calc.results)
 
         if reconstruct_triplet and target_head == "delta":
             k_E = _load_scale_metadata(config)
-            if k_E is not None and old_results.get("energy") is not None:
-                E_singlet = old_results["energy"]
+            E_singlet = _sum_result_energy(old_results)
+            if k_E is not None and np.isfinite(E_singlet):
                 E_delta = calculated_energy
                 calculated_energy = E_singlet - (E_delta / k_E)
             else:
@@ -734,7 +777,8 @@ def print_md_status(
 
     step = step_offset + dyn.get_number_of_steps()
     md_time = step * dt_fs
-    e_pot = atoms.get_potential_energy()
+    e_pot_raw = atoms.get_potential_energy()
+    e_pot = _get_logged_potential_energy(atoms, fallback=e_pot_raw)
     e_kin = atoms.get_kinetic_energy()
     e_tot = e_pot + e_kin
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0

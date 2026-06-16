@@ -352,6 +352,7 @@ class ReconstructedMACECalculator(MACECalculator):
         super().calculate(atoms, properties, system_changes)
         E_singlet = self.results["energy"]
         F_singlet = self.results["forces"]
+        energies_singlet = self.results.get("energies")
 
         # 2. Run delta head calculation
         # Note: system_changes is reset to ensure MACE recomputes for the new head
@@ -359,10 +360,16 @@ class ReconstructedMACECalculator(MACECalculator):
         super().calculate(atoms, properties, all_changes)
         Delta_E_scaled = self.results["energy"]
         F_delta_scaled = self.results["forces"]
+        energies_delta_scaled = self.results.get("energies")
 
         # 3. Perform reconstruction
         E_triplet = E_singlet - (Delta_E_scaled / self.k_E)
         F_triplet = F_singlet - (F_delta_scaled / self.k_F)
+        energies_triplet = None
+        if energies_singlet is not None and energies_delta_scaled is not None:
+            energies_triplet = np.asarray(energies_singlet, dtype=np.float64) - (
+                np.asarray(energies_delta_scaled, dtype=np.float64) / self.k_E
+            )
 
         # 4. Save results back
         self.results["energy"] = E_triplet
@@ -370,3 +377,16 @@ class ReconstructedMACECalculator(MACECalculator):
         self.results["forces"] = F_triplet  
         self.results["energy_singlet"] = E_singlet
         self.results["energy_triplet_reconstructed"] = E_triplet
+        if energies_singlet is not None:
+            self.results["energies_singlet"] = np.asarray(
+                energies_singlet,
+                dtype=np.float64,
+            )
+        if energies_delta_scaled is not None:
+            self.results["energies_delta_scaled"] = np.asarray(
+                energies_delta_scaled,
+                dtype=np.float64,
+            )
+        if energies_triplet is not None:
+            self.results["energies"] = energies_triplet
+            self.results["energies_triplet_reconstructed"] = energies_triplet
