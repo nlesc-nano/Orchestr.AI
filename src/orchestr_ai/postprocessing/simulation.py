@@ -77,8 +77,8 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         if isinstance(mace_head, str):
             mace_head = mace_head.strip()
 
-        # Check for user-defined dtype or default to float64
-        default_dtype = config.get("default_dtype") or config.get("default_precision") or "float64"
+        # Check for user-defined dtype or default to float32
+        default_dtype = config.get("default_dtype") or config.get("default_precision") or "float32"
 
         print(f"[MACE] Initializing calculator with precision default_dtype='{default_dtype}'")
 

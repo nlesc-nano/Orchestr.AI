@@ -148,8 +148,8 @@ def main():
             logging.info("NequIP/Allegro model path passed to calculator.")
         else:
             best = torch.load(model_path, map_location=device, weights_only=False)
-            # Determine precision dynamically (default to float64)
-            default_dtype = config.get("default_dtype") or config.get("default_precision") or "float64"
+            # Determine precision dynamically (default to float32)
+            default_dtype = config.get("default_dtype") or config.get("default_precision") or "float32"
             torch_dtype = torch.float64 if default_dtype == "float64" else torch.float32
             
             try:
