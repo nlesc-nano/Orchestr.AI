@@ -306,7 +306,7 @@ def _log_status_line(log_file, header, values_format, values):
     except IOError as e:
         print(f"Warning: Failed write to log {log_file}: {e}")
 
-def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
+def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file, config=None):
     """
     Logs geometry optimization status to a log file.
 
@@ -315,6 +315,7 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
       atoms (ase.Atoms): The atomic structure.
       log_file (str): Path to the log file.
       trajectory_file (str): File name for the geometry optimization trajectory.
+      config (dict, optional): Configuration parameters.
     """
     global last_call_time, cumulative_time
     now = time.time()
@@ -323,34 +324,152 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
     cumulative_time += step_total_time
 
     step = optimizer.get_number_of_steps()
+    
+    if step == 0:
+        log_geo_opt_status.last_epot = None
+        
     e_pot = atoms.get_potential_energy()
     forces = atoms.get_forces(apply_constraint=False) # Get forces after energy
     max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
 
-    # Access results safely from the calculator
-    calc_results = {}
-    if hasattr(atoms, 'calc') and atoms.calc is not None and hasattr(atoms.calc, 'results'):
-         calc_results = atoms.calc.results
+    last_epot = getattr(log_geo_opt_status, "last_epot", None)
+    dE = e_pot - last_epot if last_epot is not None else 0.0
+    log_geo_opt_status.last_epot = e_pot
 
-    E_ml_only = calc_results.get("E_ml_avg", np.nan) # Use E_ml_avg which is ML energy
-    E_coul = calc_results.get("coul_fn_energy", np.nan) # Use coul_fn_energy
-    ml_time = calc_results.get("ml_time", 0.0)
-    coul_fn_time = calc_results.get("coul_fn_time", 0.0)
+    # Helper to rename long head name
+    def log_name(h):
+        if h == "triplet_reconstructed":
+            return "trip_delta"
+        return h
 
-    header = (
-        f"{'Step':>5s} | {'Epot(eV)':>14s} | {'E_ML_only(eV)':>14s} | {'E_Coul(eV)':>12s} | "
-        f"{'MLtime(s)':>10s} | {'CoulFn(s)':>10s} | {'StepTime(s)':>12s} | "
-        f"{'CumTime(s)':>12s} | {'MaxForce(eV/A)':>14s}"
-    )
-    values_format = (
-        "{:5d} | {:14.6f} | {:14.6f} | {:12.6f} | {:10.4f} | "
-        "{:10.4f} | {:12.4f} | {:12.4f} | {:14.6f}"
-    )
-    values = (
-        step, e_pot, E_ml_only, E_coul, ml_time, coul_fn_time,
-        step_total_time, cumulative_time, max_force
-    )
-    _log_status_line(log_file, header, values_format, values)
+    # Detect multi-head MACE run
+    is_mace = False
+    if config is not None:
+        framework = config.get("model_framework", "").lower()
+        if framework == "mace":
+            is_mace = True
+
+    has_multihead = False
+    selected_head = None
+    other_head = None
+    available_heads = []
+
+    if is_mace and atoms.calc is not None:
+        if hasattr(atoms.calc, "models") and len(atoms.calc.models) > 0:
+            available_heads = getattr(atoms.calc.models[0], "heads", [])
+        if not available_heads and hasattr(atoms.calc, "available_heads"):
+            available_heads = atoms.calc.available_heads
+        
+        if available_heads:
+            available_heads = [h.strip() for h in available_heads if isinstance(h, str)]
+
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        is_reconstructed = (mace_head == "triplet_reconstructed")
+        is_multi_model = ("singlet" in available_heads and ("triplet" in available_heads or "delta" in available_heads))
+        
+        if is_reconstructed or is_multi_model:
+            has_multihead = True
+            selected_head = mace_head if mace_head else "singlet"
+
+            if selected_head == "singlet":
+                other_head = "triplet" if "triplet" in available_heads else "delta"
+            elif selected_head == "triplet":
+                other_head = "singlet"
+            elif selected_head == "delta":
+                other_head = "singlet"
+            elif selected_head == "triplet_reconstructed":
+                other_head = "singlet"
+            else:
+                other_head = "singlet" if "singlet" in available_heads else None
+
+            if other_head == "delta":
+                k_E = _load_scale_metadata(config)
+                if k_E is not None:
+                    other_head = "triplet_reconstructed"
+
+    epot_other = np.nan
+    delta_gap = np.nan
+    if has_multihead and other_head:
+        epot_other = _get_other_head_energy(atoms, other_head, config)
+        
+        e_singlet_val = np.nan
+        e_triplet_val = np.nan
+        
+        # Check active/selected head
+        if selected_head == "singlet":
+            e_singlet_val = e_pot
+        elif selected_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = e_pot
+            
+        # Check other head
+        if other_head == "singlet":
+            e_singlet_val = epot_other
+        elif other_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = epot_other
+            
+        if not np.isnan(e_singlet_val) and not np.isnan(e_triplet_val):
+            delta_gap = e_singlet_val - e_triplet_val
+
+    if has_multihead and other_head:
+        col1_name = f"Epot_{log_name(selected_head)}(eV)"
+        col2_name = f"Epot_{log_name(other_head)}(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_dE_str = f"{dE:.6f}"
+        val_epot_other_str = f"{epot_other:.6f}"
+        val_delta_gap_str = f"{delta_gap:.6f}"
+        
+        col1_w = max(11, len(col1_name), len(val_epot_str))
+        col2_w = max(11, len(col2_name), len(val_epot_other_str))
+        gap_w = max(13, len("delta_gap(eV)"), len(val_delta_gap_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        de_w = max(11, len("dE(eV)"), len(val_dE_str))
+
+        header = (
+            f"{'Step':>6} | {col1_name:>{col1_w}} | {col2_name:>{col2_w}} | "
+            f"{'delta_gap(eV)':>{gap_w}} | {'MaxForce(eV/A)':>{force_w}} | "
+            f"{'dE(eV)':>{de_w}} | {'dt(s)':>8} | {'cum(s)':>9}"
+        )
+        fmt = (
+            "{:6d} | "
+            f"{{:{col1_w}.6f}} | {{:{col2_w}.6f}} | "
+            f"{{:{gap_w}.6f}} | {{:{force_w}.6f}} | "
+            f"{{:{de_w}.6f}} | {{:8.4f}} | {{:9.4f}}"
+        )
+        values = (
+            step, e_pot, epot_other, delta_gap,
+            max_force, dE, step_total_time, cumulative_time
+        )
+    else:
+        col_name = f"Epot_{log_name(selected_head)}(eV)" if selected_head else "Epot(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_dE_str = f"{dE:.6f}"
+        
+        col_w = max(11, len(col_name), len(val_epot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        de_w = max(11, len("dE(eV)"), len(val_dE_str))
+
+        header = (
+            f"{'Step':>6} | {col_name:>{col_w}} | {'MaxForce(eV/A)':>{force_w}} | "
+            f"{'dE(eV)':>{de_w}} | {'dt(s)':>8} | {'cum(s)':>9}"
+        )
+        fmt = (
+            "{:6d} | "
+            f"{{:{col_w}.6f}} | {{:{force_w}.6f}} | "
+            f"{{:{de_w}.6f}} | {{:8.4f}} | {{:9.4f}}"
+        )
+        values = (
+            step, e_pot, max_force, dE,
+            step_total_time, cumulative_time
+        )
+
+    _log_status_line(log_file, header, fmt, values)
 
     if trajectory_file:
         try:
@@ -360,11 +479,11 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
             print(f"Warning: Failed to write trajectory frame {step}: {e}")
 
 
-def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file):
+def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file, config=None):
     """
     Logs vibrational optimization status by reusing the geometry optimization logger.
     """
-    log_geo_opt_status(optimizer, atoms, log_file, trajectory_file)
+    log_geo_opt_status(optimizer, atoms, log_file, trajectory_file, config=config)
 
 
 # === Simulation Drivers ===
@@ -397,7 +516,7 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
     optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.04)
     # Pass optimizer itself to the logger function
     optimizer.attach(
-        lambda opt=optimizer: log_geo_opt_status(opt, atoms, log_file, trajectory_file),
+        lambda opt=optimizer: log_geo_opt_status(opt, atoms, log_file, trajectory_file, config=config),
         interval=1
     )
 
@@ -1158,7 +1277,7 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02) # Smaller maxstep for tighter opt
     # Attach logger using the vib log file
     optimizer.attach(
-        lambda opt=optimizer: log_vib_opt_status(opt, atoms, log_file_vib, trajectory_file_vib),
+        lambda opt=optimizer: log_vib_opt_status(opt, atoms, log_file_vib, trajectory_file_vib, config=config),
         interval=1
     )
 
