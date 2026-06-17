@@ -582,16 +582,16 @@ class DatasetManager:
         train_mask = np.array([True]*n_train + [False]*n_val, dtype=bool)
         val_mask = np.array([False]*n_train + [True]*n_val, dtype=bool)
 
-        forces_train_list = train_F + val_F
-        try:
-            forces_train_arr = np.stack(forces_train_list, axis=0).astype(float)
-        except Exception:
-            forces_train_arr = None
+        # forces_train_list = train_F + val_F
+        # try:
+        #     forces_train_arr = np.stack(forces_train_list, axis=0).astype(float)
+        # except Exception:
+        #     forces_train_arr = None
         print(f"Total labeled frames: {len(all_frames)} (train={n_train}, val={n_val})")
 
         return {
             "frames": all_frames, "E_true": np.array(train_E + val_E), "F_true": train_F + val_F,
-            "F_train_arr": forces_train_arr,
+            # "F_train_arr": forces_train_arr,
             "train_mask": train_mask, "val_mask": val_mask,
             "train_idx": np.where(train_mask)[0], "val_idx": np.where(val_mask)[0],
             "val_frames_ref": val_frames,

@@ -149,7 +149,16 @@ def main():
             logging.info("NequIP/Allegro model path passed to calculator.")
         else:
             best = torch.load(model_path, map_location=device, weights_only=False)
-            best = best.to(device=device, dtype=torch.float32)
+            # Determine precision dynamically (default to float32)
+            default_dtype = config.get("default_dtype") or config.get("default_precision") or "float32"
+            torch_dtype = torch.float64 if default_dtype == "float64" else torch.float32
+            
+            try:
+                best = best.to(device=device, dtype=torch_dtype)
+                logging.info(f"Successfully cast model parameters to {torch_dtype}")
+            except Exception as e:
+                logging.warning(f"Could not cast model to {torch_dtype}: {e}. Falling back to default cast.")
+                best = best.to(device=device)
 
             if hasattr(best, "postprocessors"):
                 try:
