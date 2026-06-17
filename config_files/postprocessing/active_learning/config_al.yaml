@@ -31,8 +31,8 @@ eval:
   # Data paths
   training_data: "consolidated_dataset_1000_nequip.xyz"
   eval_input_xyz: "dataset_pos_frc_ev.xyz"
-  eval_output_file: "output.xyz"
-  eval_log_file: "eval_log.txt"
+  prediction_output_file: "output.xyz"
+  metrics_log_file: "eval_log.txt"
 
   plot: False
 

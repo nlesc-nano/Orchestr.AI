@@ -54,17 +54,19 @@ def create_calculator(
         )
 
     if framework == "mace":
+        import json
+        import os
+
         cutoff = config.get("cutoff", 12.0)
         mace_head = config.get("mace_head", None)
+        scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
+        if not scale_metadata_path:
+            scale_metadata_path = "mace_scale_metadata.json"
 
         if mace_head == "triplet_reconstructed":
             from orchestr_ai.postprocessing.calculators.mace_calculator import (
                 AutoScaledReconstructedMaceCalculator,
             )
-            # Retrieve scale metadata path (check both options for consistency)
-            scale_metadata_path = config.get("scale_metadata_path") or config.get("mace_scale_metadata")
-            if not scale_metadata_path:
-                scale_metadata_path = "mace_scale_metadata.json"
 
             return AutoScaledReconstructedMaceCalculator(
                 model=model_obj,
@@ -76,12 +78,27 @@ def create_calculator(
             from orchestr_ai.postprocessing.calculators.mace_calculator import (
                 MaceCalculator,
             )
-            return MaceCalculator(
+            calc = MaceCalculator(
                 model=model_obj,
                 device=device,
                 cutoff=cutoff,
                 head=mace_head,
             )
+            if "delta" in getattr(calc, "available_heads", []) and os.path.exists(scale_metadata_path):
+                try:
+                    with open(scale_metadata_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    calc.reconstruction_k_E = float(meta["k_E"])
+                    calc.reconstruction_k_F = float(meta.get("k_F", meta["k_E"]))
+                    calc.reconstruction_base_head = meta.get("base_head", "singlet")
+                    calc.reconstruction_delta_head = meta.get("delta_head", "delta")
+                    print(
+                        "MACE: Loaded singlet+delta reconstruction metadata "
+                        f"for diagnostics from {scale_metadata_path}."
+                    )
+                except Exception as exc:
+                    print(f"MACE: Warning: failed to load reconstruction metadata: {exc}")
+            return calc
 
 
     if framework == "nequip":

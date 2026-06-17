@@ -57,6 +57,7 @@ def evaluate_model(
     E_triplet_true=None,
     frame_indices=None,
     context_label=None,
+    include_multihead=False,
 ):
     """
     Backward-compatible entry point used by evaluate.py.
@@ -87,6 +88,7 @@ def evaluate_model(
             E_singlet_true=E_singlet_true,
             E_triplet_true=E_triplet_true,
             frame_indices=frame_indices,
+            include_multihead=include_multihead,
         )
 
     except Exception as e:

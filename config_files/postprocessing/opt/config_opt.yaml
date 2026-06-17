@@ -15,8 +15,8 @@ eval:
   uncertainty: ["ensemble"]  
   training_data: "../consolidated_dataset_100.xyz"  # Replace with actual path
   eval_input_xyz: "../consolidated_dataset_150.xyz"
-  eval_output_file: "output.xyz"
-  eval_log_file: "eval_log.txt"
+  prediction_output_file: "output.xyz"
+  metrics_log_file: "eval_log.txt"
 #  unlabeled_pool_path: "md_trajectory.xyz"
   error_estimate: False 
   plot: False  
@@ -60,5 +60,4 @@ vib:
   vib_output_file: "vibrational_frequencies.txt"
   vdos_plot_file: "vdos_plot.png"
   delta: 10 
-
 

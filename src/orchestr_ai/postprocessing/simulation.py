@@ -20,7 +20,7 @@ from ase.io import read, write
 from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
 from ase.neighborlist import neighbor_list
-from ase.optimize import BFGSLineSearch
+from ase.optimize import BFGSLineSearch, FIRE, LBFGS
 from ase.vibrations import Vibrations
 
 # --- Global Timing Variables ---
@@ -77,6 +77,11 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         if isinstance(mace_head, str):
             mace_head = mace_head.strip()
 
+        # Check for user-defined dtype or default to float32
+        default_dtype = config.get("default_dtype") or config.get("default_precision") or "float32"
+
+        print(f"[MACE] Initializing calculator with precision default_dtype='{default_dtype}'")
+
         if mace_head == "triplet_reconstructed":
             from orchestr_ai.postprocessing.calculators.mace_calculator import (
                 ReconstructedMACECalculator,
@@ -89,12 +94,13 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
                 model=model,
                 device=device,
                 scale_metadata_path=scale_metadata_path,
+                default_dtype=default_dtype,
             )
 
         kwargs = {
             "models": [model],
             "device": str(device),
-            "default_dtype": "float32",
+            "default_dtype": default_dtype,
         }
 
         if mace_head:
@@ -306,7 +312,7 @@ def _log_status_line(log_file, header, values_format, values):
     except IOError as e:
         print(f"Warning: Failed write to log {log_file}: {e}")
 
-def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
+def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file, config=None):
     """
     Logs geometry optimization status to a log file.
 
@@ -315,6 +321,7 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
       atoms (ase.Atoms): The atomic structure.
       log_file (str): Path to the log file.
       trajectory_file (str): File name for the geometry optimization trajectory.
+      config (dict, optional): Configuration parameters.
     """
     global last_call_time, cumulative_time
     now = time.time()
@@ -323,34 +330,153 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
     cumulative_time += step_total_time
 
     step = optimizer.get_number_of_steps()
-    e_pot = atoms.get_potential_energy()
+    
+    if step == 0:
+        log_geo_opt_status.last_epot = None
+        
+    e_pot_raw = atoms.get_potential_energy()
+    e_pot = _get_logged_potential_energy(atoms, fallback=e_pot_raw)
     forces = atoms.get_forces(apply_constraint=False) # Get forces after energy
     max_force = np.sqrt((forces**2).sum(axis=1).max()) if len(forces) > 0 else 0.0
 
-    # Access results safely from the calculator
-    calc_results = {}
-    if hasattr(atoms, 'calc') and atoms.calc is not None and hasattr(atoms.calc, 'results'):
-         calc_results = atoms.calc.results
+    last_epot = getattr(log_geo_opt_status, "last_epot", None)
+    dE = e_pot - last_epot if last_epot is not None else 0.0
+    log_geo_opt_status.last_epot = e_pot
 
-    E_ml_only = calc_results.get("E_ml_avg", np.nan) # Use E_ml_avg which is ML energy
-    E_coul = calc_results.get("coul_fn_energy", np.nan) # Use coul_fn_energy
-    ml_time = calc_results.get("ml_time", 0.0)
-    coul_fn_time = calc_results.get("coul_fn_time", 0.0)
+    # Helper to rename long head name
+    def log_name(h):
+        if h == "triplet_reconstructed":
+            return "trip_delta"
+        return h
 
-    header = (
-        f"{'Step':>5s} | {'Epot(eV)':>14s} | {'E_ML_only(eV)':>14s} | {'E_Coul(eV)':>12s} | "
-        f"{'MLtime(s)':>10s} | {'CoulFn(s)':>10s} | {'StepTime(s)':>12s} | "
-        f"{'CumTime(s)':>12s} | {'MaxForce(eV/A)':>14s}"
-    )
-    values_format = (
-        "{:5d} | {:14.6f} | {:14.6f} | {:12.6f} | {:10.4f} | "
-        "{:10.4f} | {:12.4f} | {:12.4f} | {:14.6f}"
-    )
-    values = (
-        step, e_pot, E_ml_only, E_coul, ml_time, coul_fn_time,
-        step_total_time, cumulative_time, max_force
-    )
-    _log_status_line(log_file, header, values_format, values)
+    # Detect multi-head MACE run
+    is_mace = False
+    if config is not None:
+        framework = config.get("model_framework", "").lower()
+        if framework == "mace":
+            is_mace = True
+
+    has_multihead = False
+    selected_head = None
+    other_head = None
+    available_heads = []
+
+    if is_mace and atoms.calc is not None:
+        if hasattr(atoms.calc, "models") and len(atoms.calc.models) > 0:
+            available_heads = getattr(atoms.calc.models[0], "heads", [])
+        if not available_heads and hasattr(atoms.calc, "available_heads"):
+            available_heads = atoms.calc.available_heads
+        
+        if available_heads:
+            available_heads = [h.strip() for h in available_heads if isinstance(h, str)]
+
+        mace_head = config.get("mace_head", None)
+        if isinstance(mace_head, str):
+            mace_head = mace_head.strip()
+
+        is_reconstructed = (mace_head == "triplet_reconstructed")
+        is_multi_model = ("singlet" in available_heads and ("triplet" in available_heads or "delta" in available_heads))
+        
+        if is_reconstructed or is_multi_model:
+            has_multihead = True
+            selected_head = mace_head if mace_head else "singlet"
+
+            if selected_head == "singlet":
+                other_head = "triplet" if "triplet" in available_heads else "delta"
+            elif selected_head == "triplet":
+                other_head = "singlet"
+            elif selected_head == "delta":
+                other_head = "singlet"
+            elif selected_head == "triplet_reconstructed":
+                other_head = "singlet"
+            else:
+                other_head = "singlet" if "singlet" in available_heads else None
+
+            if other_head == "delta":
+                k_E = _load_scale_metadata(config)
+                if k_E is not None:
+                    other_head = "triplet_reconstructed"
+
+    epot_other = np.nan
+    delta_gap = np.nan
+    if has_multihead and other_head:
+        epot_other = _get_other_head_energy(atoms, other_head, config)
+        
+        e_singlet_val = np.nan
+        e_triplet_val = np.nan
+        
+        # Check active/selected head
+        if selected_head == "singlet":
+            e_singlet_val = e_pot
+        elif selected_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = e_pot
+            
+        # Check other head
+        if other_head == "singlet":
+            e_singlet_val = epot_other
+        elif other_head in ("triplet", "triplet_reconstructed"):
+            e_triplet_val = epot_other
+            
+        if not np.isnan(e_singlet_val) and not np.isnan(e_triplet_val):
+            delta_gap = e_singlet_val - e_triplet_val
+
+    if has_multihead and other_head:
+        col1_name = f"Epot_{log_name(selected_head)}(eV)"
+        col2_name = f"Epot_{log_name(other_head)}(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_dE_str = f"{dE:.6f}"
+        val_epot_other_str = f"{epot_other:.6f}"
+        val_delta_gap_str = f"{delta_gap:.6f}"
+        
+        col1_w = max(11, len(col1_name), len(val_epot_str))
+        col2_w = max(11, len(col2_name), len(val_epot_other_str))
+        gap_w = max(13, len("delta_gap(eV)"), len(val_delta_gap_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        de_w = max(11, len("dE(eV)"), len(val_dE_str))
+
+        header = (
+            f"{'Step':>6} | {col1_name:>{col1_w}} | {col2_name:>{col2_w}} | "
+            f"{'delta_gap(eV)':>{gap_w}} | {'MaxForce(eV/A)':>{force_w}} | "
+            f"{'dE(eV)':>{de_w}} | {'dt(s)':>8} | {'cum(s)':>9}"
+        )
+        fmt = (
+            "{:6d} | "
+            f"{{:{col1_w}.6f}} | {{:{col2_w}.6f}} | "
+            f"{{:{gap_w}.6f}} | {{:{force_w}.6f}} | "
+            f"{{:{de_w}.6f}} | {{:8.4f}} | {{:9.4f}}"
+        )
+        values = (
+            step, e_pot, epot_other, delta_gap,
+            max_force, dE, step_total_time, cumulative_time
+        )
+    else:
+        col_name = f"Epot_{log_name(selected_head)}(eV)" if selected_head else "Epot(eV)"
+        
+        val_epot_str = f"{e_pot:.6f}"
+        val_maxforce_str = f"{max_force:.6f}"
+        val_dE_str = f"{dE:.6f}"
+        
+        col_w = max(11, len(col_name), len(val_epot_str))
+        force_w = max(14, len("MaxForce(eV/A)"), len(val_maxforce_str))
+        de_w = max(11, len("dE(eV)"), len(val_dE_str))
+
+        header = (
+            f"{'Step':>6} | {col_name:>{col_w}} | {'MaxForce(eV/A)':>{force_w}} | "
+            f"{'dE(eV)':>{de_w}} | {'dt(s)':>8} | {'cum(s)':>9}"
+        )
+        fmt = (
+            "{:6d} | "
+            f"{{:{col_w}.6f}} | {{:{force_w}.6f}} | "
+            f"{{:{de_w}.6f}} | {{:8.4f}} | {{:9.4f}}"
+        )
+        values = (
+            step, e_pot, max_force, dE,
+            step_total_time, cumulative_time
+        )
+
+    _log_status_line(log_file, header, fmt, values)
 
     if trajectory_file:
         try:
@@ -360,11 +486,11 @@ def log_geo_opt_status(optimizer, atoms, log_file, trajectory_file):
             print(f"Warning: Failed to write trajectory frame {step}: {e}")
 
 
-def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file):
+def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file, config=None):
     """
     Logs vibrational optimization status by reusing the geometry optimization logger.
     """
-    log_geo_opt_status(optimizer, atoms, log_file, trajectory_file)
+    log_geo_opt_status(optimizer, atoms, log_file, trajectory_file, config=config)
 
 
 # === Simulation Drivers ===
@@ -394,10 +520,20 @@ def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
 
     print(f"Running Geometry Optimization (fmax={geo_opt_fmax}, steps={geo_opt_steps})...")
     # Use atoms directly, no need for Optimizable wrapper unless constraints change
-    optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.04)
+    opt_type = str(geo_config.get("optimizer", "bfgs")).lower().strip()
+    if opt_type == "lbfgs":
+        print("Using LBFGS optimizer (forces-only).")
+        optimizer = LBFGS(atoms, logfile=None, maxstep=0.04)
+    elif opt_type == "fire":
+        print("Using FIRE optimizer (forces-only).")
+        optimizer = FIRE(atoms, logfile=None, maxstep=0.04)
+    else:
+        print("Using BFGSLineSearch optimizer (energy + forces).")
+        optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.04)
+
     # Pass optimizer itself to the logger function
     optimizer.attach(
-        lambda opt=optimizer: log_geo_opt_status(opt, atoms, log_file, trajectory_file),
+        lambda opt=optimizer: log_geo_opt_status(opt, atoms, log_file, trajectory_file, config=config),
         interval=1
     )
 
@@ -488,6 +624,36 @@ def _load_scale_metadata(config):
             print(f"Warning: Failed to load scale metadata from {scale_metadata_path}: {e}")
     return None
 
+
+def _sum_result_energy(results, *, per_atom_key="energies", scalar_key="energy"):
+    """Return a float64 log energy from calculator results when possible."""
+    if not isinstance(results, dict):
+        return np.nan
+
+    per_atom = results.get(per_atom_key)
+    if per_atom is not None:
+        arr = np.asarray(per_atom, dtype=np.float64)
+        if arr.size and np.all(np.isfinite(arr)):
+            return float(arr.sum(dtype=np.float64))
+
+    scalar = results.get(scalar_key)
+    if scalar is None:
+        return np.nan
+    try:
+        return float(np.asarray(scalar, dtype=np.float64).reshape(-1)[0])
+    except Exception:
+        return np.nan
+
+
+def _get_logged_potential_energy(atoms, fallback=None):
+    """Prefer per-atom MACE energies to avoid float32 total-energy quantization in logs."""
+    if atoms.calc is not None and hasattr(atoms.calc, "results"):
+        energy = _sum_result_energy(atoms.calc.results)
+        if np.isfinite(energy):
+            return energy
+    return float(fallback) if fallback is not None else np.nan
+
+
 def _get_other_head_energy(atoms, other_head, config):
     """
     Safely calculates or retrieves potential energy for other_head.
@@ -498,6 +664,18 @@ def _get_other_head_energy(atoms, other_head, config):
 
     # If it is ReconstructedMACECalculator, we might already have the cached energies:
     calc_results = getattr(atoms.calc, "results", {})
+    if other_head == "singlet" and "energies_singlet" in calc_results:
+        return _sum_result_energy(
+            calc_results,
+            per_atom_key="energies_singlet",
+            scalar_key="energy_singlet",
+        )
+    if other_head == "triplet_reconstructed" and "energies_triplet_reconstructed" in calc_results:
+        return _sum_result_energy(
+            calc_results,
+            per_atom_key="energies_triplet_reconstructed",
+            scalar_key="energy_triplet_reconstructed",
+        )
     if other_head == "singlet" and "energy_singlet" in calc_results:
         return calc_results["energy_singlet"]
     if other_head == "triplet_reconstructed" and "energy_triplet_reconstructed" in calc_results:
@@ -520,12 +698,12 @@ def _get_other_head_energy(atoms, other_head, config):
 
         atoms.calc.head = target_head
         atoms.calc.calculate(atoms, properties=["energy"], system_changes=all_changes)
-        calculated_energy = atoms.calc.results.get("energy", np.nan)
+        calculated_energy = _sum_result_energy(atoms.calc.results)
 
         if reconstruct_triplet and target_head == "delta":
             k_E = _load_scale_metadata(config)
-            if k_E is not None and old_results.get("energy") is not None:
-                E_singlet = old_results["energy"]
+            E_singlet = _sum_result_energy(old_results)
+            if k_E is not None and np.isfinite(E_singlet):
                 E_delta = calculated_energy
                 calculated_energy = E_singlet - (E_delta / k_E)
             else:
@@ -599,7 +777,8 @@ def print_md_status(
 
     step = step_offset + dyn.get_number_of_steps()
     md_time = step * dt_fs
-    e_pot = atoms.get_potential_energy()
+    e_pot_raw = atoms.get_potential_energy()
+    e_pot = _get_logged_potential_energy(atoms, fallback=e_pot_raw)
     e_kin = atoms.get_kinetic_energy()
     e_tot = e_pot + e_kin
     temp_inst = e_kin / (1.5 * units.kB * len(atoms)) if len(atoms) else 0.0
@@ -1148,6 +1327,11 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     vib_output_file = vib_config.get("vib_output_file", "vibrational_frequencies.txt")
     vdos_plot_file = vib_config.get("vdos_plot_file", "vdos_plot.png")
     delta = vib_config.get("delta", 0.01)
+    vib_cache_name = vib_config.get("cache_name", "vib")
+    normal_modes_file = vib_config.get(
+        "normal_modes_file",
+        vib_output_file.replace(".txt", "_normal_modes.npz"),
+    )
 
     print("Setting up calculator for Vibrational Analysis...")
     # Correct instantiation
@@ -1155,10 +1339,22 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     atoms.calc = calc
 
     print(f"Running tight Geometry Optimization for Vibrations (fmax={vib_opt_fmax}, steps={vib_opt_steps})...")
-    optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02) # Smaller maxstep for tighter opt
+    
+    geo_config = config.get("geo_opt", {})
+    opt_type = str(vib_config.get("optimizer", geo_config.get("optimizer", "bfgs"))).lower().strip()
+    if opt_type == "lbfgs":
+        print("Using LBFGS optimizer (forces-only) for pre-vibrational optimization.")
+        optimizer = LBFGS(atoms, logfile=None, maxstep=0.02)
+    elif opt_type == "fire":
+        print("Using FIRE optimizer (forces-only) for pre-vibrational optimization.")
+        optimizer = FIRE(atoms, logfile=None, maxstep=0.02)
+    else:
+        print("Using BFGSLineSearch optimizer (energy + forces) for pre-vibrational optimization.")
+        optimizer = BFGSLineSearch(atoms, logfile=None, maxstep=0.02)
+
     # Attach logger using the vib log file
     optimizer.attach(
-        lambda opt=optimizer: log_vib_opt_status(opt, atoms, log_file_vib, trajectory_file_vib),
+        lambda opt=optimizer: log_vib_opt_status(opt, atoms, log_file_vib, trajectory_file_vib, config=config),
         interval=1
     )
 
@@ -1173,9 +1369,9 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
 
     print("Tight Geometry Optimization Finished.")
 
-    print(f"Calculating Vibrations (delta={delta} Ang)...")
+    print(f"Calculating Vibrations (delta={delta} Ang, cache='{vib_cache_name}')...")
     try:
-        vib = Vibrations(atoms, delta=delta)
+        vib = Vibrations(atoms, delta=delta, name=vib_cache_name)
         vib.run()
         print("Vibrations calculation finished.")
     except Exception as e:
@@ -1185,25 +1381,24 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         return None
 
     # === Process Vibrational Modes ===
-    # Standard ASE conversion factor for Vibrations frequencies (which are in meV)
-    meV_to_cm1 = units.invcm # Should be ~8.06554
-    frequencies_meV = vib.get_frequencies()
+    # ASE Vibrations.get_frequencies() already returns cm^-1.
+    ase_frequencies_cm = vib.get_frequencies()
     frequencies_cm = []
     imag_modes_count = 0
 
-    for f_meV in frequencies_meV:
-        if isinstance(f_meV, complex):
+    for freq in ase_frequencies_cm:
+        if isinstance(freq, complex):
             # Check imaginary part magnitude - threshold might need adjustment
-            if abs(f_meV.imag) > 1e-4:
+            if abs(freq.imag) > 1e-4:
                 # Mark imaginary modes with negative sign
-                frequencies_cm.append(-abs(f_meV.imag * meV_to_cm1))
+                frequencies_cm.append(-abs(freq.imag))
                 imag_modes_count += 1
             else:
                 # Treat as real if imaginary part is negligible
-                frequencies_cm.append(f_meV.real * meV_to_cm1)
+                frequencies_cm.append(freq.real)
         else:
             # Handle real frequencies directly
-            frequencies_cm.append(f_meV * meV_to_cm1)
+            frequencies_cm.append(freq)
 
     frequencies_cm = np.array(frequencies_cm)
     print(f"Found {imag_modes_count} imaginary modes (marked negative).")
@@ -1218,6 +1413,62 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         print(f"Vibrational frequencies saved to {vib_output_file}")
     except IOError as e:
         print(f"Warning: Failed to write frequencies file: {e}")
+
+    # === Save Normal Modes ===
+    try:
+        vib_data = vib.get_vibrations()
+        modes = np.asarray(vib_data.get_modes(all_atoms=True), dtype=np.float64)
+        mode_norm2_by_atom = np.sum(modes**2, axis=2)
+        energies_eV = np.asarray(vib_data.get_energies(), dtype=np.complex128)
+        raw_frequencies_cm = np.asarray(ase_frequencies_cm, dtype=np.complex128)
+        field_names = np.asarray([
+            "frequencies_cm",
+            "raw_frequencies_cm",
+            "energies_eV",
+            "modes_cartesian",
+            "mode_norm2_by_atom",
+            "symbols",
+            "masses",
+            "positions",
+            "atomic_numbers",
+            "vib_indices",
+            "delta_angstrom",
+        ])
+        field_descriptions = np.asarray([
+            "Signed frequencies in cm^-1; imaginary modes are stored as negative real values.",
+            "Raw ASE frequencies in cm^-1, preserving complex values for imaginary modes.",
+            "Raw ASE vibrational energies in eV, preserving complex values.",
+            "Cartesian normal modes with shape (n_modes, n_atoms, 3).",
+            "Per-mode per-atom squared displacement weights with shape (n_modes, n_atoms).",
+            "Chemical symbols for all atoms in the optimized structure.",
+            "Atomic masses in amu for all atoms in the optimized structure.",
+            "Optimized Cartesian positions in Angstrom.",
+            "Atomic numbers for all atoms in the optimized structure.",
+            "Atom indices included in the ASE finite-difference Hessian.",
+            "Finite-difference displacement used by ASE Vibrations, in Angstrom.",
+        ])
+
+        np.savez_compressed(
+            normal_modes_file,
+            schema=np.asarray("orchestr_ai.vibrational_modes.v1"),
+            field_names=field_names,
+            field_descriptions=field_descriptions,
+            frequencies_cm=frequencies_cm.astype(np.float64),
+            raw_frequencies_cm=raw_frequencies_cm,
+            energies_eV=energies_eV,
+            modes_cartesian=modes,
+            mode_norm2_by_atom=mode_norm2_by_atom,
+            symbols=np.asarray(atoms.get_chemical_symbols()),
+            masses=np.asarray(atoms.get_masses(), dtype=np.float64),
+            positions=np.asarray(atoms.get_positions(), dtype=np.float64),
+            atomic_numbers=np.asarray(atoms.get_atomic_numbers(), dtype=np.int64),
+            vib_indices=np.asarray(vib.indices, dtype=np.int64),
+            delta_angstrom=float(delta),
+        )
+        print(f"Normal modes saved to {normal_modes_file}")
+    except Exception as e:
+        print(f"Warning: Failed to write normal modes file: {e}")
+        traceback.print_exc()
 
     # === Save Molden File (Use ASE's built-in method if possible) ===
     molden_file = vib_output_file.replace(".txt", ".molden")
