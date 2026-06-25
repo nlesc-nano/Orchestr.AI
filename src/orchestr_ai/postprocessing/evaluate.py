@@ -2437,7 +2437,7 @@ class EvaluationPipeline:
                 rdf_thresholds = {(str(r[0]), str(r[1])): (float(r[2]), float(r[3])) for r in data["thresholds"]}
         else:
             print("[Pool-AL] Computing RDF thresholds from validation frames...")
-            rdf_thresholds = compute_rdf_thresholds_from_reference(self.ds["val_frames_ref"], stride=self.eval_cfg.get("rdf_stride", 5))
+            rdf_thresholds = compute_rdf_thresholds_from_reference(self.ds["val_frames_ref"], stride=self.eval_cfg.get("rdf_stride", 5), r_min_physical=self.eval_cfg.get("rdf_r_min_physical", 1.0))
             np.savez_compressed(rdf_cache, rdf_thresholds=rdf_thresholds)
 
         debug_plot_rdfs(self.ds["val_frames_ref"], rdf_thresholds)
