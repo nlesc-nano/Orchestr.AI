@@ -97,6 +97,30 @@ def _append_tunneling_log(path, row, *, print_to_screen=False):
         print(line)
 
 
+def _append_golden_rule_log(path, row, *, print_to_screen=False):
+    header = (
+        "Step | Time(fs) | StateBefore | StateAfter | Gap(eV) | "
+        "vdotd(1/fs) | Phase(rad) | AmpAbs2 | Pinc | Pused | Random | Accepted | Event"
+    )
+    line = (
+        f"{row['step']:6d} | {row['time_fs']:10.4f} | "
+        f"{row['state_before']:11d} | {row['state_after']:10d} | "
+        f"{row['gap']:9.6f} | {row['vdotd']:12.6e} | "
+        f"{row['phase']:11.6f} | {row['amp_abs2']:9.6e} | "
+        f"{row['prob_increment']:9.6e} | {row['prob_used']:9.6e} | "
+        f"{row['random']:8.6f} | {str(row['accepted']):>8s} | {row['event']}"
+    )
+    if path:
+        fresh = not Path(path).exists() or Path(path).stat().st_size == 0
+        with open(path, "a") as handle:
+            if fresh:
+                handle.write(header + "\n")
+            handle.write(line + "\n")
+    if print_to_screen or not path:
+        print(header)
+        print(line)
+
+
 def _lzs_gap_minimum_probability(gap_min, dgap_dt, tunneling_cfg):
     min_rate = float(tunneling_cfg.get("min_gap_rate_eV_per_fs", 1.0e-10))
     scale = float(tunneling_cfg.get("probability_scale", 1.0))
@@ -310,6 +334,24 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
     last_tunneling_attempt_time = -np.inf
     gap_history = []
 
+    gr_cfg = namd.get("golden_rule_leakage", {})
+    gr_enabled = bool(gr_cfg.get("enabled", False))
+    gr_source_state = int(gr_cfg.get("source_state", 1))
+    gr_target_state = int(gr_cfg.get("target_state", 0))
+    gr_probability_scale = float(gr_cfg.get("probability_scale", 1.0))
+    gr_max_probability = float(gr_cfg.get("max_probability_per_step", 0.01))
+    gr_rescale = bool(gr_cfg.get("rescale_momentum", True))
+    gr_collapse = bool(gr_cfg.get("collapse_on_accept", True))
+    gr_stop_after_accept = bool(gr_cfg.get("stop_after_accept", False))
+    gr_reset_on_reject = bool(gr_cfg.get("reset_amplitude_on_reject", False))
+    gr_reset_on_accept = bool(gr_cfg.get("reset_amplitude_on_accept", True))
+    gr_log_interval = int(gr_cfg.get("log_interval", log_interval) or 0)
+    gr_log_file = gr_cfg.get("log_file", "namd_golden_rule_leakage.log")
+    gr_print_log = bool(gr_cfg.get("print_log", False))
+    gr_phase = 0.0
+    gr_amplitude = 0.0 + 0.0j
+    gr_probability_reference = 0.0
+
     if tunneling_enabled and tunneling_model != "lzs_gap_minimum":
         raise ValueError(
             f"Unsupported NAMD tunneling model '{tunneling_model}'. "
@@ -351,6 +393,13 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
             f"S{tunneling_source_state}->S{tunneling_target_state}, "
             f"min_attempt_interval={tunneling_min_interval} fs, "
             f"log='{tunneling_log_file}'."
+        )
+    if gr_enabled:
+        print(
+            "NAMD golden-rule leakage correction enabled: "
+            f"S{gr_source_state}->S{gr_target_state}, "
+            f"max_probability_per_step={gr_max_probability}, "
+            f"log='{gr_log_file}'."
         )
 
     for local_step in range(nsteps + 1):
@@ -434,6 +483,80 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
             _, _, vdotd = fssh.propagate_electrons(surface, velocities, nac, dt_fs)
             hop_prob, target = fssh.hop_probability(dt_fs, vdotd)
 
+        if (
+            gr_enabled
+            and hop_info["event"] == "none"
+            and fssh.active_state == gr_source_state
+        ):
+            state_before = fssh.active_state
+            state_after = fssh.active_state
+            accepted = False
+            event = "gr_rejected_random"
+            gap = float(surface.gap)
+            gr_phase += gap * dt_fs / HBAR_EV_FS
+            gr_amplitude += -float(vdotd) * np.exp(1j * gr_phase) * dt_fs
+            amp_abs2 = float(abs(gr_amplitude) ** 2)
+            prob_increment = max(0.0, amp_abs2 - gr_probability_reference)
+            gr_probability_reference = max(gr_probability_reference, amp_abs2)
+            prob_used = min(gr_max_probability, max(0.0, gr_probability_scale * prob_increment))
+            gr_random = fssh.draw()
+
+            if gr_random <= prob_used:
+                if gr_rescale:
+                    rescale_ok, rescale_event = _attempt_velocity_rescale(
+                        atoms,
+                        surface,
+                        fssh.active_state,
+                        gr_target_state,
+                        nac,
+                    )
+                else:
+                    rescale_ok, rescale_event = True, "accepted_no_rescale"
+
+                if rescale_ok:
+                    fssh.active_state = gr_target_state
+                    if gr_collapse:
+                        fssh._collapse_to_state(gr_target_state)
+                    forces = _active_forces(surface, fssh.active_state)
+                    velocities = atoms.get_velocities()
+                    vdotd = float(np.sum(np.asarray(velocities, dtype=np.float64) * nac))
+                    state_after = fssh.active_state
+                    accepted = True
+                    event = "gr_accepted"
+                    hop_info["event"] = event
+                    if gr_reset_on_accept:
+                        gr_phase = 0.0
+                        gr_amplitude = 0.0 + 0.0j
+                        gr_probability_reference = 0.0
+                else:
+                    event = f"gr_{rescale_event}"
+
+            if not accepted and gr_reset_on_reject:
+                gr_phase = 0.0
+                gr_amplitude = 0.0 + 0.0j
+                gr_probability_reference = 0.0
+
+            if gr_log_interval > 0 and local_step % gr_log_interval == 0:
+                _append_golden_rule_log(
+                    gr_log_file,
+                    {
+                        "step": step,
+                        "time_fs": time_fs,
+                        "state_before": state_before,
+                        "state_after": state_after,
+                        "gap": gap,
+                        "vdotd": float(vdotd),
+                        "phase": float(gr_phase),
+                        "amp_abs2": amp_abs2,
+                        "prob_increment": prob_increment,
+                        "prob_used": prob_used,
+                        "random": gr_random,
+                        "accepted": accepted,
+                        "event": event,
+                    },
+                    print_to_screen=gr_print_log,
+                )
+
         if hop_info["event"] == "none" and hop_prob > 0.0:
             random_value = fssh.draw()
             if random_value < hop_prob:
@@ -490,6 +613,10 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
             print(f"NAMD LZS tunneling accepted near step {step}: now on S{fssh.active_state}.")
             if tunneling_stop_after_accept or stop_after_first_hop:
                 break
+        if hop_info["event"] == "gr_accepted" and fssh.active_state == collapse_to_state:
+            print(f"NAMD golden-rule leakage accepted at step {step}: now on S{fssh.active_state}.")
+            if gr_stop_after_accept or stop_after_first_hop:
+                break
 
         if local_step == nsteps:
             break
@@ -512,6 +639,11 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
         )
         if len(gap_history) > 3:
             gap_history = gap_history[-3:]
+
+        if gr_enabled and fssh.active_state != gr_source_state:
+            gr_phase = 0.0
+            gr_amplitude = 0.0 + 0.0j
+            gr_probability_reference = 0.0
 
         if remove_drift_interval > 0 and local_step > 0 and local_step % remove_drift_interval == 0:
             if remove_translation:
