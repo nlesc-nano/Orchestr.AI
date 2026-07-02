@@ -21,6 +21,7 @@ from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
 from ase.neighborlist import neighbor_list
 from ase.optimize import BFGSLineSearch, FIRE, LBFGS
+from ase.parallel import world
 from ase.vibrations import Vibrations
 
 from orchestr_ai.postprocessing.wigner import generate_wigner_initial_conditions
@@ -493,6 +494,59 @@ def log_vib_opt_status(optimizer, atoms, log_file, trajectory_file, config=None)
     Logs vibrational optimization status by reusing the geometry optimization logger.
     """
     log_geo_opt_status(optimizer, atoms, log_file, trajectory_file, config=config)
+
+
+def _run_vibrations_with_progress(vib, progress_interval=10):
+    """Run ASE Vibrations with visible progress for long finite-difference jobs."""
+    if not vib.cache.writable:
+        raise RuntimeError(
+            "Cannot run calculation. Cache must be removed or split in order "
+            "to have only one sort of data structure at a time."
+        )
+
+    vib._check_old_pickles()
+    displacements = list(vib.displacements())
+    total = len(displacements)
+    progress_interval = max(1, int(progress_interval or 1))
+    calculated = 0
+    skipped = 0
+    start = time.time()
+
+    print(
+        "Vibrational finite-difference force calculations: "
+        f"{total} displacements ({len(vib.indices)} atoms, cache='{vib.name}').",
+        flush=True,
+    )
+
+    for current, (disp, disp_atoms) in enumerate(vib.iterdisplace(inplace=True), start=1):
+        with vib.cache.lock(disp.name) as handle:
+            if handle is None:
+                skipped += 1
+                if current == 1 or current == total or current % progress_interval == 0:
+                    print(
+                        f"  [{current}/{total}] {disp.name}: cached, skipping "
+                        f"(calculated={calculated}, cached={skipped})",
+                        flush=True,
+                    )
+                continue
+
+            print(f"  [{current}/{total}] {disp.name}: calculating forces...", flush=True)
+            step_start = time.time()
+            result = vib.calculate(disp_atoms, disp)
+            if world.rank == 0:
+                handle.save(result)
+            calculated += 1
+            print(
+                f"  [{current}/{total}] {disp.name}: done in {time.time() - step_start:.2f} s "
+                f"(calculated={calculated}, cached={skipped})",
+                flush=True,
+            )
+
+    print(
+        "Vibrational finite-difference calculations finished: "
+        f"calculated={calculated}, cached={skipped}, elapsed={time.time() - start:.2f} s.",
+        flush=True,
+    )
 
 
 # === Simulation Drivers ===
@@ -1392,6 +1446,7 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     vdos_plot_file = vib_config.get("vdos_plot_file", "vdos_plot.png")
     delta = vib_config.get("delta", 0.01)
     vib_cache_name = vib_config.get("cache_name", "vib")
+    vib_progress_interval = vib_config.get("progress_interval", 10)
     normal_modes_file = vib_config.get(
         "normal_modes_file",
         vib_output_file.replace(".txt", "_normal_modes.npz"),
@@ -1436,7 +1491,7 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     print(f"Calculating Vibrations (delta={delta} Ang, cache='{vib_cache_name}')...")
     try:
         vib = Vibrations(atoms, delta=delta, name=vib_cache_name)
-        vib.run()
+        _run_vibrations_with_progress(vib, progress_interval=vib_progress_interval)
         print("Vibrations calculation finished.")
     except Exception as e:
         print(f"Error during vibrations calculation: {e}")

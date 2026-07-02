@@ -137,9 +137,13 @@ def generate_wigner_initial_conditions(atoms, vib_data, config):
     skip_imaginary = bool(wigner_config.get("skip_imaginary_modes", True))
     remove_translation = bool(wigner_config.get("remove_translation", False))
     remove_rotation = bool(wigner_config.get("remove_rotation", False))
+    progress_interval = int(wigner_config.get("progress_interval", max(1, n_initial_conditions // 10)))
+    progress_interval = max(1, progress_interval)
     rng = np.random.default_rng(wigner_config.get("random_seed", None))
 
+    print("Preparing Wigner sampler: diagonalizing ASE mass-weighted Hessian...", flush=True)
     _, frequencies_cm, cart_modes, _ = _mass_weighted_modes_from_ase(vib_data)
+    print(f"Wigner sampler: diagonalized {len(frequencies_cm)} harmonic modes.", flush=True)
     mode_indices, skipped_imaginary, skipped_low = _mode_selection(
         frequencies_cm,
         cutoff_cm,
@@ -160,6 +164,7 @@ def generate_wigner_initial_conditions(atoms, vib_data, config):
     written_files = []
     combined_frames = []
 
+    print("Generating Wigner initial conditions...", flush=True)
     for i in range(n_initial_conditions):
         q, qdot_fs = _sample_mode_amplitudes(frequencies_cm, mode_indices, temperature_K, rng)
         displacement = np.einsum("m,mij->ij", q, cart_modes)
@@ -194,7 +199,15 @@ def generate_wigner_initial_conditions(atoms, vib_data, config):
         if write_combined:
             combined_frames.append(frame)
 
+        current = i + 1
+        if current == 1 or current == n_initial_conditions or current % progress_interval == 0:
+            print(
+                f"  Wigner IC [{current}/{n_initial_conditions}] written: {output_file}",
+                flush=True,
+            )
+
     if write_combined and combined_path is not None:
+        print(f"Writing combined Wigner trajectory: {combined_path}", flush=True)
         write(combined_path, combined_frames, format="extxyz")
         print(f"Combined Wigner initial conditions saved to {combined_path}")
 
