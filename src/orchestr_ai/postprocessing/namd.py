@@ -74,6 +74,47 @@ def _append_namd_log(path, row, *, print_to_screen=False):
         print(line)
 
 
+def _append_tunneling_log(path, row, *, print_to_screen=False):
+    header = (
+        "Step | Time(fs) | StateBefore | StateAfter | GapMin(eV) | "
+        "dGapDt(eV/fs) | Praw | Pused | Random | Accepted | Event"
+    )
+    line = (
+        f"{row['step']:6d} | {row['time_fs']:10.4f} | "
+        f"{row['state_before']:11d} | {row['state_after']:10d} | "
+        f"{row['gap_min']:10.6f} | {row['dgap_dt']:14.6e} | "
+        f"{row['prob_raw']:9.6e} | {row['prob_used']:9.6e} | "
+        f"{row['random']:8.6f} | {str(row['accepted']):>8s} | {row['event']}"
+    )
+    if path:
+        fresh = not Path(path).exists() or Path(path).stat().st_size == 0
+        with open(path, "a") as handle:
+            if fresh:
+                handle.write(header + "\n")
+            handle.write(line + "\n")
+    if print_to_screen or not path:
+        print(header)
+        print(line)
+
+
+def _lzs_gap_minimum_probability(gap_min, dgap_dt, tunneling_cfg):
+    min_rate = float(tunneling_cfg.get("min_gap_rate_eV_per_fs", 1.0e-10))
+    scale = float(tunneling_cfg.get("probability_scale", 1.0))
+    max_probability = float(tunneling_cfg.get("max_probability", 1.0))
+    rate = max(abs(float(dgap_dt)), min_rate)
+    exponent = -np.pi * float(gap_min) ** 2 / (2.0 * HBAR_EV_FS * rate)
+    prob_raw = float(np.exp(np.clip(exponent, -745.0, 0.0)))
+    prob_used = min(max_probability, max(0.0, scale * prob_raw))
+    return prob_raw, prob_used
+
+
+def _is_gap_local_minimum(gap_history):
+    if len(gap_history) < 3:
+        return False
+    before, middle, after = gap_history[-3:]
+    return middle["gap"] < before["gap"] and middle["gap"] <= after["gap"]
+
+
 class BeckAhnNACApproximator:
     """Gap-gradient NAC approximation using only state force derivatives."""
 
@@ -255,6 +296,25 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
     restart_file = namd.get("restart_file", traj_file)
     initial_velocity_mode = namd.get("initial_velocities", "auto")
     print_log = bool(namd.get("print_log", False))
+    tunneling_cfg = namd.get("tunneling", {})
+    tunneling_enabled = bool(tunneling_cfg.get("enabled", False))
+    tunneling_model = str(tunneling_cfg.get("model", "lzs_gap_minimum")).strip().lower()
+    tunneling_source_state = int(tunneling_cfg.get("source_state", 1))
+    tunneling_target_state = int(tunneling_cfg.get("target_state", 0))
+    tunneling_min_interval = float(tunneling_cfg.get("min_attempt_interval_fs", 0.0))
+    tunneling_rescale = bool(tunneling_cfg.get("rescale_momentum", True))
+    tunneling_collapse = bool(tunneling_cfg.get("collapse_on_accept", True))
+    tunneling_stop_after_accept = bool(tunneling_cfg.get("stop_after_accept", False))
+    tunneling_log_file = tunneling_cfg.get("log_file", "namd_tunneling.log")
+    tunneling_print_log = bool(tunneling_cfg.get("print_log", False))
+    last_tunneling_attempt_time = -np.inf
+    gap_history = []
+
+    if tunneling_enabled and tunneling_model != "lzs_gap_minimum":
+        raise ValueError(
+            f"Unsupported NAMD tunneling model '{tunneling_model}'. "
+            "Supported model: 'lzs_gap_minimum'."
+        )
 
     step_offset = 0
     if restart:
@@ -276,19 +336,105 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
 
     surface = evaluator.evaluate(atoms)
     forces = _active_forces(surface, fssh.active_state)
+    gap_history.append(
+        {
+            "step": step_offset,
+            "time_fs": step_offset * dt_fs,
+            "gap": float(surface.gap),
+        }
+    )
     start = time.time()
     print(f"Running NAMD/FSSH: {nsteps} steps, dt={dt_fs} fs, initial_state={fssh.active_state}")
+    if tunneling_enabled:
+        print(
+            "NAMD LZS gap-minimum tunneling correction enabled: "
+            f"S{tunneling_source_state}->S{tunneling_target_state}, "
+            f"min_attempt_interval={tunneling_min_interval} fs, "
+            f"log='{tunneling_log_file}'."
+        )
 
     for local_step in range(nsteps + 1):
         step = step_offset + local_step
         time_fs = step * dt_fs
         nac = nac_model.compute(surface)
         velocities = atoms.get_velocities()
-        _, _, vdotd = fssh.propagate_electrons(surface, velocities, nac, dt_fs)
-        hop_prob, target = fssh.hop_probability(dt_fs, vdotd)
+        vdotd = float(np.sum(np.asarray(velocities, dtype=np.float64) * nac))
+        hop_prob = 0.0
+        target = 1 - fssh.active_state
         random_value = np.nan
         hop_info = {"event": "none"}
-        if hop_prob > 0.0:
+
+        if tunneling_enabled and _is_gap_local_minimum(gap_history):
+            before, middle, after = gap_history[-3:]
+            if (
+                fssh.active_state == tunneling_source_state
+                and time_fs - last_tunneling_attempt_time >= tunneling_min_interval
+            ):
+                dgap_dt = abs(after["gap"] - before["gap"]) / max(
+                    after["time_fs"] - before["time_fs"],
+                    1.0e-12,
+                )
+                prob_raw, prob_used = _lzs_gap_minimum_probability(
+                    middle["gap"],
+                    dgap_dt,
+                    tunneling_cfg,
+                )
+                tunnel_random = fssh.draw()
+                state_before = fssh.active_state
+                state_after = fssh.active_state
+                accepted = False
+                event = "lzs_rejected_random"
+                last_tunneling_attempt_time = time_fs
+
+                if tunnel_random <= prob_used:
+                    if tunneling_rescale:
+                        rescale_ok, rescale_event = _attempt_velocity_rescale(
+                            atoms,
+                            surface,
+                            fssh.active_state,
+                            tunneling_target_state,
+                            nac,
+                        )
+                    else:
+                        rescale_ok, rescale_event = True, "accepted_no_rescale"
+
+                    if rescale_ok:
+                        fssh.active_state = tunneling_target_state
+                        if tunneling_collapse:
+                            fssh._collapse_to_state(tunneling_target_state)
+                        forces = _active_forces(surface, fssh.active_state)
+                        velocities = atoms.get_velocities()
+                        vdotd = float(np.sum(np.asarray(velocities, dtype=np.float64) * nac))
+                        state_after = fssh.active_state
+                        accepted = True
+                        event = "lzs_accepted"
+                        hop_info["event"] = event
+                    else:
+                        event = f"lzs_{rescale_event}"
+
+                _append_tunneling_log(
+                    tunneling_log_file,
+                    {
+                        "step": int(middle["step"]),
+                        "time_fs": float(middle["time_fs"]),
+                        "state_before": state_before,
+                        "state_after": state_after,
+                        "gap_min": float(middle["gap"]),
+                        "dgap_dt": float(dgap_dt),
+                        "prob_raw": prob_raw,
+                        "prob_used": prob_used,
+                        "random": tunnel_random,
+                        "accepted": accepted,
+                        "event": event,
+                    },
+                    print_to_screen=tunneling_print_log,
+                )
+
+        if hop_info["event"] == "none":
+            _, _, vdotd = fssh.propagate_electrons(surface, velocities, nac, dt_fs)
+            hop_prob, target = fssh.hop_probability(dt_fs, vdotd)
+
+        if hop_info["event"] == "none" and hop_prob > 0.0:
             random_value = fssh.draw()
             if random_value < hop_prob:
                 accepted, event = _attempt_velocity_rescale(
@@ -340,6 +486,10 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
             print(f"NAMD hop/collapse accepted at step {step}: now on S{fssh.active_state}.")
             if stop_after_first_hop:
                 break
+        if hop_info["event"] == "lzs_accepted" and fssh.active_state == collapse_to_state:
+            print(f"NAMD LZS tunneling accepted near step {step}: now on S{fssh.active_state}.")
+            if tunneling_stop_after_accept or stop_after_first_hop:
+                break
 
         if local_step == nsteps:
             break
@@ -353,6 +503,15 @@ def run_namd(atoms, model_obj, device, config, neighbor_list=None):
         surface = evaluator.evaluate(atoms)
         forces = _active_forces(surface, fssh.active_state)
         atoms.set_momenta(atoms.get_momenta() + 0.5 * dt * forces)
+        gap_history.append(
+            {
+                "step": step + 1,
+                "time_fs": time_fs + dt_fs,
+                "gap": float(surface.gap),
+            }
+        )
+        if len(gap_history) > 3:
+            gap_history = gap_history[-3:]
 
         if remove_drift_interval > 0 and local_step > 0 and local_step % remove_drift_interval == 0:
             if remove_translation:
