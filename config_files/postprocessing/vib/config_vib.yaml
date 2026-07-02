@@ -63,6 +63,9 @@ vib:
   delta: 0.01
   cache_name: "vib"
   progress_interval: 10
+  batch_displacements: false
+  displacement_batch_size: 16
+  batch_clear_cuda_cache: false
   wigner:
     enabled: false
     n_initial_conditions: 100

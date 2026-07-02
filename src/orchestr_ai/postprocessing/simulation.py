@@ -8,10 +8,12 @@ It also provides utilities for status logging during simulations.
 
 import os
 import time
+import gc
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import traceback # Make sure traceback is imported
+from contextlib import ExitStack
 from types import MethodType
 
 from pathlib import Path
@@ -24,6 +26,7 @@ from ase.optimize import BFGSLineSearch, FIRE, LBFGS
 from ase.parallel import world
 from ase.vibrations import Vibrations
 
+from orchestr_ai.postprocessing.calculators.factory import create_calculator
 from orchestr_ai.postprocessing.wigner import generate_wigner_initial_conditions
 
 # --- Global Timing Variables ---
@@ -548,6 +551,118 @@ def _run_vibrations_with_progress(vib, progress_interval=10):
         flush=True,
     )
 
+
+def _run_vibrations_batched(
+    vib,
+    model_obj,
+    device,
+    config,
+    neighbor_list=None,
+    batch_size=16,
+    progress_interval=1,
+    clear_cuda_cache=False,
+):
+    """Run ASE vibration displacements through the repo's batched inference path."""
+    if not vib.cache.writable:
+        raise RuntimeError(
+            "Cannot run calculation. Cache must be removed or split in order "
+            "to have only one sort of data structure at a time."
+        )
+
+    vib._check_old_pickles()
+    displacements = list(vib.displacements())
+    total = len(displacements)
+    batch_size = max(1, int(batch_size or 1))
+    progress_interval = max(1, int(progress_interval or 1))
+    calculated = 0
+    skipped = 0
+    batch_count = 0
+    start = time.time()
+
+    framework = config.get("model_framework", "schnetpack").lower()
+    batch_calc = create_calculator(
+        framework=framework,
+        model_obj=model_obj,
+        device=device,
+        config=config,
+        neighbor_list=neighbor_list,
+    )
+
+    print(
+        "Batched vibrational finite-difference force calculations: "
+        f"{total} displacements ({len(vib.indices)} atoms, cache='{vib.name}', "
+        f"batch_size={batch_size}).",
+        flush=True,
+    )
+
+    def run_locked_batch(batch_items):
+        nonlocal calculated, batch_count
+        if not batch_items:
+            return
+
+        batch_count += 1
+        batch_frames = [item[1] for item in batch_items]
+        batch_names = [item[0].name for item in batch_items]
+        n_atoms_list = [len(frame) for frame in batch_frames]
+        batch_start = time.time()
+
+        print(
+            f"  [batch {batch_count}] calculating {len(batch_frames)} displacements: "
+            f"{batch_names[0]} ... {batch_names[-1]}",
+            flush=True,
+        )
+
+        inputs = batch_calc.prepare_batch(batch_frames)
+        _, forces_list, _, _ = batch_calc.forward(inputs, n_atoms_list)
+
+        for (disp, _, handle), forces in zip(batch_items, forces_list):
+            if world.rank == 0:
+                handle.save({"forces": np.asarray(forces, dtype=np.float64)})
+
+        calculated += len(batch_items)
+        print(
+            f"  [batch {batch_count}] done in {time.time() - batch_start:.2f} s "
+            f"(calculated={calculated}, cached={skipped})",
+            flush=True,
+        )
+
+        if clear_cuda_cache and torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    stack = ExitStack()
+    try:
+        batch_items = []
+        for current, (disp, disp_atoms) in enumerate(vib.iterdisplace(inplace=True), start=1):
+            lock_cm = vib.cache.lock(disp.name)
+            handle = stack.enter_context(lock_cm)
+            if handle is None:
+                skipped += 1
+                if current == 1 or current == total or current % progress_interval == 0:
+                    print(
+                        f"  [{current}/{total}] {disp.name}: cached, skipping "
+                        f"(calculated={calculated}, cached={skipped})",
+                        flush=True,
+                    )
+                continue
+
+            batch_items.append((disp, disp_atoms.copy(), handle))
+            if len(batch_items) >= batch_size:
+                run_locked_batch(batch_items)
+                batch_items = []
+                stack.close()
+                stack = ExitStack()
+
+        run_locked_batch(batch_items)
+    finally:
+        stack.close()
+
+    print(
+        "Batched vibrational finite-difference calculations finished: "
+        f"calculated={calculated}, cached={skipped}, batches={batch_count}, "
+        f"elapsed={time.time() - start:.2f} s.",
+        flush=True,
+    )
 
 # === Simulation Drivers ===
 
@@ -1447,6 +1562,9 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     delta = vib_config.get("delta", 0.01)
     vib_cache_name = vib_config.get("cache_name", "vib")
     vib_progress_interval = vib_config.get("progress_interval", 10)
+    batch_displacements = bool(vib_config.get("batch_displacements", False))
+    displacement_batch_size = int(vib_config.get("displacement_batch_size", 16))
+    batch_clear_cuda_cache = bool(vib_config.get("batch_clear_cuda_cache", False))
     normal_modes_file = vib_config.get(
         "normal_modes_file",
         vib_output_file.replace(".txt", "_normal_modes.npz"),
@@ -1491,7 +1609,19 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     print(f"Calculating Vibrations (delta={delta} Ang, cache='{vib_cache_name}')...")
     try:
         vib = Vibrations(atoms, delta=delta, name=vib_cache_name)
-        _run_vibrations_with_progress(vib, progress_interval=vib_progress_interval)
+        if batch_displacements:
+            _run_vibrations_batched(
+                vib,
+                model_obj,
+                device,
+                config,
+                neighbor_list=neighbor_list,
+                batch_size=displacement_batch_size,
+                progress_interval=vib_progress_interval,
+                clear_cuda_cache=batch_clear_cuda_cache,
+            )
+        else:
+            _run_vibrations_with_progress(vib, progress_interval=vib_progress_interval)
         print("Vibrations calculation finished.")
     except Exception as e:
         print(f"Error during vibrations calculation: {e}")
