@@ -755,6 +755,41 @@ def _load_md_restart_frame(restart_file, reference_atoms=None):
     step_offset = int(atoms.info.get("step", 0) or 0)
     return atoms, step_offset
 
+
+def _set_md_initial_velocities_from_atoms(atoms, mode="auto"):
+    """Restore velocities already present on the ASE Atoms object."""
+    mode = str(mode or "auto").strip().lower()
+    if mode in {"temperature", "maxwell", "maxwell_boltzmann"}:
+        return False
+    if mode not in {"auto", "file", "extxyz"}:
+        raise ValueError(
+            f"Unsupported md.initial_velocities '{mode}'. "
+            "Use 'auto', 'file', or 'temperature'."
+        )
+
+    velocities = atoms.arrays.get("velocities")
+    if velocities is None:
+        velocities = atoms.get_velocities()
+
+    if velocities is None:
+        if mode in {"file", "extxyz"}:
+            raise ValueError(
+                "md.initial_velocities is set to 'file', but the input structure "
+                "does not contain velocities."
+            )
+        return False
+
+    velocities = np.asarray(velocities, dtype=float)
+    if velocities.shape != (len(atoms), 3):
+        raise ValueError(
+            "Input velocities must have shape "
+            f"({len(atoms)}, 3), got {velocities.shape}."
+        )
+
+    atoms.set_velocities(velocities)
+    return True
+
+
 def print_md_status(
     dyn,
     atoms,
@@ -1090,25 +1125,52 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
 
     atoms.calc = calc
 
+    # -----------------------------------------------------------------
+    #  choose ensemble and integrator/thermostat
+    # -----------------------------------------------------------------
+    ensemble = str(md.get("ensemble", "NVT")).strip().upper()
+    thermostat = md.get("thermostat", "langevin").lower()
+    if "thermostat" not in md and "use_langevin" in md:
+        thermostat = "langevin" if md.get("use_langevin") else "verlet"
+    if ensemble == "NVE":
+        thermostat = "verlet"
+    elif ensemble != "NVT":
+        raise ValueError(f"Unsupported MD ensemble '{ensemble}'. Supported ensembles are NVE and NVT.")
+
     heating_steps = md.get("heating_steps", 0)
     T_start = md.get("heating_T_start", 10.0)
+    initial_velocity_mode = md.get("initial_velocities", "auto")
+    loaded_initial_velocities = False
 
     if restart:
         print("MD restart: using velocities from restart frame; skipping velocity initialization and heating ramp.")
         heating_steps = 0
+        loaded_initial_velocities = True
+    else:
+        loaded_initial_velocities = _set_md_initial_velocities_from_atoms(
+            atoms,
+            mode=initial_velocity_mode,
+        )
+
+    if loaded_initial_velocities:
+        if not restart:
+            print("Using velocities from input structure; temperature_K will not reinitialize velocities.")
+        if heating_steps > 0 and ensemble == "NVE":
+            print("NVE ensemble selected: disabling heating ramp because no thermostat is active.")
+            heating_steps = 0
+    elif heating_steps > 0 and ensemble == "NVE":
+        print(
+            "NVE ensemble selected: initializing velocities at target temperature "
+            f"{T0} K and disabling heating ramp."
+        )
+        heating_steps = 0
+        MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
     elif heating_steps > 0:
         print(f"Heating initialized: starting at {T_start} K, ramping to {T0} K over {heating_steps} steps.")
         MaxwellBoltzmannDistribution(atoms, temperature_K=T_start)
     else:
         print(f"No heating ramp: starting at target temperature {T0} K.")
         MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
-
-    # -----------------------------------------------------------------
-    #  choose integrator (thermostat)
-    # -----------------------------------------------------------------
-    thermostat = md.get("thermostat", "langevin").lower()
-    if "thermostat" not in md and "use_langevin" in md:
-        thermostat = "langevin" if md.get("use_langevin") else "verlet"
 
     if thermostat in {"bussi", "csvr"}:
         from ase.md.bussi import Bussi
@@ -1137,7 +1199,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         dyn = VelocityVerlet(atoms, timestep = dt_fs * units.fs)
         dyn.temperature_K = np.nan
         gamma_fs = 0.0
-        thermostat_desc = "VelocityVerlet"
+        thermostat_desc = "NVE VelocityVerlet" if ensemble == "NVE" else "VelocityVerlet"
 
     # -----------------------------------------------------------------
     #  temperature heating ramp callback
@@ -1276,7 +1338,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
             dyn.attach(async_write_xyz_frame, interval=xyz_int)
 
         try:
-            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · ensemble = {ensemble} · thermostat = {thermostat_desc}")
             dyn.run(nsteps)
         finally:
             # Signal the background writer thread to flush and stop
@@ -1297,7 +1359,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
             )
 
         # No files to write or log, run standard
-        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · ensemble = {ensemble} · thermostat = {thermostat_desc}")
         dyn.run(nsteps)
 
     print("MD finished.")

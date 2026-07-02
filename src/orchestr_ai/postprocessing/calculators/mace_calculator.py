@@ -377,6 +377,9 @@ class ReconstructedMACECalculator(MACECalculator):
         self.results["forces"] = F_triplet  
         self.results["energy_singlet"] = E_singlet
         self.results["energy_triplet_reconstructed"] = E_triplet
+        self.results["forces_singlet"] = np.asarray(F_singlet, dtype=np.float64)
+        self.results["forces_delta_scaled"] = np.asarray(F_delta_scaled, dtype=np.float64)
+        self.results["forces_triplet_reconstructed"] = np.asarray(F_triplet, dtype=np.float64)
         if energies_singlet is not None:
             self.results["energies_singlet"] = np.asarray(
                 energies_singlet,
