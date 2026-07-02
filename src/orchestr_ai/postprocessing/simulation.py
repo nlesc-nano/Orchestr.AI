@@ -23,6 +23,8 @@ from ase.neighborlist import neighbor_list
 from ase.optimize import BFGSLineSearch, FIRE, LBFGS
 from ase.vibrations import Vibrations
 
+from orchestr_ai.postprocessing.wigner import generate_wigner_initial_conditions
+
 # --- Global Timing Variables ---
 last_call_time = None
 cumulative_time = 0.0
@@ -1476,6 +1478,8 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     except IOError as e:
         print(f"Warning: Failed to write frequencies file: {e}")
 
+    vib_data = None
+
     # === Save Normal Modes ===
     try:
         vib_data = vib.get_vibrations()
@@ -1531,6 +1535,16 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     except Exception as e:
         print(f"Warning: Failed to write normal modes file: {e}")
         traceback.print_exc()
+
+    if vib_config.get("wigner", {}).get("enabled", False):
+        if vib_data is None:
+            print("Warning: Wigner sampling requested, but vibrational mode data is unavailable. Skipping.")
+        else:
+            try:
+                generate_wigner_initial_conditions(atoms, vib_data, config)
+            except Exception as e:
+                print(f"Warning: Failed to generate Wigner initial conditions: {e}")
+                traceback.print_exc()
 
     # === Save Molden File (Use ASE's built-in method if possible) ===
     molden_file = vib_output_file.replace(".txt", ".molden")

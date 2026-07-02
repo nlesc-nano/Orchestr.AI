@@ -62,3 +62,16 @@ vib:
   normal_modes_file: "vibrational_normal_modes.npz"
   delta: 0.01
   cache_name: "vib"
+  wigner:
+    enabled: false
+    n_initial_conditions: 100
+    temperature_K: 300.0
+    output_dir: "wigner_ic"
+    output_prefix: "ic"
+    random_seed: 12345
+    frequency_cutoff_cm: 20.0
+    skip_imaginary_modes: true
+    remove_translation: false
+    remove_rotation: false
+    write_combined_trajectory: true
+    combined_file: "wigner_initial_conditions.xyz"
