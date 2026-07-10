@@ -49,6 +49,13 @@ class VarianceScalingCalibrator:
     # pylint: disable=invalid-name
     @staticmethod
     def _closed_form_s(delta, sigma):
+        delta = np.asarray(delta, dtype=float).ravel()
+        sigma = np.asarray(sigma, dtype=float).ravel()
+        # Exclude frames with no variance (s_arr blows up scaling factor)
+        mask = sigma > 0
+        if mask.sum() < 2:
+            return 1.0
+        delta, sigma = delta[mask], sigma[mask]
         s_arr = (delta ** 2) / (_safe_sigma(sigma) ** 2)
         # remove extreme top 1% before mean
         s_arr = s_arr[np.isfinite(s_arr)]
