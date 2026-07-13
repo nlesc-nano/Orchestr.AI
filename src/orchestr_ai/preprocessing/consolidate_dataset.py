@@ -172,13 +172,16 @@ def export_subset_bundle(
     except Exception as e:
         logger.warning(f"[UMAP-{method_name}] Skipped due to error: {e}")
 
-    plot_tsne(
-        feats,
-        title=f"t-SNE Coverage ({method_label}): selected {nsel} from {n_total} inliers",
-        filename=f"{prefix}_set{set_id}_{tgt}_coverage_tsne{tag}.png",
-        selected_idx=sel_idxs,
-        random_state=random_state,
-    )
+    try:
+        plot_tsne(
+            feats,
+            title=f"t-SNE Coverage ({method_label}): selected {nsel} from {n_total} inliers",
+            filename=f"{prefix}_set{set_id}_{tgt}_coverage_tsne{tag}.png",
+            selected_idx=sel_idxs,
+            random_state=random_state,
+        )
+    except Exception as e:
+        logger.warning(f"[t-SNE-{method_name}] Skipped due to error: {e}")
 
     # 3) Save XYZ
     xyz_fn = f"{prefix}_set{set_id}_{tgt}{tag}.xyz"
