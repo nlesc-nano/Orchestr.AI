@@ -39,3 +39,60 @@ def _std_from_sums(sum_values, sum_sq_values, n_samples):
     mean_values = sum_values / n_samples
     var = (sum_sq_values - n_samples * mean_values**2) / (n_samples - 1)
     return np.sqrt(np.maximum(var, 0.0))
+
+
+def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=None, n_atoms_per_frame=None):
+    """Write per-atom force uncertainties to an XYZ-like file.
+
+    Parameters
+    ----------
+    sigma_F : ndarray
+        Flat array of per-atom force uncertainty components (n_total_atoms * 3).
+    sigma_E : ndarray
+        Per-frame energy uncertainty (n_frames,).
+    frames : list of ase.Atoms
+        Pool frames with atom symbols and positions.
+    output_path : str
+        Path for the output XYZ file.
+    n_atoms_per_frame : ndarray or None
+        Atom counts per frame. Computed from frames if None.
+    """
+    if sigma_F is None:
+        print("[PerAtomUQ] sigma_F is None; cannot write per-atom uncertainties.")
+        return
+
+    sigma_F_frames = _split_atom_vectors(sigma_F, frames)
+
+    if n_atoms_per_frame is None:
+        n_atoms_per_frame = np.array([len(fr) for fr in frames], dtype=int)
+
+    sigma_E_per_frame = np.asarray(sigma_E, dtype=float)
+
+    with open(output_path, "w") as fh:
+        for i, (frame, sF_frame) in enumerate(zip(frames, sigma_F_frames)):
+            n_atoms = len(frame)
+            symbols = frame.get_chemical_symbols()
+            positions = frame.get_positions()
+
+            # Per-atom force uncertainty magnitude (L2 norm)
+            sF_norm = np.linalg.norm(sF_frame, axis=1)
+
+            # Header line with energy uncertainty
+            if mu_E is not None and i < len(mu_E):
+                energy_val = float(mu_E[i])
+            else:
+                energy_val = float(getattr(frame, "info", {}).get("energy", 0.0) or 0.0)
+            sigma_e = float(sigma_E_per_frame[i]) if i < len(sigma_E_per_frame) else 0.0
+            fh.write(f"{n_atoms}\n")
+            fh.write(f"frame={i} energy={energy_val:.6f} sigma_E={sigma_e:.6f}\n")
+
+            for j in range(n_atoms):
+                fh.write(f"{symbols[j]:<2} "
+                         f"{positions[j, 0]:12.6f} {positions[j, 1]:12.6f} {positions[j, 2]:12.6f} "
+                         f"{sF_frame[j, 0]:12.6f} {sF_frame[j, 1]:12.6f} {sF_frame[j, 2]:12.6f} "
+                         f"{sF_norm[j]:12.6f}\n")
+
+    n_frames = len(frames)
+    n_atoms_total = int(sum(n_atoms_per_frame))
+    print(f"[PerAtomUQ] Wrote {n_frames} frames, {n_atoms_total} atoms to {output_path}")
+

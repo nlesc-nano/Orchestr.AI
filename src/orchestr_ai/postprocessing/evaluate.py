@@ -21,7 +21,8 @@ from ase.io import read, write
 from orchestr_ai.postprocessing.metrics import (
     _split_atom_vectors,
     _force_summary_from_flat,
-    _std_from_sums
+    _std_from_sums,
+    write_per_atom_uncertainties,
 )
 from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
 from orchestr_ai.postprocessing.calculator import evaluate_model
@@ -2617,6 +2618,11 @@ class EvaluationPipeline:
                 )
             expected_abs_F_mean = sigma_F_pool_mean_thin * _GAUSSIAN_SIGMA_TO_ABS
             expected_abs_F_max = sigma_F_pool_max_thin * _GAUSSIAN_SIGMA_TO_ABS
+
+        # --- Per-atom uncertainty ---
+        if sigma_F_pool is not None:
+            per_atom_xyz = self.eval_cfg.get("per_atom_uncertainty_file", "per_atom_uncertainty.xyz")
+            write_per_atom_uncertainties(sigma_F_pool, sigma_E_pool, pool_frames, per_atom_xyz, mu_E=mu_E_pool)
 
         sigma_E_pool_orig_thin = sigma_E_pool_orig[thin_idx].astype(float) if sigma_E_pool_orig is not None else None
         sigma_F_pool_orig_thin = None
