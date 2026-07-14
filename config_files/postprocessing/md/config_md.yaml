@@ -45,10 +45,13 @@ eval:
     sparse: False
 
 md:
+  ensemble: "NVT"  # Use "NVE" for microcanonical VelocityVerlet dynamics.
   timestep_fs: 1.0
   temperature_K: 300.0
+  initial_velocities: "auto"  # "auto" uses extxyz velocities if present; "temperature" resamples; "file" requires velocities.
   trajectory_file_md: "md_trajectory.xyz"
   log_file: "simulation_md.log" 
+  thermostat: "langevin"  # Used for NVT: "langevin" or "bussi"/"csvr".
   use_langevin: true
   friction_coefficient: 0.01
   steps: 1000  
