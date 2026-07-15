@@ -118,6 +118,7 @@ def main():
         run_geo_opt,
         run_vibrational_analysis,
     )
+    from orchestr_ai.postprocessing.namd import run_namd
 
     initial_xyz = config.get("initial_xyz")
     if not initial_xyz or not os.path.exists(initial_xyz):
@@ -200,6 +201,8 @@ def main():
     try:
         if run_type == "MD":
             run_md(atoms, model_obj, device, config, neighbor_list=neighbor_list)
+        elif run_type == "NAMD":
+            run_namd(atoms, model_obj, device, config, neighbor_list=neighbor_list)
         elif run_type == "GEO_OPT":
             run_geo_opt(atoms, model_obj, device, config, neighbor_list=neighbor_list)
         elif run_type == "VIB":
@@ -228,6 +231,5 @@ def main():
 if __name__ == "__main__":
     config = None
     main()
-
 
 

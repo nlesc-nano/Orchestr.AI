@@ -8,10 +8,12 @@ It also provides utilities for status logging during simulations.
 
 import os
 import time
+import gc
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import traceback # Make sure traceback is imported
+from contextlib import ExitStack
 from types import MethodType
 
 from pathlib import Path
@@ -21,9 +23,13 @@ from ase.md import VelocityVerlet, Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
 from ase.neighborlist import neighbor_list
 from ase.optimize import BFGSLineSearch, FIRE, LBFGS
+from ase.parallel import world
 from ase.vibrations import Vibrations
 from ase.calculators.calculator import Calculator, all_changes
 from ase.calculators.mixing import SumCalculator
+
+from orchestr_ai.postprocessing.calculators.factory import create_calculator
+from orchestr_ai.postprocessing.wigner import generate_wigner_initial_conditions
 
 # --- Global Timing Variables ---
 last_call_time = None
@@ -560,6 +566,171 @@ class SphericalConfinementCalculator(Calculator):
 
         self.results = {"energy": energy, "forces": forces}
 
+def _run_vibrations_with_progress(vib, progress_interval=10):
+    """Run ASE Vibrations with visible progress for long finite-difference jobs."""
+    if not vib.cache.writable:
+        raise RuntimeError(
+            "Cannot run calculation. Cache must be removed or split in order "
+            "to have only one sort of data structure at a time."
+        )
+
+    vib._check_old_pickles()
+    displacements = list(vib.displacements())
+    total = len(displacements)
+    progress_interval = max(1, int(progress_interval or 1))
+    calculated = 0
+    skipped = 0
+    start = time.time()
+
+    print(
+        "Vibrational finite-difference force calculations: "
+        f"{total} displacements ({len(vib.indices)} atoms, cache='{vib.name}').",
+        flush=True,
+    )
+
+    for current, (disp, disp_atoms) in enumerate(vib.iterdisplace(inplace=True), start=1):
+        with vib.cache.lock(disp.name) as handle:
+            if handle is None:
+                skipped += 1
+                if current == 1 or current == total or current % progress_interval == 0:
+                    print(
+                        f"  [{current}/{total}] {disp.name}: cached, skipping "
+                        f"(calculated={calculated}, cached={skipped})",
+                        flush=True,
+                    )
+                continue
+
+            print(f"  [{current}/{total}] {disp.name}: calculating forces...", flush=True)
+            step_start = time.time()
+            result = vib.calculate(disp_atoms, disp)
+            if world.rank == 0:
+                handle.save(result)
+            calculated += 1
+            print(
+                f"  [{current}/{total}] {disp.name}: done in {time.time() - step_start:.2f} s "
+                f"(calculated={calculated}, cached={skipped})",
+                flush=True,
+            )
+
+    print(
+        "Vibrational finite-difference calculations finished: "
+        f"calculated={calculated}, cached={skipped}, elapsed={time.time() - start:.2f} s.",
+        flush=True,
+    )
+
+
+def _run_vibrations_batched(
+    vib,
+    model_obj,
+    device,
+    config,
+    neighbor_list=None,
+    batch_size=16,
+    progress_interval=1,
+    clear_cuda_cache=False,
+):
+    """Run ASE vibration displacements through the repo's batched inference path."""
+    if not vib.cache.writable:
+        raise RuntimeError(
+            "Cannot run calculation. Cache must be removed or split in order "
+            "to have only one sort of data structure at a time."
+        )
+
+    vib._check_old_pickles()
+    displacements = list(vib.displacements())
+    total = len(displacements)
+    batch_size = max(1, int(batch_size or 1))
+    progress_interval = max(1, int(progress_interval or 1))
+    calculated = 0
+    skipped = 0
+    batch_count = 0
+    start = time.time()
+
+    framework = config.get("model_framework", "schnetpack").lower()
+    batch_calc = create_calculator(
+        framework=framework,
+        model_obj=model_obj,
+        device=device,
+        config=config,
+        neighbor_list=neighbor_list,
+    )
+
+    print(
+        "Batched vibrational finite-difference force calculations: "
+        f"{total} displacements ({len(vib.indices)} atoms, cache='{vib.name}', "
+        f"batch_size={batch_size}).",
+        flush=True,
+    )
+
+    def run_locked_batch(batch_items):
+        nonlocal calculated, batch_count
+        if not batch_items:
+            return
+
+        batch_count += 1
+        batch_frames = [item[1] for item in batch_items]
+        batch_names = [item[0].name for item in batch_items]
+        n_atoms_list = [len(frame) for frame in batch_frames]
+        batch_start = time.time()
+
+        print(
+            f"  [batch {batch_count}] calculating {len(batch_frames)} displacements: "
+            f"{batch_names[0]} ... {batch_names[-1]}",
+            flush=True,
+        )
+
+        inputs = batch_calc.prepare_batch(batch_frames)
+        _, forces_list, _, _ = batch_calc.forward(inputs, n_atoms_list)
+
+        for (disp, _, handle), forces in zip(batch_items, forces_list):
+            if world.rank == 0:
+                handle.save({"forces": np.asarray(forces, dtype=np.float64)})
+
+        calculated += len(batch_items)
+        print(
+            f"  [batch {batch_count}] done in {time.time() - batch_start:.2f} s "
+            f"(calculated={calculated}, cached={skipped})",
+            flush=True,
+        )
+
+        if clear_cuda_cache and torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    stack = ExitStack()
+    try:
+        batch_items = []
+        for current, (disp, disp_atoms) in enumerate(vib.iterdisplace(inplace=True), start=1):
+            lock_cm = vib.cache.lock(disp.name)
+            handle = stack.enter_context(lock_cm)
+            if handle is None:
+                skipped += 1
+                if current == 1 or current == total or current % progress_interval == 0:
+                    print(
+                        f"  [{current}/{total}] {disp.name}: cached, skipping "
+                        f"(calculated={calculated}, cached={skipped})",
+                        flush=True,
+                    )
+                continue
+
+            batch_items.append((disp, disp_atoms.copy(), handle))
+            if len(batch_items) >= batch_size:
+                run_locked_batch(batch_items)
+                batch_items = []
+                stack.close()
+                stack = ExitStack()
+
+        run_locked_batch(batch_items)
+    finally:
+        stack.close()
+
+    print(
+        "Batched vibrational finite-difference calculations finished: "
+        f"calculated={calculated}, cached={skipped}, batches={batch_count}, "
+        f"elapsed={time.time() - start:.2f} s.",
+        flush=True,
+    )
+
 # === Simulation Drivers ===
 
 def run_geo_opt(atoms, model_obj, device, config, neighbor_list=None):
@@ -821,6 +992,41 @@ def _load_md_restart_frame(restart_file, reference_atoms=None):
     atoms.set_velocities(np.asarray(velocities, dtype=float))
     step_offset = int(atoms.info.get("step", 0) or 0)
     return atoms, step_offset
+
+
+def _set_md_initial_velocities_from_atoms(atoms, mode="auto"):
+    """Restore velocities already present on the ASE Atoms object."""
+    mode = str(mode or "auto").strip().lower()
+    if mode in {"temperature", "maxwell", "maxwell_boltzmann"}:
+        return False
+    if mode not in {"auto", "file", "extxyz"}:
+        raise ValueError(
+            f"Unsupported md.initial_velocities '{mode}'. "
+            "Use 'auto', 'file', or 'temperature'."
+        )
+
+    velocities = atoms.arrays.get("velocities")
+    if velocities is None:
+        velocities = atoms.get_velocities()
+
+    if velocities is None:
+        if mode in {"file", "extxyz"}:
+            raise ValueError(
+                "md.initial_velocities is set to 'file', but the input structure "
+                "does not contain velocities."
+            )
+        return False
+
+    velocities = np.asarray(velocities, dtype=float)
+    if velocities.shape != (len(atoms), 3):
+        raise ValueError(
+            "Input velocities must have shape "
+            f"({len(atoms)}, 3), got {velocities.shape}."
+        )
+
+    atoms.set_velocities(velocities)
+    return True
+
 
 def print_md_status(
     dyn,
@@ -1167,25 +1373,52 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         atoms.calc = calc
     
 
+    # -----------------------------------------------------------------
+    #  choose ensemble and integrator/thermostat
+    # -----------------------------------------------------------------
+    ensemble = str(md.get("ensemble", "NVT")).strip().upper()
+    thermostat = md.get("thermostat", "langevin").lower()
+    if "thermostat" not in md and "use_langevin" in md:
+        thermostat = "langevin" if md.get("use_langevin") else "verlet"
+    if ensemble == "NVE":
+        thermostat = "verlet"
+    elif ensemble != "NVT":
+        raise ValueError(f"Unsupported MD ensemble '{ensemble}'. Supported ensembles are NVE and NVT.")
+
     heating_steps = md.get("heating_steps", 0)
     T_start = md.get("heating_T_start", 10.0)
+    initial_velocity_mode = md.get("initial_velocities", "auto")
+    loaded_initial_velocities = False
 
     if restart:
         print("MD restart: using velocities from restart frame; skipping velocity initialization and heating ramp.")
         heating_steps = 0
+        loaded_initial_velocities = True
+    else:
+        loaded_initial_velocities = _set_md_initial_velocities_from_atoms(
+            atoms,
+            mode=initial_velocity_mode,
+        )
+
+    if loaded_initial_velocities:
+        if not restart:
+            print("Using velocities from input structure; temperature_K will not reinitialize velocities.")
+        if heating_steps > 0 and ensemble == "NVE":
+            print("NVE ensemble selected: disabling heating ramp because no thermostat is active.")
+            heating_steps = 0
+    elif heating_steps > 0 and ensemble == "NVE":
+        print(
+            "NVE ensemble selected: initializing velocities at target temperature "
+            f"{T0} K and disabling heating ramp."
+        )
+        heating_steps = 0
+        MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
     elif heating_steps > 0:
         print(f"Heating initialized: starting at {T_start} K, ramping to {T0} K over {heating_steps} steps.")
         MaxwellBoltzmannDistribution(atoms, temperature_K=T_start)
     else:
         print(f"No heating ramp: starting at target temperature {T0} K.")
         MaxwellBoltzmannDistribution(atoms, temperature_K=T0)
-
-    # -----------------------------------------------------------------
-    #  choose integrator (thermostat)
-    # -----------------------------------------------------------------
-    thermostat = md.get("thermostat", "langevin").lower()
-    if "thermostat" not in md and "use_langevin" in md:
-        thermostat = "langevin" if md.get("use_langevin") else "verlet"
 
     if thermostat in {"bussi", "csvr"}:
         from ase.md.bussi import Bussi
@@ -1214,7 +1447,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
         dyn = VelocityVerlet(atoms, timestep = dt_fs * units.fs)
         dyn.temperature_K = np.nan
         gamma_fs = 0.0
-        thermostat_desc = "VelocityVerlet"
+        thermostat_desc = "NVE VelocityVerlet" if ensemble == "NVE" else "VelocityVerlet"
 
     # -----------------------------------------------------------------
     #  temperature heating ramp callback
@@ -1353,7 +1586,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
             dyn.attach(async_write_xyz_frame, interval=xyz_int)
 
         try:
-            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+            print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · ensemble = {ensemble} · thermostat = {thermostat_desc}")
             dyn.run(nsteps)
         finally:
             # Signal the background writer thread to flush and stop
@@ -1374,7 +1607,7 @@ def run_md(atoms, model_obj, device, config, neighbor_list=None):
             )
 
         # No files to write or log, run standard
-        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · thermostat = {thermostat_desc}")
+        print(f"Running MD: {nsteps} steps · Δt = {dt_fs} fs · ensemble = {ensemble} · thermostat = {thermostat_desc}")
         dyn.run(nsteps)
 
     print("MD finished.")
@@ -1405,6 +1638,10 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     vdos_plot_file = vib_config.get("vdos_plot_file", "vdos_plot.png")
     delta = vib_config.get("delta", 0.01)
     vib_cache_name = vib_config.get("cache_name", "vib")
+    vib_progress_interval = vib_config.get("progress_interval", 10)
+    batch_displacements = bool(vib_config.get("batch_displacements", False))
+    displacement_batch_size = int(vib_config.get("displacement_batch_size", 16))
+    batch_clear_cuda_cache = bool(vib_config.get("batch_clear_cuda_cache", False))
     normal_modes_file = vib_config.get(
         "normal_modes_file",
         vib_output_file.replace(".txt", "_normal_modes.npz"),
@@ -1449,7 +1686,19 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     print(f"Calculating Vibrations (delta={delta} Ang, cache='{vib_cache_name}')...")
     try:
         vib = Vibrations(atoms, delta=delta, name=vib_cache_name)
-        vib.run()
+        if batch_displacements:
+            _run_vibrations_batched(
+                vib,
+                model_obj,
+                device,
+                config,
+                neighbor_list=neighbor_list,
+                batch_size=displacement_batch_size,
+                progress_interval=vib_progress_interval,
+                clear_cuda_cache=batch_clear_cuda_cache,
+            )
+        else:
+            _run_vibrations_with_progress(vib, progress_interval=vib_progress_interval)
         print("Vibrations calculation finished.")
     except Exception as e:
         print(f"Error during vibrations calculation: {e}")
@@ -1490,6 +1739,8 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
         print(f"Vibrational frequencies saved to {vib_output_file}")
     except IOError as e:
         print(f"Warning: Failed to write frequencies file: {e}")
+
+    vib_data = None
 
     # === Save Normal Modes ===
     try:
@@ -1546,6 +1797,16 @@ def run_vibrational_analysis(atoms, model_obj, device, config, neighbor_list=Non
     except Exception as e:
         print(f"Warning: Failed to write normal modes file: {e}")
         traceback.print_exc()
+
+    if vib_config.get("wigner", {}).get("enabled", False):
+        if vib_data is None:
+            print("Warning: Wigner sampling requested, but vibrational mode data is unavailable. Skipping.")
+        else:
+            try:
+                generate_wigner_initial_conditions(atoms, vib_data, config)
+            except Exception as e:
+                print(f"Warning: Failed to generate Wigner initial conditions: {e}")
+                traceback.print_exc()
 
     # === Save Molden File (Use ASE's built-in method if possible) ===
     molden_file = vib_output_file.replace(".txt", ".molden")
