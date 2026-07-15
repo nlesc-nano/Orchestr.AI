@@ -48,7 +48,9 @@ from orchestr_ai.postprocessing.active_learning import (
     validate_consecutive_reference_deltas,
     write_pool_al_diagnostics_csv,
 )
-from orchestr_ai.postprocessing.plots.al_diagnostics import generate_al_diagnostic_plots
+from orchestr_ai.postprocessing.plots.al_diagnostics import (
+    generate_al_diagnostic_plots, generate_per_atom_uncertainty_plots
+    )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
     fast_filter_by_rdf_kdtree,
@@ -1845,6 +1847,17 @@ class EvaluationPipeline:
         stats_ens = MLFFStats(true_E, mu_E_frame, true_F, mf_list, self.ds["train_mask"], self.ds["val_mask"])
         sigma_comp = sigma_F_flat.flatten()
         sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+        # Build per-component element symbols for per-element calibration
+        cal_factor = str(self.eval_cfg.get("calibration_factor", "global")).lower()
+        force_symbols = None
+        if cal_factor == "element":
+            symbols_per_frame = [fr.get_chemical_symbols() for fr in self.ds["frames"]]
+            force_symbols = np.concatenate([np.repeat(s, 3) for s in symbols_per_frame])
+            # Apply train_mask
+            train_frames_mask = np.repeat(self.ds["train_mask"], [len(fr) for fr in self.ds["frames"]])
+            comp_mask = np.repeat(train_frames_mask, 3)
+            force_symbols = force_symbols[comp_mask]
+
         metrics_cal = calculate_uq_metrics(
             stats_ens,
             sigma_comp,
@@ -1855,6 +1868,8 @@ class EvaluationPipeline:
             self.eval_log,
             energy_per_atom=True,
             save_plot_data=False,
+            calibration_factor=cal_factor,
+            force_symbols=force_symbols,
         )
         uq_calibrators = metrics_cal.get("calibrators", {})
         self._print_active_learning_calibration_summary(metrics_cal)
@@ -1917,6 +1932,17 @@ class EvaluationPipeline:
         sigma_comp = sigma_F_flat.flatten()
         sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
 
+        # Build per-component element symbols for per-element calibration
+        cal_factor = str(self.eval_cfg.get("calibration_factor", "global")).lower()
+        force_symbols = None
+        if cal_factor == "element":
+            symbols_per_frame = [fr.get_chemical_symbols() for fr in self.ds["frames"]]
+            force_symbols = np.concatenate([np.repeat(s, 3) for s in symbols_per_frame])
+            # Apply train_mask
+            train_frames_mask = np.repeat(self.ds["train_mask"], [len(fr) for fr in self.ds["frames"]])
+            comp_mask = np.repeat(train_frames_mask, 3)
+            force_symbols = force_symbols[comp_mask]
+
         metrics_cal = calculate_uq_metrics(
             stats_ens,
             sigma_comp,
@@ -1927,6 +1953,8 @@ class EvaluationPipeline:
             self.eval_log,
             energy_per_atom=True,
             save_plot_data=False,
+            calibration_factor=cal_factor,
+            force_symbols=force_symbols,
         )
         uq_calibrators = metrics_cal.get("calibrators", {})
         self._print_active_learning_calibration_summary(metrics_cal)
@@ -2585,18 +2613,25 @@ class EvaluationPipeline:
 
         if force_mode:
             print(f"[Pool-AL] Applying eval-accepted '{force_mode}' force calibration.")
+            train_symbols = [fr.get_chemical_symbols() for fr in self.ds["frames"]]
+            train_frame_mask = self.ds["train_mask"]
+            train_symbols_filtered = [s for s, m in zip(train_symbols, train_frame_mask) if m]
             sigma_force_train = calibrate_sigma_force_frames(
-                sigma_force_train, uq_calibrators, force_mode
+                sigma_force_train, uq_calibrators, force_mode, symbols=train_symbols_filtered
             )
             if pool_has_full_sigma:
                 sigma_F_pool_shape = np.asarray(sigma_F_pool).shape
                 sigma_F_pool_flat = np.asarray(sigma_F_pool, dtype=float).reshape(-1)
+                # Build per-component symbols for pool frames
+                pool_symbols_flat = np.concatenate([
+                    np.repeat(fr.get_chemical_symbols(), 3) for fr in pool_frames
+                ])
                 sigma_F_pool_var = apply_sigma_comp_calibration(
-                    sigma_F_pool_flat, uq_calibrators, "var"
+                    sigma_F_pool_flat, uq_calibrators, "var", symbols=pool_symbols_flat
                 )
                 if force_mode == "iso":
                     sigma_F_pool_iso = apply_sigma_comp_calibration(
-                        sigma_F_pool_flat, uq_calibrators, "iso"
+                        sigma_F_pool_flat, uq_calibrators, "iso", symbols=pool_symbols_flat
                     )
                     pool_counts = np.array([len(fr) for fr in pool_frames], dtype=int)
                     frame_ids = np.repeat(np.arange(len(pool_frames)), pool_counts * 3)
@@ -2990,6 +3025,11 @@ class EvaluationPipeline:
                     drop_first=_parse_bool_like(self.eval_cfg.get("al_plot_drop_first"), True),
                     dpi=int(self.eval_cfg.get("al_plot_dpi", 300)),
                 )
+
+                # --- Per-atom uncertainty plots ---
+                per_atom_file = self.eval_cfg.get("per_atom_uncertainty_file", "per_atom_uncertainty.xyz")
+                if per_atom_file and os.path.exists(per_atom_file):
+                    generate_per_atom_uncertainty_plots(per_atom_file, out_dir=al_plot_dir, diag_csv_path=al_csv_path)
 
         # Output
         sel_global_idx = thin_idx[sel_rel_thin]

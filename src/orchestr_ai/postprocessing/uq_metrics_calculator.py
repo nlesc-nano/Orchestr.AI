@@ -121,6 +121,40 @@ class IsotonicCalibrator:
         return self.transform(sigma)
 
 
+class PerElementCalibrator:
+    """Per-element calibration: wraps a dict of {element: calibrator}.
+
+    When ``calibration_factor`` is set to ``element``, the fitting code
+    produces one :class:`VarianceScalingCalibrator` /
+    :class:`IsotonicCalibrator` per chemical element instead of a single
+    global calibrator.  This class provides a uniform interface so that
+    the downstream application code can call ``.get(element)``.
+
+    Parameters
+    ----------
+    calibrators : dict, optional
+        ``{element: VarianceScalingCalibrator | IsotonicCalibrator}``
+    """
+
+    def __init__(self, calibrators=None):
+        self.calibrators = calibrators or {}
+
+    def get(self, element, default=None):
+        return self.calibrators.get(element, default)
+
+    def items(self):
+        return self.calibrators.items()
+
+    def __bool__(self):
+        return bool(self.calibrators)
+
+    def __repr__(self):
+        items_str = ", ".join(
+            f"{e}={c.s:.2f}" for e, c in sorted(self.calibrators.items())
+        )
+        return f"PerElementCalibrator({items_str})"
+
+
 # ---- Metric primitives -----------------------------------------------------
 _EPS = 1e-12
 
@@ -337,6 +371,8 @@ def run_uq_metrics(
     calibrators: Optional[Dict[str, Any]] = None,
     energy_per_atom: bool = False,
     save_plot_data: bool = True,
+    calibration_factor: str = "global",
+    force_symbols: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Compute, calibrate (variance + isotonic) & log UQ metrics.
@@ -409,30 +445,107 @@ def run_uq_metrics(
     # Helper that either uses provided calibrators or fits new ones on the
     # current dataset (note: for honest evaluation, fit on TRAIN and pass
     # calibrators to EVAL)
+
+    do_per_element = (
+        str(calibration_factor).lower() == "element"
+        and force_symbols is not None
+        and len(force_symbols) == len(delta_c)
+    )
+
     # --- FORCES
-    if calibrators is None or 'cal_var_F' not in calibrators:
-        cal_var_F = VarianceScalingCalibrator().fit(delta_c, sigma_c)
-    else:
-        cal_var_F = calibrators.get('cal_var_F')
+    if not do_per_element:
+        if calibrators is None or 'cal_var_F' not in calibrators:
+            cal_var_F = VarianceScalingCalibrator().fit(delta_c, sigma_c)
+        else:
+            cal_var_F = calibrators.get('cal_var_F')
 
-    sigma_c_cal_var = cal_var_F.transform(sigma_c)
-    sigma_a_cal_var = cal_var_F.transform(sigma_a)
+        sigma_c_cal_var = cal_var_F.transform(sigma_c)
+        sigma_a_cal_var = cal_var_F.transform(sigma_a)
 
-    # isotonic: prefer to fit on the *scaled* sigma (after variance scaling)
-    if calibrators is None or 'cal_iso_F' not in calibrators:
-        try:
-            cal_iso_F = IsotonicCalibrator().fit(delta_c, sigma_c_cal_var)
-        except Exception:
-            cal_iso_F = None
-    else:
-        cal_iso_F = calibrators.get('cal_iso_F')
+        # isotonic: prefer to fit on the *scaled* sigma (after variance scaling)
+        if calibrators is None or 'cal_iso_F' not in calibrators:
+            try:
+                cal_iso_F = IsotonicCalibrator().fit(delta_c, sigma_c_cal_var)
+            except Exception:
+                cal_iso_F = None
+        else:
+            cal_iso_F = calibrators.get('cal_iso_F')
 
-    if cal_iso_F is not None:
-        sigma_c_cal_iso = cal_iso_F.transform(sigma_c_cal_var)
-        sigma_a_cal_iso = cal_iso_F.transform(sigma_a_cal_var)
+        if cal_iso_F is not None:
+            sigma_c_cal_iso = cal_iso_F.transform(sigma_c_cal_var)
+            sigma_a_cal_iso = cal_iso_F.transform(sigma_a_cal_var)
+        else:
+            sigma_c_cal_iso = sigma_c_cal_var
+            sigma_a_cal_iso = sigma_a_cal_var
     else:
-        sigma_c_cal_iso = sigma_c_cal_var
-        sigma_a_cal_iso = sigma_a_cal_var
+        # --- Per-element calibration
+        unique_elements = sorted(set(force_symbols))
+        per_elem_var = {}
+        per_elem_iso = {}
+        sigma_c_cal_var = np.empty_like(sigma_c)
+        n_total = len(delta_c)
+
+        print(f"\n[Calibration] Per-element calibration ({len(unique_elements)} elements, {n_total} components):")
+        for elem in unique_elements:
+            mask = force_symbols == elem
+            d_e, s_e = delta_c[mask], sigma_c[mask]
+            if len(d_e) < 10:
+                vsc = VarianceScalingCalibrator().fit(delta_c, sigma_c)
+            else:
+                vsc = VarianceScalingCalibrator().fit(d_e, s_e)
+            per_elem_var[elem] = vsc
+            sigma_c_cal_var[mask] = vsc.transform(s_e)
+            print(f"    {elem:>4s}: s = {vsc.s:8.4f}  (n_components = {len(d_e)})")
+
+            try:
+                ic = IsotonicCalibrator().fit(d_e, vsc.transform(s_e))
+                per_elem_iso[elem] = ic
+            except Exception:
+                per_elem_iso[elem] = None
+
+        cal_var_F = PerElementCalibrator(per_elem_var)
+        elem_counts = {e: int(np.sum(force_symbols == e)) for e in unique_elements}
+        cal_var_F._training_counts = elem_counts
+        cal_iso_F = PerElementCalibrator({e: c for e, c in per_elem_iso.items() if c is not None})
+
+        # Apply per-element variance scaling to atom-level sigma
+        atom_symbols = force_symbols[0::3]
+        sigma_a_cal_var = np.empty_like(sigma_a)
+        for elem in unique_elements:
+            a_mask = atom_symbols == elem
+            if a_mask.any():
+                sigma_a_cal_var[a_mask] = cal_var_F.get(elem).transform(sigma_a[a_mask])
+
+        print(f"\n[Calibration] Per-element error/sigma ratios:")
+        print(f"    {'Element':>6s}  {'mean|delta|':>12s}  {'mean_sigma':>12s}  {'ratio':>8s}")
+        for elem in unique_elements:
+            mask = force_symbols == elem
+            md = np.mean(np.abs(delta_c[mask]))
+            ms = np.mean(sigma_c[mask])
+            print(f"    {elem:>6s}  {md:12.6f}  {ms:12.6f}  {md/max(ms,1e-12):8.2f}")
+        print()
+
+        # Per-element isotonic apply
+        if any(per_elem_iso.values()):
+            atom_symbols = force_symbols[0::3]
+            sigma_c_cal_iso = np.empty_like(sigma_c_cal_var)
+            sigma_a_cal_iso = np.empty_like(sigma_a_cal_var)
+            for elem in unique_elements:
+                mask = force_symbols == elem
+                ic = per_elem_iso.get(elem)
+                if ic is not None:
+                    sigma_c_cal_iso[mask] = ic.transform(sigma_c_cal_var[mask])
+                else:
+                    sigma_c_cal_iso[mask] = sigma_c_cal_var[mask]
+                a_mask = atom_symbols == elem
+                if a_mask.any():
+                    if ic is not None:
+                        sigma_a_cal_iso[a_mask] = ic.transform(sigma_a_cal_var[a_mask])
+                    else:
+                        sigma_a_cal_iso[a_mask] = sigma_a_cal_var[a_mask]
+        else:
+            sigma_c_cal_iso = sigma_c_cal_var
+            sigma_a_cal_iso = sigma_a_cal_var
 
     # --- ENERGIES (if present)
     if delta_e is not None:
@@ -817,6 +930,7 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
     calibrators: Optional[Dict[str, Any]] = None,
     energy_per_atom: bool = False,
     save_plot_data: bool = True,
+    **kwargs,
 ):
     """Thin wrapper that forwards to :func:`run_uq_metrics`.
 
@@ -836,4 +950,6 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
         calibrators=calibrators,
         energy_per_atom=energy_per_atom,
         save_plot_data=save_plot_data,
+        calibration_factor=kwargs.get("calibration_factor", "global"),
+        force_symbols=kwargs.get("force_symbols", None),
     )

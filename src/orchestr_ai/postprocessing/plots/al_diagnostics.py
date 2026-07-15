@@ -57,6 +57,54 @@ def read_al_diagnostics_csv(path):
     return rows, metadata
 
 
+def _parse_per_atom_uncertainties(path):
+    """Return (elements_per_frame, sFnorm_per_frame_meV, sigma_E_per_frame_meV)."""
+    with open(path) as f:
+        lines = f.readlines()
+
+    elements_all = []
+    sFnorm_all = []
+    sigma_E_list = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        try:
+            n_atoms = int(line)
+        except ValueError:
+            i += 1
+            continue
+
+        header = lines[i + 1].strip()
+        sigma_E = 0.0
+        for part in header.split():
+            if part.startswith("sigma_E="):
+                try:
+                    sigma_E = float(part.split("=")[1])
+                except ValueError:
+                    pass
+
+        elements = []
+        norms = []
+        for j in range(n_atoms):
+            parts = lines[i + 2 + j].split()
+            if len(parts) >= 8:
+                elements.append(parts[0])
+                norms.append(float(parts[7]))  # sF_norm column
+
+        elements_all.append(elements)
+        # Convert eV -> meV (×1000)
+        sFnorm_all.append([v * 1000.0 for v in norms])
+        sigma_E_list.append(sigma_E * 1000.0)
+
+        i += 2 + n_atoms
+
+    return elements_all, sFnorm_all, sigma_E_list
+
+
 def _thresholds_for_state(metadata, state):
     thresholds = dict(metadata.get("global_thresholds", {}))
     # Normalize state-specific merges (e.g. map triplet_reconstructed to triplet if needed)
@@ -718,3 +766,173 @@ def generate_al_diagnostic_plots(csv_path, out_dir="al_plots", window=50, drop_f
         if comparison_html:
             outputs.append(comparison_html)
     return outputs
+
+
+def generate_per_atom_uncertainty_plots(
+    xyz_path: str,
+    out_dir: str = "al_plots",
+    dpi: int = 300,
+    diag_csv_path: str = None,
+) -> str:
+    """Generate per-element sigma_F plots from per_atom_uncertainty.xyz.
+
+    Parameters
+    ----------
+    xyz_path : str
+        Path to the per-atom uncertainty XYZ file.
+    out_dir : str
+        Output directory for the plot.
+    dpi : int
+        Resolution of the saved PNG.
+    diag_csv_path : str, optional
+        Path to al_pool_diagnostics.csv to read AL thresholds from.
+
+    Returns
+    -------
+    str
+        Path to the saved plot (per_element_sigmaF.png).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Parse XYZ
+    # ------------------------------------------------------------------
+    elements_all, sFnorm_all, _sigma_E = _parse_per_atom_uncertainties(xyz_path)
+    n_frames = len(elements_all)
+    if n_frames == 0:
+        return ""
+
+    # ------------------------------------------------------------------
+    # Parse AL thresholds from diagnostics CSV
+    # ------------------------------------------------------------------
+    thresholds = {}
+    if diag_csv_path and os.path.exists(diag_csv_path):
+        try:
+            _, metadata = read_al_diagnostics_csv(diag_csv_path)
+            # Merge global + state-specific thresholds (handles both CSV formats)
+            thresholds = dict(metadata.get("global_thresholds", {}))
+            for state, state_thr in metadata.get("thresholds", {}).items():
+                for k, v in state_thr.items():
+                    if np.isfinite(float(v)):
+                        thresholds[k] = float(v)
+        except Exception:
+            pass
+
+    thr_sfmean = thresholds.get("thr_sigma_Fmean", np.nan)
+    thr_sfmean_hi = thresholds.get("thr_sigma_Fmean_hi_eff", np.nan)
+    thr_sfmean_hard = thresholds.get("hard_sigma_F_mean_min", np.nan)
+    thr_sfmax = thresholds.get("thr_sigma_F", np.nan)
+    thr_sfmax_hi = thresholds.get("thr_sigma_F_hi_eff", np.nan)
+    thr_sfmax_hard = thresholds.get("hard_sigma_F_max_min", np.nan)
+
+    def _thr_line(ax, value, color, scale=1000.0):
+        val = float(value) * scale if np.isfinite(float(value)) else np.nan
+        if not np.isnan(val):
+            ax.axhline(val, ls="--", lw=1.0, color=color, alpha=0.85)
+
+    # ------------------------------------------------------------------
+    # Per-frame stats
+    # ------------------------------------------------------------------
+    sf_max = np.array([max(nrm) if nrm else np.nan for nrm in sFnorm_all], dtype=float)
+    sf_mean = np.array([np.mean(nrm) if nrm else np.nan for nrm in sFnorm_all], dtype=float)
+
+    # Per-element per-frame stats
+    elem_sfmax = defaultdict(list)
+    elem_sfmean = defaultdict(list)
+    for els, nrm in zip(elements_all, sFnorm_all):
+        by_elem = defaultdict(list)
+        for e, v in zip(els, nrm):
+            by_elem[e].append(v)
+        for e, vals in by_elem.items():
+            elem_sfmax[e].append(max(vals))
+            elem_sfmean[e].append(np.mean(vals))
+
+    elements_sorted = sorted(elem_sfmax.keys())
+
+    # ------------------------------------------------------------------
+    # Plot: 3 x 2 grid
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(3, 2, figsize=(25, 16),
+                             gridspec_kw={"height_ratios": [1, 1.5, 1]})
+    (ax_box_mean, ax_box_max), (ax_evo_mean, ax_evo_max), (ax_total_mean, ax_total_max) = axes
+
+    colors = plt.cm.tab20(np.linspace(0, 1, len(elements_sorted)))
+    elem_color = {e: colors[i] for i, e in enumerate(elements_sorted)}
+
+    def _add_fmean_lines(ax):
+        _thr_line(ax, thr_sfmean, "#636363")
+        _thr_line(ax, thr_sfmean_hi, "#969696")
+        _thr_line(ax, thr_sfmean_hard, "#b2182b")
+
+    def _add_fmax_lines(ax):
+        _thr_line(ax, thr_sfmax, "#636363")
+        _thr_line(ax, thr_sfmax_hi, "#969696")
+        _thr_line(ax, thr_sfmax_hard, "#b2182b")
+
+    # -- Row 1 (col 1): boxplot sigma_F_mean --
+    box_data_mean = [elem_sfmean[e] for e in elements_sorted]
+    bp = ax_box_mean.boxplot(box_data_mean, tick_labels=elements_sorted,
+                             patch_artist=True, showfliers=False)
+    for patch, c in zip(bp["boxes"], colors):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.7)
+    _add_fmean_lines(ax_box_mean)
+    ax_box_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
+    ax_box_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ distribution")
+    ax_box_mean.grid(axis="y", alpha=0.3)
+
+    # -- Row 2 (col 1): evolution sigma_F_mean --
+    for e in elements_sorted:
+        ax_evo_mean.plot(elem_sfmean[e], linewidth=0.6, alpha=0.8,
+                         label=e, color=elem_color[e])
+    _add_fmean_lines(ax_evo_mean)
+    ax_evo_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
+    ax_evo_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ evolution")
+    ax_evo_mean.legend(fontsize=12, ncol=len(elements_sorted) + 1)
+    ax_evo_mean.grid(alpha=0.3)
+
+    # -- Row 1 (col 2): boxplot sigma_F_max --
+    box_data_max = [elem_sfmax[e] for e in elements_sorted]
+    bp2 = ax_box_max.boxplot(box_data_max, tick_labels=elements_sorted,
+                             patch_artist=True, showfliers=False)
+    for patch, c in zip(bp2["boxes"], colors):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.7)
+    _add_fmax_lines(ax_box_max)
+    ax_box_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
+    ax_box_max.set_title(r"Per-element $\sigma F_{\max}$ distribution")
+    ax_box_max.grid(axis="y", alpha=0.3)
+
+    # -- Row 2 (col 2): evolution sigma_F_max --
+    for e in elements_sorted:
+        ax_evo_max.plot(elem_sfmax[e], linewidth=0.6, alpha=0.8,
+                        label=e, color=elem_color[e])
+    _add_fmax_lines(ax_evo_max)
+    ax_evo_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
+    ax_evo_max.set_title(r"Per-element $\sigma F_{\max}$ evolution")
+    ax_evo_max.legend(fontsize=12, ncol=len(elements_sorted))
+    ax_evo_max.grid(alpha=0.3)
+
+    # -- Row 3 (col 1): total sigma_F_mean evolution --
+    ax_total_mean.plot(sf_mean, linewidth=1, color="black", alpha=1)
+    _add_fmean_lines(ax_total_mean)
+    ax_total_mean.set_xlabel("Frame index")
+    ax_total_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
+    ax_total_mean.set_title(r"Total $\sigma F_{\mathrm{mean}}$ evolution")
+    ax_total_mean.grid(alpha=0.3)
+
+    # -- Row 3 (col 2): total sigma_F_max evolution --
+    ax_total_max.plot(sf_max, linewidth=1, color="black", alpha=1)
+    _add_fmax_lines(ax_total_max)
+    ax_total_max.set_xlabel("Frame index")
+    ax_total_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
+    ax_total_max.set_title(r"Total $\sigma F_{\max}$ evolution")
+    ax_total_max.grid(alpha=0.3)
+
+    plt.tight_layout()
+    out_path = os.path.join(out_dir, "per_element_sigmaF.png")
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+    print(f"[AL Plot] Saved {out_path}")
+
+    return out_path

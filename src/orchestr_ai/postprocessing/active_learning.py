@@ -23,6 +23,7 @@ from collections import defaultdict
 from itertools import combinations
 from typing import Tuple, List, Optional, Dict, Any
 from sklearn.isotonic import IsotonicRegression
+from orchestr_ai.postprocessing.uq_metrics_calculator import PerElementCalibrator
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
 
 _GAUSSIAN_SIGMA_TO_ABS = float(np.sqrt(2.0 / np.pi))
@@ -1087,6 +1088,7 @@ def apply_sigma_comp_calibration(
     sigma_comp: np.ndarray,
     calibrators: Optional[Dict[str, Any]],
     mode: str = "var",
+    symbols: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Apply train-fitted force calibrators to flat component uncertainties."""
     if calibrators is None or sigma_comp is None:
@@ -1095,10 +1097,36 @@ def apply_sigma_comp_calibration(
     cal_var = calibrators.get("cal_var_F")
     if cal_var is None:
         return sigma
+
+    # --- Per-element calibration ---
+    if isinstance(cal_var, PerElementCalibrator) and symbols is not None:
+        unique_elements = sorted(cal_var.calibrators.keys())
+        out = np.empty_like(sigma)
+        for elem in unique_elements:
+            mask = symbols == elem
+            if not mask.any():
+                continue
+            vsc = cal_var.get(elem)
+            if vsc is not None:
+                out[mask] = vsc.transform(sigma[mask])
+        # Apply isotonic per-element if requested and available
+        if str(mode).lower() == "iso":
+            cal_iso = calibrators.get("cal_iso_F")
+            if isinstance(cal_iso, PerElementCalibrator):
+                for elem in unique_elements:
+                    mask = symbols == elem
+                    if not mask.any():
+                        continue
+                    ic = cal_iso.get(elem)
+                    if ic is not None:
+                        out[mask] = ic.transform(out[mask])
+        return out
+
+    # --- Default ---
     out = cal_var.transform(sigma)
     if str(mode).lower() == "iso":
         cal_iso = calibrators.get("cal_iso_F")
-        if cal_iso is not None:
+        if cal_iso is not None and not isinstance(cal_iso, PerElementCalibrator):
             out = cal_iso.transform(out)
     return out
 
@@ -1127,13 +1155,20 @@ def calibrate_sigma_force_frames(
     sigma_force_frames: List[np.ndarray],
     calibrators: Optional[Dict[str, Any]],
     mode: str = "var",
+    symbols: Optional[List[np.ndarray]] = None,
 ) -> List[np.ndarray]:
     """Calibrate per-frame force σ arrays (list of (n_atoms, 3))."""
     if calibrators is None or not sigma_force_frames:
         return sigma_force_frames
     flat_parts = [np.asarray(f, dtype=float).reshape(-1) for f in sigma_force_frames]
     flat = np.concatenate(flat_parts)
-    flat_cal = apply_sigma_comp_calibration(flat, calibrators, mode)
+
+    # Build flat symbols array if per-element
+    flat_syms = None
+    if symbols is not None and isinstance(calibrators.get("cal_var_F"), PerElementCalibrator):
+        flat_syms = np.concatenate([np.repeat(s, 3) for s in symbols])
+
+    flat_cal = apply_sigma_comp_calibration(flat, calibrators, mode, symbols=flat_syms)
     splits = np.cumsum([p.size for p in flat_parts])[:-1]
     chunks = np.split(flat_cal, splits)
     return [
@@ -1147,13 +1182,28 @@ def scale_pool_force_summaries(
     sigma_F_max: np.ndarray,
     calibrators: Optional[Dict[str, Any]],
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Scale pool light-mode σ summaries by train variance-scaling factor."""
+    """Scale pool light-mode σ summaries by train variance-scaling factor.
+
+    When calibrators are per‑element, uses the atom‑count‑weighted average
+    scaling factor as a reasonable approximation for per‑frame summaries.
+    """
     if calibrators is None:
         return sigma_F_mean, sigma_F_max
     cal_var = calibrators.get("cal_var_F")
     if cal_var is None:
         return sigma_F_mean, sigma_F_max
-    s = float(getattr(cal_var, "s", 1.0))
+
+    if isinstance(cal_var, PerElementCalibrator):
+        # Atom-count-weighted average of per-element s values (training set proxy)
+        counts = getattr(cal_var, "_training_counts", {})
+        if counts:
+            total = sum(counts.values())
+            s = sum(vsc.s * counts.get(e, 0) for e, vsc in cal_var.calibrators.items()) / max(total, 1)
+        else:
+            s_vals = [vsc.s for vsc in cal_var.calibrators.values()]
+            s = float(np.mean(s_vals)) if s_vals else 1.0
+    else:
+        s = float(getattr(cal_var, "s", 1.0))
     return np.asarray(sigma_F_mean, float) * s, np.asarray(sigma_F_max, float) * s
 
 
