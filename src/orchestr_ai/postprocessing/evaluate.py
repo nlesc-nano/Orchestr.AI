@@ -458,7 +458,7 @@ class DatasetManager:
         )
 
     @staticmethod
-    def _structure_key(energy, positions, symbols, decimals=4):
+    def _structure_key(energy, positions, symbols, decimals=3):
         pos = np.asarray(positions, dtype=float)
         return (
             tuple(symbols),
@@ -482,14 +482,25 @@ class DatasetManager:
         if not _parse_bool_like(self.eval_cfg.get("purge_redundant_validation", True), default=True):
             return val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet
 
+        train_centered = any("centered" in (f.info or {}) for f in train_frames)
+        val_centered = any("centered" in (f.info or {}) for f in val_frames)
+        if train_centered != val_centered:
+            print(f"[Dataset] Centering mismatch: train={'centered' if train_centered else 'raw'}, "
+                  f"val={'centered' if val_centered else 'raw'}. Subtracting centroids before comparison.")
+
         train_keys = {
-            self._structure_key(e, p, fr.get_chemical_symbols())
+            self._structure_key(e,
+                p - p.mean(axis=0) if train_centered != val_centered else p,
+                fr.get_chemical_symbols())
             for e, p, fr in zip(train_E, train_pos, train_frames)
         }
         keep = []
         removed = []
         for i, (e, fr) in enumerate(zip(val_E, val_frames)):
-            key = self._structure_key(e, fr.get_positions(), fr.get_chemical_symbols())
+            pos = fr.get_positions()
+            key = self._structure_key(e,
+                pos - pos.mean(axis=0) if train_centered != val_centered else pos,
+                fr.get_chemical_symbols())
             redundant = key in train_keys
             keep.append(not redundant)
             if redundant:
