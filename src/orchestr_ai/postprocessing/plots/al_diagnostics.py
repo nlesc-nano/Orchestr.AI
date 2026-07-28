@@ -809,12 +809,7 @@ def generate_per_atom_uncertainty_plots(
     if diag_csv_path and os.path.exists(diag_csv_path):
         try:
             _, metadata = read_al_diagnostics_csv(diag_csv_path)
-            # Merge global + state-specific thresholds (handles both CSV formats)
-            thresholds = dict(metadata.get("global_thresholds", {}))
-            for state, state_thr in metadata.get("thresholds", {}).items():
-                for k, v in state_thr.items():
-                    if np.isfinite(float(v)):
-                        thresholds[k] = float(v)
+            thresholds = _thresholds_for_state(metadata, "default")
         except Exception:
             pass
 
@@ -851,13 +846,17 @@ def generate_per_atom_uncertainty_plots(
 
     # ------------------------------------------------------------------
     # Plot: 3 x 2 grid
+    #   col 1: sigma_F_mean  (violin / evolution / total)
+    #   col 2: sigma_F_max   (violin / per-element evolution / total)
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(3, 2, figsize=(25, 16),
                              gridspec_kw={"height_ratios": [1, 1.5, 1]})
-    (ax_box_mean, ax_box_max), (ax_evo_mean, ax_evo_max), (ax_total_mean, ax_total_max) = axes
+    (ax_vln_mean, ax_vln_max), (ax_evo_mean, ax_evo_max), (ax_total_mean, ax_total_max) = axes
 
     colors = plt.cm.tab20(np.linspace(0, 1, len(elements_sorted)))
     elem_color = {e: colors[i] for i, e in enumerate(elements_sorted)}
+
+    positions = list(range(1, len(elements_sorted) + 1))
 
     def _add_fmean_lines(ax):
         _thr_line(ax, thr_sfmean, "#636363")
@@ -869,21 +868,27 @@ def generate_per_atom_uncertainty_plots(
         _thr_line(ax, thr_sfmax_hi, "#969696")
         _thr_line(ax, thr_sfmax_hard, "#b2182b")
 
-    # -- Row 1 (col 1): boxplot sigma_F_mean --
-    box_data_mean = [elem_sfmean[e] for e in elements_sorted]
-    bp = ax_box_mean.boxplot(box_data_mean, tick_labels=elements_sorted,
-                             patch_artist=True, showfliers=False)
-    for patch, c in zip(bp["boxes"], colors):
-        patch.set_facecolor(c)
-        patch.set_alpha(0.7)
-    _add_fmean_lines(ax_box_mean)
-    ax_box_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
-    ax_box_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ distribution")
-    ax_box_mean.grid(axis="y", alpha=0.3)
+    # -- Row 1 (col 1): violin sigma_F_mean --
+    ax_vln_mean.set_axisbelow(True)
+    vln_data_mean = [elem_sfmean[e] for e in elements_sorted]
+    vp = ax_vln_mean.violinplot(vln_data_mean, positions=positions,
+                                showmeans=True, showmedians=False, showextrema=False)
+    for i, body in enumerate(vp["bodies"]):
+        body.set_facecolor(colors[i])
+        body.set_alpha(1)
+        body.set_edgecolor("#202020")
+        body.set_zorder(2)
+    vp["cmeans"].set_color("black")
+    ax_vln_mean.set_xticks(positions)
+    ax_vln_mean.set_xticklabels(elements_sorted)
+    _add_fmean_lines(ax_vln_mean)
+    ax_vln_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
+    ax_vln_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ distribution")
+    ax_vln_mean.grid(axis="y", alpha=0.3)
 
     # -- Row 2 (col 1): evolution sigma_F_mean --
     for e in elements_sorted:
-        ax_evo_mean.plot(elem_sfmean[e], linewidth=0.6, alpha=0.8,
+        ax_evo_mean.plot(elem_sfmean[e], linewidth=0.6, alpha=1,
                          label=e, color=elem_color[e])
     _add_fmean_lines(ax_evo_mean)
     ax_evo_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
@@ -891,21 +896,27 @@ def generate_per_atom_uncertainty_plots(
     ax_evo_mean.legend(fontsize=12, ncol=len(elements_sorted) + 1)
     ax_evo_mean.grid(alpha=0.3)
 
-    # -- Row 1 (col 2): boxplot sigma_F_max --
-    box_data_max = [elem_sfmax[e] for e in elements_sorted]
-    bp2 = ax_box_max.boxplot(box_data_max, tick_labels=elements_sorted,
-                             patch_artist=True, showfliers=False)
-    for patch, c in zip(bp2["boxes"], colors):
-        patch.set_facecolor(c)
-        patch.set_alpha(0.7)
-    _add_fmax_lines(ax_box_max)
-    ax_box_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
-    ax_box_max.set_title(r"Per-element $\sigma F_{\max}$ distribution")
-    ax_box_max.grid(axis="y", alpha=0.3)
+    # -- Row 1 (col 2): violin sigma_F_max --
+    ax_vln_max.set_axisbelow(True)
+    vln_data_max = [elem_sfmax[e] for e in elements_sorted]
+    vp2 = ax_vln_max.violinplot(vln_data_max, positions=positions,
+                                showmeans=True, showmedians=False, showextrema=False)
+    for i, body in enumerate(vp2["bodies"]):
+        body.set_facecolor(colors[i])
+        body.set_alpha(1)
+        body.set_edgecolor("#202020")
+        body.set_zorder(2)
+    vp2["cmeans"].set_color("black")
+    ax_vln_max.set_xticks(positions)
+    ax_vln_max.set_xticklabels(elements_sorted)
+    _add_fmax_lines(ax_vln_max)
+    ax_vln_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
+    ax_vln_max.set_title(r"Per-element $\sigma F_{\max}$ distribution")
+    ax_vln_max.grid(axis="y", alpha=0.3)
 
     # -- Row 2 (col 2): evolution sigma_F_max --
     for e in elements_sorted:
-        ax_evo_max.plot(elem_sfmax[e], linewidth=0.6, alpha=0.8,
+        ax_evo_max.plot(elem_sfmax[e], linewidth=0.6, alpha=1,
                         label=e, color=elem_color[e])
     _add_fmax_lines(ax_evo_max)
     ax_evo_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
