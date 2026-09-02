@@ -677,19 +677,47 @@ class DatasetManager:
         if purge and (not self.train_path or not os.path.exists(self.train_path)):
             raise ValueError("purge_redundant_validation=true requires eval.training_data for active_learning mode.")
 
-        calibration_source = str(self.eval_cfg.get("calibration_source", "validation")).lower()
-        if calibration_source != "validation":
-            raise ValueError("active_learning mode currently supports calibration_source='validation'.")
+        calibration_path = self.eval_cfg.get("calibration_data")
+        separate_calibration = bool(calibration_path and os.path.exists(calibration_path))
 
         energy_key, forces_key, s_e_key, s_f_key, t_e_key, t_f_key = self._head_keys()
-        val_E, val_F, _ = parse_extxyz(self.validation_path, "validation", energy_key=energy_key, forces_key=forces_key)
-        val_E_singlet, val_F_singlet, _ = parse_extxyz(self.validation_path, "validation_singlet", energy_key=s_e_key, forces_key=s_f_key)
-        val_E_triplet, val_F_triplet, _ = parse_extxyz(self.validation_path, "validation_triplet", energy_key=t_e_key, forces_key=t_f_key)
-        val_frames = read(self.validation_path, index=":", format="extxyz")
+
+        def _load_labeled_set(path, tag):
+            e, f, _ = parse_extxyz(path, tag, energy_key=energy_key, forces_key=forces_key)
+            e_s, f_s, _ = parse_extxyz(path, f"{tag}_singlet", energy_key=s_e_key, forces_key=s_f_key)
+            e_t, f_t, _ = parse_extxyz(path, f"{tag}_triplet", energy_key=t_e_key, forces_key=t_f_key)
+            frames = read(path, index=":", format="extxyz")
+            return frames, e, f, e_s, f_s, e_t, f_t
+
+        val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet = _load_labeled_set(
+            self.validation_path, "validation"
+        )
+        if separate_calibration:
+            cal_frames, cal_E, cal_F, cal_E_singlet, cal_F_singlet, cal_E_triplet, cal_F_triplet = _load_labeled_set(
+                calibration_path, "calibration"
+            )
+        else:
+            cal_frames, cal_E, cal_F, cal_E_singlet, cal_F_singlet, cal_E_triplet, cal_F_triplet = (
+                val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet,
+            )
+
+        train_frames, train_E, train_F, train_pos = [], [], [], []
+        if self.train_path and os.path.exists(self.train_path):
+            train_E, train_F, train_pos = parse_extxyz(self.train_path, "training_data", energy_key=energy_key, forces_key=forces_key)
+            train_frames = read(self.train_path, index=":", format="extxyz")
 
         if purge:
-            train_E, _, train_pos = parse_extxyz(self.train_path, "training_data", energy_key=energy_key, forces_key=forces_key)
-            train_frames = read(self.train_path, index=":", format="extxyz")
+            if separate_calibration:
+                (
+                    cal_frames, cal_E, cal_F,
+                    cal_E_singlet, cal_F_singlet,
+                    cal_E_triplet, cal_F_triplet,
+                ) = self._purge_redundant_validation(
+                    cal_frames, cal_E, cal_F,
+                    cal_E_singlet, cal_F_singlet,
+                    cal_E_triplet, cal_F_triplet,
+                    train_E, train_pos, train_frames,
+                )
             (
                 val_frames, val_E, val_F,
                 val_E_singlet, val_F_singlet,
@@ -701,29 +729,58 @@ class DatasetManager:
                 train_E, train_pos, train_frames,
             )
 
-        n_val = len(val_frames)
-        if n_val < 2:
-            raise ValueError("active_learning mode requires at least two non-redundant validation frames for calibration.")
+        if not separate_calibration:
+            cal_frames, cal_E, cal_F = val_frames, val_E, val_F
+            cal_E_singlet, cal_F_singlet = val_E_singlet, val_F_singlet
+            cal_E_triplet, cal_F_triplet = val_E_triplet, val_F_triplet
 
-        train_mask = np.ones(n_val, dtype=bool)
-        val_mask = np.zeros(n_val, dtype=bool)
-        print(f"[Dataset] Calibration source: validation ({n_val} frames).")
-        print("[Dataset] Active-learning thresholds and calibration will be based on validation data.")
+        n_cal = len(cal_frames)
+        if n_cal < 2:
+            raise ValueError("active_learning mode requires at least two non-redundant calibration frames.")
+
+        if separate_calibration:
+            n_val = len(val_frames)
+            train_mask = np.array([True] * n_cal + [False] * n_val, dtype=bool)
+            val_mask = np.array([False] * n_cal + [True] * n_val, dtype=bool)
+            cal_idx = np.arange(n_cal, dtype=int)
+            val_idx = np.arange(n_cal, n_cal + n_val, dtype=int)
+            rdf_ref_frames = cal_frames
+            print(f"[Dataset] Calibration source: calibration_data ({n_cal} frames); validation ({n_val} frames).")
+            print("[Dataset] Active-learning thresholds and calibration will be based on calibration data.")
+        else:
+            train_mask = np.ones(n_cal, dtype=bool)
+            val_mask = np.zeros(n_cal, dtype=bool)
+            cal_idx = np.arange(n_cal, dtype=int)
+            val_idx = np.array([], dtype=int)
+            rdf_ref_frames = cal_frames
+            print(f"[Dataset] Calibration source: validation ({n_cal} frames).")
+            print("[Dataset] Active-learning thresholds and calibration will be based on validation data.")
+
+        all_frames = cal_frames + val_frames if separate_calibration else cal_frames
+
+        singlet_e = (cal_E_singlet + val_E_singlet) if separate_calibration else cal_E_singlet
+        singlet_f = (cal_F_singlet + val_F_singlet) if separate_calibration else cal_F_singlet
+        triplet_e = (cal_E_triplet + val_E_triplet) if separate_calibration else cal_E_triplet
+        triplet_f = (cal_F_triplet + val_F_triplet) if separate_calibration else cal_F_triplet
         return {
-            "frames": val_frames,
-            "E_true": np.array(val_E),
-            "F_true": val_F,
+            "frames": all_frames,
+            "E_true": np.array((cal_E + val_E) if separate_calibration else cal_E),
+            "F_true": (cal_F + val_F) if separate_calibration else cal_F,
             "train_mask": train_mask,
             "val_mask": val_mask,
-            "train_idx": np.arange(n_val, dtype=int),
-            "val_idx": np.array([], dtype=int),
-            "calibration_idx": np.arange(n_val, dtype=int),
-            "validation_idx": np.arange(n_val, dtype=int),
-            "val_frames_ref": val_frames,
-            "E_singlet_true": np.array(val_E_singlet) if val_E_singlet else None,
-            "F_singlet_true": val_F_singlet if val_F_singlet else None,
-            "E_triplet_true": np.array(val_E_triplet) if val_E_triplet else None,
-            "F_triplet_true": val_F_triplet if val_F_triplet else None,
+            "train_idx": cal_idx,
+            "val_idx": val_idx,
+            "calibration_idx": cal_idx,
+            "validation_idx": val_idx,
+            "val_frames_ref": rdf_ref_frames,
+            "E_singlet_true": np.array(singlet_e) if singlet_e else None,
+            "F_singlet_true": singlet_f if singlet_f else None,
+            "E_triplet_true": np.array(triplet_e) if triplet_e else None,
+            "F_triplet_true": triplet_f if triplet_f else None,
+            "train_frames": train_frames,
+            "train_E_true": np.array(train_E) if train_E else None,
+            "train_F_true": train_F if train_F else None,
+            "fit_label": "cal" if separate_calibration else "val",
         }
 
 
@@ -1107,7 +1164,11 @@ class EnsembleRunner:
             print(f"\n[EnsembleRunner] Loading aggregate cache from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
             if "cache_format" in data and str(data["cache_format"]) == "ensemble_stats_v1":
-                return {key: data[key] for key in data.files if key != "cache_format"}
+                n_cached = data["n_atoms_per_frame"] if "n_atoms_per_frame" in data else None
+                if n_cached is not None and len(n_cached) != len(frames):
+                    print("[EnsembleRunner] Cached stats frame count does not match current dataset; rebuilding.")
+                else:
+                    return {key: data[key] for key in data.files if key != "cache_format"}
             print("[EnsembleRunner] Existing cache is not aggregate stats; rebuilding.")
 
         print(f"\n[EnsembleRunner] Aggregate inference for {len(frames)} labeled frames...")
@@ -1399,11 +1460,18 @@ class EnsembleRunner:
                 "cache_format" in data_a and str(data_a["cache_format"]) == "ensemble_stats_v1"
                 and "cache_format" in data_b and str(data_b["cache_format"]) == "ensemble_stats_v1"
             ):
-                print(f"[EnsembleRunner] Loading dual-head aggregate caches from {cache_file} and {other_cache_file}.")
-                return (
-                    {key: data_a[key] for key in data_a.files if key != "cache_format"},
-                    {key: data_b[key] for key in data_b.files if key != "cache_format"},
-                )
+                sizes_ok = True
+                for data in (data_a, data_b):
+                    n_cached = data["n_atoms_per_frame"] if "n_atoms_per_frame" in data else None
+                    if n_cached is not None and len(n_cached) != len(frames):
+                        sizes_ok = False
+                if sizes_ok:
+                    print(f"[EnsembleRunner] Loading dual-head aggregate caches from {cache_file} and {other_cache_file}.")
+                    return (
+                        {key: data_a[key] for key in data_a.files if key != "cache_format"},
+                        {key: data_b[key] for key in data_b.files if key != "cache_format"},
+                    )
+                print("[EnsembleRunner] Cached stats frame count does not match current dataset; rebuilding.")
 
         print(f"\n[EnsembleRunner] One-pass dual-head aggregate inference for {len(frames)} frames...")
         primary_sets = []
@@ -1656,9 +1724,11 @@ class EvaluationPipeline:
             self.ds = data_mgr.load_active_learning_datasets()
             if "ensemble" not in self.uq_methods:
                 raise ValueError("eval.mode='active_learning' requires eval.uncertainty to include 'ensemble'.")
-            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal = (
+            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval = (
                 self._run_ensemble_calibration()
             )
+            if _parse_bool_like(self.eval_cfg.get("train_UQstats"), False):
+                self._run_train_uq_plots(uq_calibrators)
             soap_species = self._maybe_replace_latents_with_soap(mean_L_frame)
             if soap_species is not None:
                 mean_L_frame = self._soap_labeled
@@ -1670,7 +1740,7 @@ class EvaluationPipeline:
                 soap_species=soap_species,
                 uq_calibrators=uq_calibrators,
                 metrics_train=metrics_cal,
-                metrics_eval=metrics_cal,
+                metrics_eval=metrics_eval if metrics_eval is not None else metrics_cal,
             )
             print("Evaluation Pipeline Completed.")
             return
@@ -1824,7 +1894,7 @@ class EvaluationPipeline:
             self.sigma_comp_other = other[2]
             self.sigma_E_raw_other = other[3]
             self.metrics_train_other = other[5]
-            self.metrics_eval_other = other[5]
+            self.metrics_eval_other = other[6] if other[6] is not None else other[5]
             shared_calibrators = self._build_shared_var_calibrators(
                 primary[0], primary[2], primary[3], other[0], other[2], other[3]
             )
@@ -1834,13 +1904,93 @@ class EvaluationPipeline:
                 print("[Calibration] Shared dual-head calibration is VAR-based; using selection_calibration='var'.")
                 self.eval_cfg["selection_calibration"] = "var"
             print("[Calibration] Dual-head AL uses one shared VAR calibration for both heads.")
-            return primary[0], primary[1], primary[2], primary[3], shared_calibrators, primary[5]
+            return primary[0], primary[1], primary[2], primary[3], shared_calibrators, primary[5], primary[6]
 
         primary = self._evaluate_calibration_head(
             cache_file="ensemble_calibration.npz",
             tag="ensemble_calibration",
         )
-        return primary[0], primary[1], primary[2], primary[3], primary[4], primary[5]
+        return primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6]
+
+    def _uq_metrics_eval_split(self, stats_ens, sigma_comp, sigma_E_raw, calibrators, tag, cal_factor):
+        """Apply calibration-fitted calibrators on the held-out validation split."""
+        if not np.any(self.ds["val_mask"]):
+            return None
+        sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+        force_symbols = None
+        if cal_factor == "element":
+            symbols_per_frame = [fr.get_chemical_symbols() for fr in self.ds["frames"]]
+            force_symbols = np.concatenate([np.repeat(s, 3) for s in symbols_per_frame])
+            val_frames_mask = np.repeat(self.ds["val_mask"], [len(fr) for fr in self.ds["frames"]])
+            comp_mask = np.repeat(val_frames_mask, 3)
+            force_symbols = force_symbols[comp_mask]
+        return calculate_uq_metrics(
+            stats_ens,
+            sigma_comp,
+            sigma_atom,
+            sigma_E_raw,
+            "Eval",
+            tag,
+            self.eval_log,
+            calibrators=calibrators,
+            energy_per_atom=True,
+            save_plot_data=self.do_plot,
+            calibration_factor=cal_factor,
+            force_symbols=force_symbols,
+            split_label="val",
+        )
+
+    def _run_train_uq_plots(self, calibrators, tag="ensemble_calibration"):
+        """UQ metrics/plots for the raw training dataset (informational only)."""
+        train_frames = self.ds.get("train_frames")
+        train_E = self.ds.get("train_E_true")
+        train_F = self.ds.get("train_F_true")
+        if not train_frames or train_E is None or train_F is None:
+            return
+        print(f"\n[Train-UQ] Computing UQ metrics on training data ({len(train_frames)} frames)...")
+        runner = EnsembleRunner(self.config, self.device, self.neighbour_list)
+        stats_cache = runner.evaluate_stats(
+            train_frames, train_E, train_F, cache_file="ensemble_train.npz"
+        )
+        if int(stats_cache["n_models"]) < 2:
+            return
+        mf_list, idx = [], 0
+        for fr in train_frames:
+            mf_list.append(stats_cache["mu_F"][idx:idx + len(fr)])
+            idx += len(fr)
+        n = len(train_frames)
+        stats = MLFFStats(
+            np.asarray(train_E, dtype=float),
+            stats_cache["mu_E"],
+            train_F,
+            mf_list,
+            np.ones(n, dtype=bool),
+            np.zeros(n, dtype=bool),
+        )
+        sigma_comp = stats_cache["sigma_F"].flatten()
+        sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+        cal_factor = str(self.eval_cfg.get("calibration_factor", "global")).lower()
+        force_symbols = None
+        if cal_factor == "element":
+            symbols_per_frame = [fr.get_chemical_symbols() for fr in train_frames]
+            force_symbols = np.concatenate([np.repeat(s, 3) for s in symbols_per_frame])
+        metrics_train = calculate_uq_metrics(
+            stats,
+            sigma_comp,
+            sigma_atom,
+            stats_cache["sigma_E"],
+            "Train",
+            tag,
+            self.eval_log,
+            calibrators=calibrators,
+            energy_per_atom=True,
+            save_plot_data=self.do_plot,
+            calibration_factor=cal_factor,
+            force_symbols=force_symbols,
+            split_label="train",
+        )
+        if self.do_plot:
+            generate_uq_plots(metrics_train["npz_path"], "Train", tag, calibration="var")
 
     def _calibration_from_stats_cache(self, stats_cache, true_E, true_F, tag):
         if int(stats_cache["n_models"]) < 2:
@@ -1878,14 +2028,23 @@ class EvaluationPipeline:
             tag,
             self.eval_log,
             energy_per_atom=True,
-            save_plot_data=False,
+            save_plot_data=self.do_plot,
             calibration_factor=cal_factor,
             force_symbols=force_symbols,
+            split_label=self.ds.get("fit_label", "cal"),
         )
         uq_calibrators = metrics_cal.get("calibrators", {})
+        metrics_eval = self._uq_metrics_eval_split(
+            stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, tag, cal_factor
+        )
+        if self.do_plot:
+            fit_set_name = "Cal" if self.ds.get("fit_label") == "cal" else "Val"
+            generate_uq_plots(metrics_cal["npz_path"], fit_set_name, tag, calibration="var")
+            if metrics_eval is not None:
+                generate_uq_plots(metrics_eval["npz_path"], "Val", tag, calibration="var")
         self._print_active_learning_calibration_summary(metrics_cal)
         self._run_reference_slope_validation(stats_ens)
-        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal
+        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval
 
     def _evaluate_calibration_head(self, cache_file, tag, true_E=None, true_F=None):
         """Evaluate one head on validation/calibration frames and fit diagnostics."""
@@ -1963,14 +2122,23 @@ class EvaluationPipeline:
             tag,
             self.eval_log,
             energy_per_atom=True,
-            save_plot_data=False,
+            save_plot_data=self.do_plot,
             calibration_factor=cal_factor,
             force_symbols=force_symbols,
+            split_label=self.ds.get("fit_label", "cal"),
         )
         uq_calibrators = metrics_cal.get("calibrators", {})
+        metrics_eval = self._uq_metrics_eval_split(
+            stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, tag, cal_factor
+        )
+        if self.do_plot:
+            fit_set_name = "Cal" if self.ds.get("fit_label") == "cal" else "Val"
+            generate_uq_plots(metrics_cal["npz_path"], fit_set_name, tag, calibration="var")
+            if metrics_eval is not None:
+                generate_uq_plots(metrics_eval["npz_path"], "Val", tag, calibration="var")
         self._print_active_learning_calibration_summary(metrics_cal)
         self._run_reference_slope_validation(stats_ens)
-        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal
+        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval
 
     def _dual_head_other_head(self, orig_mace_head):
         al_multihead_mode = self.eval_cfg.get("al_multihead_mode", "reconstructed").lower()
@@ -2468,17 +2636,24 @@ class EvaluationPipeline:
 
         # --- Compute RDF thresholds and physical mask first ---
         rdf_cache = "rdf_thresholds_cache.npz"
+        rdf_ref_count = len(self.ds["val_frames_ref"])
+        rdf_thresholds = None
         if os.path.exists(rdf_cache):
-            print(f"[Pool-AL] Loading cached RDF thresholds...")
             data = np.load(rdf_cache, allow_pickle=True)
-            if "rdf_thresholds" in data:
-                rdf_thresholds = data["rdf_thresholds"].item()
-            else:
-                rdf_thresholds = {(str(r[0]), str(r[1])): (float(r[2]), float(r[3])) for r in data["thresholds"]}
-        else:
-            print("[Pool-AL] Computing RDF thresholds from validation frames...")
-            rdf_thresholds = compute_rdf_thresholds_from_reference(self.ds["val_frames_ref"], stride=self.eval_cfg.get("rdf_stride", 5), r_min_physical=self.eval_cfg.get("rdf_r_min_physical", 1.0))
-            np.savez_compressed(rdf_cache, rdf_thresholds=rdf_thresholds)
+            if "n_ref_frames" in data and int(data["n_ref_frames"]) == rdf_ref_count:
+                print(f"[Pool-AL] Loading cached RDF thresholds...")
+                if "rdf_thresholds" in data:
+                    rdf_thresholds = data["rdf_thresholds"].item()
+                else:
+                    rdf_thresholds = {(str(r[0]), str(r[1])): (float(r[2]), float(r[3])) for r in data["thresholds"]}
+        if rdf_thresholds is None:
+            print("[Pool-AL] Computing RDF thresholds from reference frames...")
+            rdf_thresholds = compute_rdf_thresholds_from_reference(
+                self.ds["val_frames_ref"],
+                stride=self.eval_cfg.get("rdf_stride", 5),
+                r_min_physical=self.eval_cfg.get("rdf_r_min_physical", 1.0),
+            )
+            np.savez_compressed(rdf_cache, rdf_thresholds=rdf_thresholds, n_ref_frames=rdf_ref_count)
 
         debug_plot_rdfs(self.ds["val_frames_ref"], rdf_thresholds)
         rdf_ok_mask = fast_filter_by_rdf_kdtree(pool_frames_thin, rdf_thresholds)

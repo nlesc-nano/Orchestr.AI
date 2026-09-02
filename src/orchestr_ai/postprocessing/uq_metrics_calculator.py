@@ -365,6 +365,7 @@ def run_uq_metrics(
     sigma_atom: np.ndarray,
     sigma_energy: Optional[np.ndarray] = None,
     split: str = "Eval",
+    split_label: Optional[str] = None,
     tag: str = "ensemble",
     log_path: str | Path = "metrics.log",
     ensemble_size: Optional[int] = None,
@@ -486,22 +487,32 @@ def run_uq_metrics(
         n_total = len(delta_c)
 
         print(f"\n[Calibration] Per-element calibration ({len(unique_elements)} elements, {n_total} components):")
+        provided_var = calibrators.get('cal_var_F') if calibrators is not None else None
+        provided_iso = calibrators.get('cal_iso_F') if calibrators is not None else None
+        if not isinstance(provided_var, PerElementCalibrator):
+            provided_var = None
+        if not isinstance(provided_iso, PerElementCalibrator):
+            provided_iso = None
         for elem in unique_elements:
             mask = force_symbols == elem
             d_e, s_e = delta_c[mask], sigma_c[mask]
-            if len(d_e) < 10:
-                vsc = VarianceScalingCalibrator().fit(delta_c, sigma_c)
-            else:
-                vsc = VarianceScalingCalibrator().fit(d_e, s_e)
+            vsc = provided_var.get(elem) if provided_var is not None else None
+            if vsc is None:
+                if len(d_e) < 10:
+                    vsc = VarianceScalingCalibrator().fit(delta_c, sigma_c)
+                else:
+                    vsc = VarianceScalingCalibrator().fit(d_e, s_e)
             per_elem_var[elem] = vsc
             sigma_c_cal_var[mask] = vsc.transform(s_e)
             print(f"    {elem:>4s}: s = {vsc.s:8.4f}  (n_components = {len(d_e)})")
 
-            try:
-                ic = IsotonicCalibrator().fit(d_e, vsc.transform(s_e))
-                per_elem_iso[elem] = ic
-            except Exception:
-                per_elem_iso[elem] = None
+            ic = provided_iso.get(elem) if provided_iso is not None else None
+            if ic is None and provided_iso is None:
+                try:
+                    ic = IsotonicCalibrator().fit(d_e, vsc.transform(s_e))
+                except Exception:
+                    ic = None
+            per_elem_iso[elem] = ic
 
         cal_var_F = PerElementCalibrator(per_elem_var)
         elem_counts = {e: int(np.sum(force_symbols == e)) for e in unique_elements}
@@ -862,7 +873,7 @@ def run_uq_metrics(
                 coverage_cal_var_e = np.array([])
                 coverage_cal_iso_e = np.array([])
 
-            base = f"uq_plot_data_{split.lower()}_{tag.lower()}"
+            base = f"uq_plot_data_{(split_label or split).lower()}_{tag.lower()}"
             if ensemble_size:
                 base += f"_ens{ensemble_size}"
             npz_path = Path("uq_plots") / f"{base}.npz"
@@ -952,4 +963,5 @@ def calculate_uq_metrics(  # noqa: C901  (complexity ignored – thin wrapper)
         save_plot_data=save_plot_data,
         calibration_factor=kwargs.get("calibration_factor", "global"),
         force_symbols=kwargs.get("force_symbols", None),
+        split_label=kwargs.get("split_label", None),
     )
