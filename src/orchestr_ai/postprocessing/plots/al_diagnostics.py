@@ -7,6 +7,8 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
 
+from orchestr_ai.postprocessing.metrics import _split_atom_vectors
+
 
 def _to_float(value, default=np.nan):
     try:
@@ -58,13 +60,14 @@ def read_al_diagnostics_csv(path):
 
 
 def _parse_per_atom_uncertainties(path):
-    """Return (elements_per_frame, sFnorm_per_frame_meV, sigma_E_per_frame_meV)."""
+    """Return (elements_per_frame, sFnorm_per_frame_meV, sigma_E_per_frame_meV, muFnorm_per_frame_meV)."""
     with open(path) as f:
         lines = f.readlines()
 
     elements_all = []
     sFnorm_all = []
     sigma_E_list = []
+    muFnorm_all = []
 
     i = 0
     while i < len(lines):
@@ -89,11 +92,18 @@ def _parse_per_atom_uncertainties(path):
 
         elements = []
         norms = []
+        muF_norms = []
         for j in range(n_atoms):
             parts = lines[i + 2 + j].split()
             if len(parts) >= 8:
                 elements.append(parts[0])
-                norms.append(float(parts[7]))  # sF_norm column
+                norms.append(float(parts[7]))
+                if len(parts) >= 9:
+                    muF_norms.append(float(parts[8]))
+        if muF_norms and len(muF_norms) == len(norms):
+            muFnorm_all.append(muF_norms)
+        else:
+            muFnorm_all.append(None)
 
         elements_all.append(elements)
         # Convert eV -> meV (×1000)
@@ -102,7 +112,15 @@ def _parse_per_atom_uncertainties(path):
 
         i += 2 + n_atoms
 
-    return elements_all, sFnorm_all, sigma_E_list
+    has_muF = any(x is not None for x in muFnorm_all)
+    if not has_muF:
+        muFnorm_all = None
+    elif all(x is not None for x in muFnorm_all):
+        muFnorm_all = [[v * 1000.0 for v in x] for x in muFnorm_all]
+    else:
+        muFnorm_all = None
+
+    return elements_all, sFnorm_all, sigma_E_list, muFnorm_all
 
 
 def _thresholds_for_state(metadata, state):
@@ -140,6 +158,7 @@ def _state_arrays(rows):
         "idx", "pool_row", "n_atoms", "gamma0", "dM", "Dgain", "raw_score",
         "E_pred", "E_pred_atom", "sigma_E", "sigma_E_atom", "sigma_F_max",
         "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max", "Fmax", "Fmean",
+        "env_margin", "rel_unc", "rel_weight",
     ]
     keys_bool = ["geom_ok", "caps_ok", "force_inf", "gamma_gate", "cal_ok", "ood", "selected", "shortlist"]
     out = {key: np.array([_to_float(_get_mapped(row, key)) for row in rows], dtype=float) for key in keys_float}
@@ -229,7 +248,7 @@ def _apply_robust_ylim(ax, y, arrays, *, floor_zero=False, threshold_values=()):
     return limits
 
 
-def _realistic_trace_limits(y, arrays, *, floor_zero=False, pad=0.05):
+def _realistic_trace_limits(y, arrays, *, floor_zero=False, pad=0.05, threshold_values=()):
     y = np.asarray(y, dtype=float)
     mask = _realistic_mask(arrays, y)
     vals = y[mask] if mask.shape == y.shape else y[np.isfinite(y)]
@@ -240,6 +259,9 @@ def _realistic_trace_limits(y, arrays, *, floor_zero=False, pad=0.05):
         return None
     lo = float(np.nanmin(vals))
     hi = float(np.nanmax(vals))
+    for v in threshold_values:
+        if np.isfinite(v):
+            hi = max(hi, float(v))
     if floor_zero:
         lo = 0.0
         hi_limit = hi * 1.05 if hi > 0.0 else 0.05
@@ -258,8 +280,8 @@ def _realistic_trace_limits(y, arrays, *, floor_zero=False, pad=0.05):
         return lo_limit, hi_limit
 
 
-def _apply_trace_ylim(ax, y, arrays, *, floor_zero=False):
-    limits = _realistic_trace_limits(y, arrays, floor_zero=floor_zero)
+def _apply_trace_ylim(ax, y, arrays, *, floor_zero=False, threshold_values=()):
+    limits = _realistic_trace_limits(y, arrays, floor_zero=floor_zero, threshold_values=threshold_values)
     if limits is None:
         return None
     ax.set_ylim(*limits)
@@ -274,8 +296,8 @@ def _apply_trace_ylim(ax, y, arrays, *, floor_zero=False):
     return limits
 
 
-def _plotly_trace_range(fig, row, y, arrays, *, floor_zero=False):
-    limits = _realistic_trace_limits(y, arrays, floor_zero=floor_zero)
+def _plotly_trace_range(fig, row, y, arrays, *, floor_zero=False, threshold_values=()):
+    limits = _realistic_trace_limits(y, arrays, floor_zero=floor_zero, threshold_values=threshold_values)
     if limits is not None:
         fig.update_yaxes(range=list(limits), row=row, col=1)
 
@@ -505,8 +527,10 @@ def plot_al_uncertainty_state(rows, metadata, state, out_dir="al_plots", dpi=300
     thr = _thresholds_for_state(metadata, state)
     x = arrays["idx"]
     os.makedirs(out_dir, exist_ok=True)
-    fig, axes = plt.subplots(5, 1, figsize=(11.0, 12.5), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(6, 1, figsize=(11.5, 15.0), sharex=True, constrained_layout=True)
     fig.suptitle(f"Pool AL uncertainty/acquisition: {state}", fontsize=14, fontweight="bold")
+
+    alpha = thr.get("envelope_alpha", np.nan)
 
     sigma_e_mev = arrays["sigma_E_atom"] * 1000.0
     e_keys = [("thr_sigma_E_low", "#636363", "low"), ("thr_sigma_E_hi_eff", "#969696", "upper cap"), ("hard_sigma_E_atom_min", "#b2182b", "hard floor")]
@@ -532,15 +556,27 @@ def plot_al_uncertainty_state(rows, metadata, state, out_dir="al_plots", dpi=300
     _apply_cap_ylim(axes[2], sigma_fmean_mev, thr.get("thr_sigma_Fmean_hi_eff", np.nan) * 1000.0)
     axes[2].set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/Å)")
 
-    axes[3].plot(x, arrays["raw_score"], lw=1.0, color="#8c510a")
-    _mark_events(axes[3], x, arrays["raw_score"], arrays)
-    _apply_score_ylim(axes[3], arrays["raw_score"], arrays, thr)
-    axes[3].set_ylabel("acquisition score")
-    axes[3].set_title("Acquisition score = leverage/novelty ranking used for final diverse selection", fontsize=10)
+    rel = np.asarray(arrays["rel_unc"], dtype=float)
+    axes[3].plot(x, rel, lw=1.0, color="#8e0152")
+    if np.isfinite(alpha):
+        axes[3].axhline(alpha, ls="--", lw=1.2, color="#c51b7d", alpha=0.9, label=f"α = {alpha:.3f}")
+    _mark_events(axes[3], x, rel, arrays)
+    _apply_trace_ylim(axes[3], rel, arrays, floor_zero=True,
+                         threshold_values=[alpha] if np.isfinite(alpha) else [])
+    axes[3].set_ylabel("Relative force uncertainty\nγ = σF / (‖F‖ + ε)")
+    # axes[3].set_title("Relative force uncertainty (ε = Atol/α; ranking weight = clip(γ/α, 0, 1))", fontsize=10)
+    # if np.isfinite(alpha):
+    #     axes[3].legend(loc="best", fontsize=8)
 
-    _plot_status_track(axes[4], x, arrays)
-    axes[4].set_ylabel("AL status")
-    axes[4].set_xlabel("Pool frame index")
+    axes[4].plot(x, arrays["raw_score"], lw=1.0, color="#8c510a")
+    _mark_events(axes[4], x, arrays["raw_score"], arrays)
+    _apply_score_ylim(axes[4], arrays["raw_score"], arrays, thr)
+    axes[4].set_ylabel("acquisition score")
+    axes[4].set_title("Acquisition score = leverage/novelty ranking (× relative-uncertainty weight)", fontsize=10)
+
+    _plot_status_track(axes[5], x, arrays)
+    axes[5].set_ylabel("AL status")
+    axes[5].set_xlabel("Pool frame index")
     for ax in axes:
         ax.grid(True, alpha=0.25)
     out_path = os.path.join(out_dir, f"al_uncertainty_{state}.png")
@@ -605,7 +641,14 @@ def plot_al_uncertainty_state_interactive(rows, metadata, state, out_dir="al_plo
     arrays = _state_arrays(rows)
     thr = _thresholds_for_state(metadata, state)
     x = arrays["idx"]
-    fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.045, subplot_titles=("Energy uncertainty", "Maximum force uncertainty", "Mean force uncertainty", "Acquisition score", "AL status"))
+    alpha = thr.get("envelope_alpha", np.nan)
+    fig = make_subplots(
+        rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.038,
+        subplot_titles=(
+            "Energy uncertainty", "Maximum force uncertainty", "Mean force uncertainty",
+            "Relative force uncertainty", "Acquisition score", "AL status",
+        ),
+    )
     panels = [
         (1, arrays["sigma_E_atom"] * 1000.0, "σE/atom", "#2166ac", [("thr_sigma_E_low", "#636363", "σE low"), ("thr_sigma_E_hi_eff", "#969696", "σE upper cap"), ("hard_sigma_E_atom_min", "#b2182b", "σE hard floor")], 1000.0, "σE/atom (meV)", "thr_sigma_E_hi_eff"),
         (2, arrays["sigma_F_max"] * 1000.0, "σF<sub>max</sub>", "#762a83", [("thr_sigma_F", "#636363", "σFmax low"), ("thr_sigma_F_hi_eff", "#969696", "σFmax upper cap"), ("hard_sigma_F_max_min", "#b2182b", "σFmax hard floor")], 1000.0, "σF<sub>max</sub> (meV/Å)", "thr_sigma_F_hi_eff"),
@@ -617,16 +660,25 @@ def plot_al_uncertainty_state_interactive(rows, metadata, state, out_dir="al_plo
         _add_plotly_events(fig, row, x, y, arrays, go)
         _plotly_cap_range(fig, row, thr.get(cap_key, np.nan) * scale)
         fig.update_yaxes(title_text=ylabel, row=row, col=1)
-    fig.add_trace(go.Scatter(x=x, y=arrays["raw_score"], mode="lines", name="acquisition score", line=dict(color="#8c510a")), row=4, col=1)
-    _add_plotly_events(fig, 4, x, arrays["raw_score"], arrays, go)
-    _plotly_score_range(fig, 4, arrays["raw_score"], arrays, thr)
-    fig.update_yaxes(title_text="acquisition score", row=4, col=1)
+
+    rel = np.asarray(arrays["rel_unc"], dtype=float)
+    fig.add_trace(go.Scatter(x=x, y=rel, mode="lines", name="γ = σF/(‖F‖+ε)", line=dict(color="#8e0152")), row=4, col=1)
+    _add_plotly_thresholds(fig, 4, x, thr, [("envelope_alpha", "#c51b7d", "α")], scale=1.0)
+    _add_plotly_events(fig, 4, x, rel, arrays, go)
+    _plotly_trace_range(fig, 4, rel, arrays, floor_zero=True, threshold_values=[alpha] if np.isfinite(alpha) else [])
+    fig.update_yaxes(title_text="γ = σF / (‖F‖ + ε)", row=4, col=1)
+
+    fig.add_trace(go.Scatter(x=x, y=arrays["raw_score"], mode="lines", name="acquisition score", line=dict(color="#8c510a")), row=5, col=1)
+    _add_plotly_events(fig, 5, x, arrays["raw_score"], arrays, go)
+    _plotly_score_range(fig, 5, arrays["raw_score"], arrays, thr)
+    fig.update_yaxes(title_text="acquisition score", row=5, col=1)
+
     for label, mask, ypos, color in (("Shortlist", arrays["shortlist"], 5, "black"), ("Uncertain", arrays["force_inf"], 4, "#d95f02"), ("OOD", arrays["ood"], 3, "#7b3294"), ("Failed caps", arrays["geom_ok"] & ~arrays["caps_ok"], 2, "#e66101"), ("Failed geom", ~arrays["geom_ok"], 1, "#b2182b")):
         if np.any(mask):
-            fig.add_trace(go.Scatter(x=x[mask], y=np.full(np.sum(mask), ypos), mode="markers", name=label, marker=dict(color=color, size=8)), row=5, col=1)
-    fig.update_yaxes(title_text="AL status", tickmode="array", tickvals=[1, 2, 3, 4, 5], ticktext=["failed geom", "failed caps", "OOD", "uncertain", "shortlist"], row=5, col=1)
-    fig.update_xaxes(title_text="Pool frame index", row=5, col=1)
-    fig.update_layout(title=f"Pool AL uncertainty/acquisition: {state}", height=1050, width=1150, hovermode="x unified", template="plotly_white")
+            fig.add_trace(go.Scatter(x=x[mask], y=np.full(np.sum(mask), ypos), mode="markers", name=label, marker=dict(color=color, size=8)), row=6, col=1)
+    fig.update_yaxes(title_text="AL status", tickmode="array", tickvals=[1, 2, 3, 4, 5], ticktext=["failed geom", "failed caps", "OOD", "uncertain", "shortlist"], row=6, col=1)
+    fig.update_xaxes(title_text="Pool frame index", row=6, col=1)
+    fig.update_layout(title=f"Pool AL uncertainty/acquisition: {state}", height=1350, width=1150, hovermode="x unified", template="plotly_white")
     out_path = os.path.join(out_dir, f"al_uncertainty_{state}.html")
     fig.write_html(out_path, include_plotlyjs="cdn")
     print(f"[AL Plot] Saved {out_path}")
@@ -797,7 +849,7 @@ def generate_per_atom_uncertainty_plots(
     # ------------------------------------------------------------------
     # Parse XYZ
     # ------------------------------------------------------------------
-    elements_all, sFnorm_all, _sigma_E = _parse_per_atom_uncertainties(xyz_path)
+    elements_all, sFnorm_all, _sigma_E, muFnorm_all = _parse_per_atom_uncertainties(xyz_path)
     n_frames = len(elements_all)
     if n_frames == 0:
         return ""
@@ -819,11 +871,24 @@ def generate_per_atom_uncertainty_plots(
     thr_sfmax = thresholds.get("thr_sigma_F", np.nan)
     thr_sfmax_hi = thresholds.get("thr_sigma_F_hi_eff", np.nan)
     thr_sfmax_hard = thresholds.get("hard_sigma_F_max_min", np.nan)
+    env_alpha = thresholds.get("envelope_alpha", np.nan)
+    env_atol = thresholds.get("envelope_floor", np.nan)
+    if not np.isfinite(env_alpha):
+        env_alpha = 0.20
+    if not np.isfinite(env_atol):
+        env_atol = 0.05
 
     def _thr_line(ax, value, color, scale=1000.0):
         val = float(value) * scale if np.isfinite(float(value)) else np.nan
         if not np.isnan(val):
             ax.axhline(val, ls="--", lw=1.0, color=color, alpha=0.85)
+
+    def _gamma_ylim(ax, series_list):
+        vals = [v for series in series_list for v in series if np.isfinite(v)]
+        if not vals:
+            return
+        top = max(max(vals), env_alpha if np.isfinite(env_alpha) else 0.0)
+        ax.set_ylim(0.0, top * 1.1)
 
     # ------------------------------------------------------------------
     # Per-frame stats
@@ -831,9 +896,26 @@ def generate_per_atom_uncertainty_plots(
     sf_max = np.array([max(nrm) if nrm else np.nan for nrm in sFnorm_all], dtype=float)
     sf_mean = np.array([np.mean(nrm) if nrm else np.nan for nrm in sFnorm_all], dtype=float)
 
+    # Relative force uncertainty gamma = sigmaF / (||F|| + eps), eps = Atol/alpha
+    # (meV-based ratio is unitless; eps in meV)
+    eps_mev = env_atol * 1000.0 / env_alpha if env_alpha > 0 else np.nan
+    has_gamma = muFnorm_all is not None and np.isfinite(eps_mev)
+    gamma_atoms_all = []
+    if has_gamma:
+        for sf, mf in zip(sFnorm_all, muFnorm_all):
+            gamma_atoms_all.append([s / (mu + eps_mev) for s, mu in zip(sf, mf)])
+    else:
+        gamma_atoms_all = [None] * n_frames
+    gamma_per_frame = [
+        (max(g) if g else np.nan) if g is not None else np.nan
+        for g in gamma_atoms_all
+    ]
+
     # Per-element per-frame stats
     elem_sfmax = defaultdict(list)
     elem_sfmean = defaultdict(list)
+    elem_gammax = defaultdict(list)
+    elem_gammamean = defaultdict(list)
     for els, nrm in zip(elements_all, sFnorm_all):
         by_elem = defaultdict(list)
         for e, v in zip(els, nrm):
@@ -841,17 +923,26 @@ def generate_per_atom_uncertainty_plots(
         for e, vals in by_elem.items():
             elem_sfmax[e].append(max(vals))
             elem_sfmean[e].append(np.mean(vals))
+    if has_gamma:
+        for els, gammas in zip(elements_all, gamma_atoms_all):
+            by_elem = defaultdict(list)
+            for e, g in zip(els, gammas):
+                by_elem[e].append(g)
+            for e, vals in by_elem.items():
+                elem_gammax[e].append(max(vals))
+                elem_gammamean[e].append(np.mean(vals))
 
     elements_sorted = sorted(elem_sfmax.keys())
 
     # ------------------------------------------------------------------
-    # Plot: 3 x 2 grid
+    # Plot: 3 x 3 grid
     #   col 1: sigma_F_mean  (violin / evolution / total)
     #   col 2: sigma_F_max   (violin / per-element evolution / total)
+    #   col 3: relative force gamma (violin / per-element evolution / total)
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(3, 2, figsize=(25, 16),
+    fig, axes = plt.subplots(3, 3, figsize=(37, 16),
                              gridspec_kw={"height_ratios": [1, 1.5, 1]})
-    (ax_vln_mean, ax_vln_max), (ax_evo_mean, ax_evo_max), (ax_total_mean, ax_total_max) = axes
+    (ax_vln_mean, ax_vln_max, ax_vln_gamma), (ax_evo_mean, ax_evo_max, ax_evo_gamma), (ax_total_mean, ax_total_max, ax_total_gamma) = axes
 
     colors = plt.cm.tab20(np.linspace(0, 1, len(elements_sorted)))
     elem_color = {e: colors[i] for i, e in enumerate(elements_sorted)}
@@ -883,7 +974,7 @@ def generate_per_atom_uncertainty_plots(
     ax_vln_mean.set_xticklabels(elements_sorted)
     _add_fmean_lines(ax_vln_mean)
     ax_vln_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
-    ax_vln_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ distribution")
+    ax_vln_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ distribution", fontsize=14, fontweight="bold")
     ax_vln_mean.grid(axis="y", alpha=0.3)
 
     # -- Row 2 (col 1): evolution sigma_F_mean --
@@ -892,7 +983,7 @@ def generate_per_atom_uncertainty_plots(
                          label=e, color=elem_color[e])
     _add_fmean_lines(ax_evo_mean)
     ax_evo_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
-    ax_evo_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ evolution")
+    # ax_evo_mean.set_title(r"Per-element $\sigma F_{\mathrm{mean}}$ evolution")
     ax_evo_mean.legend(fontsize=12, ncol=len(elements_sorted) + 1)
     ax_evo_mean.grid(alpha=0.3)
 
@@ -911,7 +1002,7 @@ def generate_per_atom_uncertainty_plots(
     ax_vln_max.set_xticklabels(elements_sorted)
     _add_fmax_lines(ax_vln_max)
     ax_vln_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
-    ax_vln_max.set_title(r"Per-element $\sigma F_{\max}$ distribution")
+    ax_vln_max.set_title(r"Per-element $\sigma F_{\max}$ distribution", fontsize=14, fontweight="bold")
     ax_vln_max.grid(axis="y", alpha=0.3)
 
     # -- Row 2 (col 2): evolution sigma_F_max --
@@ -920,24 +1011,73 @@ def generate_per_atom_uncertainty_plots(
                         label=e, color=elem_color[e])
     _add_fmax_lines(ax_evo_max)
     ax_evo_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
-    ax_evo_max.set_title(r"Per-element $\sigma F_{\max}$ evolution")
+    # ax_evo_max.set_title(r"Per-element $\sigma F_{\max}$ evolution")
     ax_evo_max.legend(fontsize=12, ncol=len(elements_sorted))
     ax_evo_max.grid(alpha=0.3)
 
+    # -- Row 1 (col 3): violin relative force gamma --
+    if has_gamma:
+        ax_vln_gamma.set_axisbelow(True)
+        vln_data_gamma = [elem_gammax[e] for e in elements_sorted]
+        vp3 = ax_vln_gamma.violinplot(vln_data_gamma, positions=positions,
+                                      showmeans=True, showmedians=False, showextrema=False)
+        for i, body in enumerate(vp3["bodies"]):
+            body.set_facecolor(colors[i])
+            body.set_alpha(1)
+            body.set_edgecolor("#202020")
+            body.set_zorder(2)
+        vp3["cmeans"].set_color("black")
+        ax_vln_gamma.set_xticks(positions)
+        ax_vln_gamma.set_xticklabels(elements_sorted)
+        _thr_line(ax_vln_gamma, env_alpha, "#c51b7d", scale=1.0)
+        _gamma_ylim(ax_vln_gamma, vln_data_gamma)
+        ax_vln_gamma.set_ylabel(r"$\gamma$ = $\sigma F$/($\|F\|$+$\varepsilon$)")
+        ax_vln_gamma.set_title(r"Per-element relative force $\gamma$ distribution", fontsize=14, fontweight="bold")
+        ax_vln_gamma.grid(axis="y", alpha=0.3)
+    else:
+        ax_vln_gamma.text(0.5, 0.5, "relative force not available\n(no muF_norm column in XYZ)",
+                          ha="center", va="center", fontsize=12, color="#888888")
+        ax_vln_gamma.set_title(r"Per-element relative force $\gamma$ distribution")
+
+    # -- Row 2 (col 3): evolution relative force gamma --
+    if has_gamma:
+        for e in elements_sorted:
+            ax_evo_gamma.plot(elem_gammax[e], linewidth=0.6, alpha=1,
+                              label=e, color=elem_color[e])
+        _thr_line(ax_evo_gamma, env_alpha, "#c51b7d", scale=1.0)
+        _gamma_ylim(ax_evo_gamma, [elem_gammax[e] for e in elements_sorted])
+        ax_evo_gamma.set_ylabel(r"$\gamma$ = $\sigma F$/($\|F\|$+$\varepsilon$)")
+        # ax_evo_gamma.set_title(r"Per-element relative force $\gamma$ evolution")
+        ax_evo_gamma.legend(fontsize=12, ncol=len(elements_sorted))
+        ax_evo_gamma.grid(alpha=0.3)
+
+    # -- Row 3 (col 3): total relative force gamma evolution --
+    if has_gamma:
+        ax_total_gamma.plot(gamma_per_frame, linewidth=1, color="black", alpha=1, label="Total")
+        _thr_line(ax_total_gamma, env_alpha, "#c51b7d", scale=1.0)
+        _gamma_ylim(ax_total_gamma, [gamma_per_frame])
+        ax_total_gamma.set_xlabel("Frame index")
+        ax_total_gamma.set_ylabel(r"$\gamma$ = $\sigma F$/($\|F\|$+$\varepsilon$)")
+        # ax_total_gamma.set_title(r"Total $\gamma$ evolution (frame max over atoms)")
+        ax_total_gamma.legend(fontsize=12)
+        ax_total_gamma.grid(alpha=0.3)
+
     # -- Row 3 (col 1): total sigma_F_mean evolution --
-    ax_total_mean.plot(sf_mean, linewidth=1, color="black", alpha=1)
+    ax_total_mean.plot(sf_mean, linewidth=1, color="black", alpha=1, label="Total")
     _add_fmean_lines(ax_total_mean)
     ax_total_mean.set_xlabel("Frame index")
     ax_total_mean.set_ylabel(r"$\sigma F_{\mathrm{mean}}$ (meV/$\AA$)")
-    ax_total_mean.set_title(r"Total $\sigma F_{\mathrm{mean}}$ evolution")
+    # ax_total_mean.set_title(r"Total $\sigma F_{\mathrm{mean}}$ evolution")
+    ax_total_mean.legend(fontsize=12)
     ax_total_mean.grid(alpha=0.3)
 
     # -- Row 3 (col 2): total sigma_F_max evolution --
-    ax_total_max.plot(sf_max, linewidth=1, color="black", alpha=1)
+    ax_total_max.plot(sf_max, linewidth=1, color="black", alpha=1, label="Total")
     _add_fmax_lines(ax_total_max)
     ax_total_max.set_xlabel("Frame index")
     ax_total_max.set_ylabel(r"$\sigma F_{\max}$ (meV/$\AA$)")
-    ax_total_max.set_title(r"Total $\sigma F_{\max}$ evolution")
+    # ax_total_max.set_title(r"Total $\sigma F_{\max}$ evolution")
+    ax_total_max.legend(fontsize=12)
     ax_total_max.grid(alpha=0.3)
 
     plt.tight_layout()
@@ -946,4 +1086,76 @@ def generate_per_atom_uncertainty_plots(
     plt.close(fig)
     print(f"[AL Plot] Saved {out_path}")
 
+    return out_path
+
+
+def generate_force_envelope_scatter(
+    pool_frames,
+    mu_F_pool_flat,
+    sigma_F_pool_flat,
+    rdf_ok_mask,
+    sel_rel_indices,
+    *,
+    alpha=0.20,
+    atol=0.05,
+    out_dir="uq_plots",
+):
+    """Scatter σF vs ‖F‖ per atom with the envelope trigger boundary.
+
+    Answers: do high-σF atoms also carry high *relative* force error?
+    Points above the line σF = Atol + α·‖F‖ are envelope-triggered.
+    """
+    if mu_F_pool_flat is None or sigma_F_pool_flat is None:
+        print("[EnvelopeScatter] Per-atom force arrays unavailable; skipping.")
+        return
+    muF = np.asarray(mu_F_pool_flat, dtype=float)
+    sigF = np.asarray(sigma_F_pool_flat, dtype=float)
+    frames = _split_atom_vectors(muF, pool_frames)
+    sig_frames = _split_atom_vectors(sigF, pool_frames)
+    if len(frames) != len(pool_frames) or len(sig_frames) != len(pool_frames):
+        print("[EnvelopeScatter] Frame/array mismatch; skipping.")
+        return
+
+    force_mag = []
+    sigma_mag = []
+    frame_of = []
+    for i, (mf, sf) in enumerate(zip(frames, sig_frames)):
+        fm = np.linalg.norm(np.asarray(mf, dtype=float).reshape(-1, 3), axis=1)
+        sm = np.linalg.norm(np.asarray(sf, dtype=float).reshape(-1, 3), axis=1)
+        force_mag.append(fm)
+        sigma_mag.append(sm)
+        frame_of.extend([i] * len(fm))
+    force_mag = np.concatenate(force_mag)
+    sigma_mag = np.concatenate(sigma_mag)
+    frame_of = np.asarray(frame_of, dtype=int)
+
+    rdf_ok = np.repeat(
+        np.asarray(rdf_ok_mask, dtype=bool) if rdf_ok_mask is not None else np.ones(len(pool_frames), dtype=bool),
+        [len(f) for f in frames],
+    )
+    sel_set = set(int(i) for i in (sel_rel_indices or []))
+    is_sel = np.isin(frame_of, list(sel_set))
+
+    fmax = max(force_mag.max(), 0.1)
+    line_f = np.linspace(0, fmax, 200)
+    line_s = atol + alpha * line_f
+
+    os.makedirs(out_dir, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.0, 5.5))
+    ax.scatter(force_mag[~rdf_ok], sigma_mag[~rdf_ok], s=5, color="#b2182b", alpha=0.35, label="failed RDF")
+    ax.scatter(force_mag[rdf_ok & ~is_sel], sigma_mag[rdf_ok & ~is_sel], s=5, color="#4d4d4d", alpha=0.30, label="pool")
+    ax.scatter(force_mag[rdf_ok & is_sel], sigma_mag[rdf_ok & is_sel], s=16, color="#d95f02", alpha=0.85, label="selected")
+    ax.plot(line_f, line_s, ls="--", lw=1.5, color="#276419", label=f"Atol + α·‖F‖ (α={alpha:.2f}, Atol={atol:.4g})")
+    ax.fill_between(line_f, line_s, atol, where=(line_s >= atol), color="#276419", alpha=0.10, label="envelope trigger region")
+    ax.set_xlabel(r"$\|\mathbf{F}\|$ (eV/Å)")
+    ax.set_ylabel(r"$\sigma_F$ (eV/Å)")
+    ax.set_title("Per-atom force uncertainty vs force magnitude")
+    ax.legend(loc="best", fontsize=8)
+    ax.set_xlim(0, fmax * 1.02)
+    ax.set_ylim(0, max(sigma_mag.max(), atol * 1.1) * 1.05)
+    ax.grid(True, alpha=0.25)
+    out_path = os.path.join(out_dir, "force_envelope_scatter.png")
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    print(f"[EnvelopeScatter] Saved {out_path}")
     return out_path

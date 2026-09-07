@@ -41,7 +41,7 @@ def _std_from_sums(sum_values, sum_sq_values, n_samples):
     return np.sqrt(np.maximum(var, 0.0))
 
 
-def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=None, n_atoms_per_frame=None):
+def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=None, n_atoms_per_frame=None, mu_F=None):
     """Write per-atom force uncertainties to an XYZ-like file.
 
     Parameters
@@ -54,6 +54,10 @@ def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=Non
         Pool frames with atom symbols and positions.
     output_path : str
         Path for the output XYZ file.
+    mu_F : ndarray or None
+        Flat array of per-atom mean force components (n_total_atoms * 3).
+        Written as an extra muF_norm column when provided (enables
+        relative-force gamma plots).
     n_atoms_per_frame : ndarray or None
         Atom counts per frame. Computed from frames if None.
     """
@@ -62,6 +66,14 @@ def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=Non
         return
 
     sigma_F_frames = _split_atom_vectors(sigma_F, frames)
+
+    if mu_F is not None:
+        mu_F_frames = _split_atom_vectors(mu_F, frames)
+        if len(mu_F_frames) != len(sigma_F_frames):
+            print("[PerAtomUQ] mu_F atom count mismatch; ignoring mu_F.")
+            mu_F_frames = None
+    else:
+        mu_F_frames = None
 
     if n_atoms_per_frame is None:
         n_atoms_per_frame = np.array([len(fr) for fr in frames], dtype=int)
@@ -76,6 +88,7 @@ def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=Non
 
             # Per-atom force uncertainty magnitude (L2 norm)
             sF_norm = np.linalg.norm(sF_frame, axis=1)
+            muF_norm = np.linalg.norm(mu_F_frames[i], axis=1) if mu_F_frames is not None else None
 
             # Header line with energy uncertainty
             if mu_E is not None and i < len(mu_E):
@@ -87,10 +100,13 @@ def write_per_atom_uncertainties(sigma_F, sigma_E, frames, output_path, mu_E=Non
             fh.write(f"frame={i} energy={energy_val:.6f} sigma_E={sigma_e:.6f}\n")
 
             for j in range(n_atoms):
-                fh.write(f"{symbols[j]:<2} "
-                         f"{positions[j, 0]:12.6f} {positions[j, 1]:12.6f} {positions[j, 2]:12.6f} "
-                         f"{sF_frame[j, 0]:12.6f} {sF_frame[j, 1]:12.6f} {sF_frame[j, 2]:12.6f} "
-                         f"{sF_norm[j]:12.6f}\n")
+                line = (f"{symbols[j]:<2} "
+                        f"{positions[j, 0]:12.6f} {positions[j, 1]:12.6f} {positions[j, 2]:12.6f} "
+                        f"{sF_frame[j, 0]:12.6f} {sF_frame[j, 1]:12.6f} {sF_frame[j, 2]:12.6f} "
+                        f"{sF_norm[j]:12.6f}")
+                if muF_norm is not None:
+                    line += f" {muF_norm[j]:12.6f}"
+                fh.write(line + "\n")
 
     n_frames = len(frames)
     n_atoms_total = int(sum(n_atoms_per_frame))

@@ -49,7 +49,7 @@ from orchestr_ai.postprocessing.active_learning import (
     write_pool_al_diagnostics_csv,
 )
 from orchestr_ai.postprocessing.plots.al_diagnostics import (
-    generate_al_diagnostic_plots, generate_per_atom_uncertainty_plots
+    generate_al_diagnostic_plots, generate_per_atom_uncertainty_plots, generate_force_envelope_scatter
     )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
@@ -1654,6 +1654,14 @@ def _safe_load_model(model_path: str, device: torch.device, force_dtype=torch.fl
     return mdl
 
 
+def _thin_flat_pool(flat, pool_frames, thin_idx):
+    """Slice full-pool flat vectors down to the thinned pool frame list."""
+    if flat is None:
+        return None
+    frames = _split_atom_vectors(flat, pool_frames)
+    return np.concatenate([np.asarray(frames[i], dtype=float) for i in thin_idx]).flatten()
+
+
 class EvaluationPipeline:
     """Orchestrates the full MLFF evaluation and Active Learning pipeline."""
     
@@ -2039,6 +2047,7 @@ class EvaluationPipeline:
         )
         if self.do_plot:
             fit_set_name = "Cal" if self.ds.get("fit_label") == "cal" else "Val"
+            plot_ensemble_histograms(mu_E_frame, sigma_E_raw, mu_F_comp, sigma_F_flat.flatten())
             generate_uq_plots(metrics_cal["npz_path"], fit_set_name, tag, calibration="var")
             if metrics_eval is not None:
                 generate_uq_plots(metrics_eval["npz_path"], "Val", tag, calibration="var")
@@ -2133,6 +2142,7 @@ class EvaluationPipeline:
         )
         if self.do_plot:
             fit_set_name = "Cal" if self.ds.get("fit_label") == "cal" else "Val"
+            plot_ensemble_histograms(mu_E_frame, sigma_E_raw, mu_F_comp, sigma_F_flat.flatten())
             generate_uq_plots(metrics_cal["npz_path"], fit_set_name, tag, calibration="var")
             if metrics_eval is not None:
                 generate_uq_plots(metrics_eval["npz_path"], "Val", tag, calibration="var")
@@ -2499,6 +2509,9 @@ class EvaluationPipeline:
         mu_E_pool_other = None
         sigma_E_pool_other = None
         sigma_F_pool_other = None
+        mu_F_pool_other = None
+        mu_F_pool = None
+        sigma_F_pool = None
 
         if has_multihead and str(self.eval_cfg.get("mode", "all")).lower() == "active_learning":
             print("[Pool-AL] Dual-head AL: collecting primary and secondary pool predictions from one ensemble pass.")
@@ -2518,6 +2531,7 @@ class EvaluationPipeline:
             mu_E_pool_other = pool_stats_other["mu_E"]
             sigma_E_pool_other = pool_stats_other["sigma_E"]
             sigma_F_pool_other = pool_stats_other["sigma_F"]
+            mu_F_pool_other = pool_stats_other["mu_F"]
             used_one_pass_dual_pool = True
             pool_cache_mode = "stats"
         elif pool_cache_mode == "raw":
@@ -2633,6 +2647,11 @@ class EvaluationPipeline:
                 print(f"[Pool-AL] Successfully evaluated original head '{orig_mace_head}' and other head '{other_head}' uncertainties.")
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
         F_pool_thin = mu_L_pool[thin_idx].astype(float)
+
+        mu_F_pool_env = _thin_flat_pool(mu_F_pool, pool_frames, thin_idx)
+        sigma_F_pool_env = _thin_flat_pool(sigma_F_pool, pool_frames, thin_idx)
+        mu_F_pool_other_env = _thin_flat_pool(mu_F_pool_other, pool_frames, thin_idx)
+        sigma_F_pool_other_env = _thin_flat_pool(sigma_F_pool_other, pool_frames, thin_idx)
 
         # --- Compute RDF thresholds and physical mask first ---
         rdf_cache = "rdf_thresholds_cache.npz"
@@ -2840,10 +2859,13 @@ class EvaluationPipeline:
             expected_abs_F_mean = sigma_F_pool_mean_thin * _GAUSSIAN_SIGMA_TO_ABS
             expected_abs_F_max = sigma_F_pool_max_thin * _GAUSSIAN_SIGMA_TO_ABS
 
+        if sigma_F_pool is not None:
+            sigma_F_pool_env = _thin_flat_pool(sigma_F_pool, pool_frames, thin_idx)
+
         # --- Per-atom uncertainty ---
         if sigma_F_pool is not None:
             per_atom_xyz = self.eval_cfg.get("per_atom_uncertainty_file", "per_atom_uncertainty.xyz")
-            write_per_atom_uncertainties(sigma_F_pool, sigma_E_pool, pool_frames, per_atom_xyz, mu_E=mu_E_pool)
+            write_per_atom_uncertainties(sigma_F_pool, sigma_E_pool, pool_frames, per_atom_xyz, mu_E=mu_E_pool, mu_F=mu_F_pool)
 
         sigma_E_pool_orig_thin = sigma_E_pool_orig[thin_idx].astype(float) if sigma_E_pool_orig is not None else None
         sigma_F_pool_orig_thin = None
@@ -3054,6 +3076,7 @@ class EvaluationPipeline:
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
                     frame_mean_force_pool=frame_mean_force_pool_thin,
+                    mu_F_pool=mu_F_pool_env, sigma_F_pool=sigma_F_pool_env,
                     calibration_in_support=calibration_in_support,
                     ood_risk_mask=ood_risk_mask,
                     expected_abs_E_atom=expected_abs_E_atom,
@@ -3071,6 +3094,15 @@ class EvaluationPipeline:
                     hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
                     large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
                     surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
+                    envelope_alpha=self.eval_cfg.get("envelope_alpha", 0.20),
+                    envelope_floor=self.eval_cfg.get("envelope_floor", 0.05),
+                    pool_hi_k=self.eval_cfg.get("pool_hi_k", 3.0),
+                    abs_ceiling_sE_atom=self.eval_cfg.get("abs_ceiling_sE_atom", 0.010),
+                    abs_ceiling_sF_max=self.eval_cfg.get("abs_ceiling_sF_max", 0.25),
+                    abs_ceiling_sF_mean=self.eval_cfg.get("abs_ceiling_sF_mean", 0.20),
+                    relative_uncertainty_weight=_parse_bool_like(
+                        self.eval_cfg.get("relative_uncertainty_weight"), True
+                    ),
                     stratify_train_by_size=_parse_bool_like(
                         self.eval_cfg.get("stratify_train_by_size"), True
                     ),
@@ -3108,6 +3140,7 @@ class EvaluationPipeline:
                         sigma_F_pool_mean=sigma_F_pool_mean_other_thin, sigma_F_pool_max=sigma_F_pool_max_other_thin,
                         frame_max_force_pool=frame_max_force_pool_thin,
                         frame_mean_force_pool=frame_mean_force_pool_thin,
+                        mu_F_pool=mu_F_pool_other_env, sigma_F_pool=sigma_F_pool_other_env,
                         calibration_in_support=calibration_in_support_other,
                         ood_risk_mask=ood_risk_mask_other,
                         expected_abs_E_atom=expected_abs_E_atom_other,
@@ -3125,6 +3158,15 @@ class EvaluationPipeline:
                         hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
                         large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
                         surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
+                    envelope_alpha=self.eval_cfg.get("envelope_alpha", 0.20),
+                    envelope_floor=self.eval_cfg.get("envelope_floor", 0.05),
+                    pool_hi_k=self.eval_cfg.get("pool_hi_k", 3.0),
+                    abs_ceiling_sE_atom=self.eval_cfg.get("abs_ceiling_sE_atom", 0.010),
+                    abs_ceiling_sF_max=self.eval_cfg.get("abs_ceiling_sF_max", 0.25),
+                    abs_ceiling_sF_mean=self.eval_cfg.get("abs_ceiling_sF_mean", 0.20),
+                    relative_uncertainty_weight=_parse_bool_like(
+                        self.eval_cfg.get("relative_uncertainty_weight"), True
+                    ),
                         stratify_train_by_size=_parse_bool_like(
                             self.eval_cfg.get("stratify_train_by_size"), True
                         ),
@@ -3161,6 +3203,7 @@ class EvaluationPipeline:
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
                     frame_mean_force_pool=frame_mean_force_pool_thin,
+                    mu_F_pool=mu_F_pool_env, sigma_F_pool=sigma_F_pool_env,
                     calibration_in_support=calibration_in_support,
                     ood_risk_mask=ood_risk_mask,
                     expected_abs_E_atom=expected_abs_E_atom,
@@ -3178,6 +3221,15 @@ class EvaluationPipeline:
                     hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
                     large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
                     surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
+                    envelope_alpha=self.eval_cfg.get("envelope_alpha", 0.20),
+                    envelope_floor=self.eval_cfg.get("envelope_floor", 0.05),
+                    pool_hi_k=self.eval_cfg.get("pool_hi_k", 3.0),
+                    abs_ceiling_sE_atom=self.eval_cfg.get("abs_ceiling_sE_atom", 0.010),
+                    abs_ceiling_sF_max=self.eval_cfg.get("abs_ceiling_sF_max", 0.25),
+                    abs_ceiling_sF_mean=self.eval_cfg.get("abs_ceiling_sF_mean", 0.20),
+                    relative_uncertainty_weight=_parse_bool_like(
+                        self.eval_cfg.get("relative_uncertainty_weight"), True
+                    ),
                     stratify_train_by_size=_parse_bool_like(
                         self.eval_cfg.get("stratify_train_by_size"), True
                     ),
@@ -3259,6 +3311,18 @@ class EvaluationPipeline:
                         )
                     write(fh, atoms, format="xyz", comment=comment)
             print(f"[Pool-AL] Saved {len(sel_global_idx)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
+
+        if self.do_plot:
+            generate_force_envelope_scatter(
+                pool_frames_thin,
+                mu_F_pool_env,
+                sigma_F_pool_env,
+                rdf_ok_mask,
+                sel_rel_thin if isinstance(sel_rel_thin, (list, np.ndarray)) else [],
+                alpha=float(self.eval_cfg.get("envelope_alpha", 0.20)),
+                atol=float(self.eval_cfg.get("envelope_floor", 0.05)),
+                out_dir=self.eval_cfg.get("uq_plot_dir", "uq_plots"),
+            )
 
 
 def run_eval(config):

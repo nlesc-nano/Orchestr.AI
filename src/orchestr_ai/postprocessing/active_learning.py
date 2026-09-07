@@ -360,6 +360,12 @@ class _PoolActiveLearner:
             "hard_sigma_F_mean_min": getattr(self, "hard_sigma_F_mean_min", np.nan),
             "hard_sigma_F_max_min": getattr(self, "hard_sigma_F_max_min", np.nan),
             "train_Fmax_hard_cap": getattr(self, "train_Fmax_hard_cap", np.nan),
+            "envelope_alpha": getattr(self, "envelope_alpha", np.nan),
+            "envelope_floor": getattr(self, "envelope_floor", np.nan),
+            "pool_hi_k": getattr(self, "pool_hi_k", np.nan),
+            "abs_ceiling_sE_atom": getattr(self, "abs_ceiling_sE_atom", np.nan),
+            "abs_ceiling_sF_max": getattr(self, "abs_ceiling_sF_max", np.nan),
+            "abs_ceiling_sF_mean": getattr(self, "abs_ceiling_sF_mean", np.nan),
             "calibration_support_fraction": float(np.mean(self.calibration_in_support)) if hasattr(self, "calibration_in_support") else np.nan,
         }
 
@@ -401,6 +407,9 @@ class _PoolActiveLearner:
                 "ood": int(R["ood_risk"]),
                 "Fmax": float(R["Fmax"]),
                 "Fmean": float(R["Fmean"]),
+                "env_margin": float(R["env_margin"]),
+                "rel_unc": float(R["rel_unc"]),
+                "rel_weight": float(R["rel_weight"]),
                 "selected": int(R["selected"]),
                 "shortlist": int(pidx in shortlist_set),
             })
@@ -544,6 +553,61 @@ class _PoolActiveLearner:
             self.frame_max_force_pool = _frame_force_max(self.mu_F_pool_frames)
             self.frame_mean_force_pool = _frame_sigma_mean_norm(self.mu_F_pool_frames)
 
+        # ---------------------------------------------------------------
+        # Relative force uncertainty envelope margin: σF - α·‖F‖ (dual-tolerance style)
+        # Relative uncertainty γ = σF/(‖F‖+ε) (ε = Atol/α) is used for ranking weights.
+        # ---------------------------------------------------------------
+        self.envelope_alpha = float(getattr(self, "envelope_alpha", 0.20))
+        self.envelope_floor = float(getattr(self, "envelope_floor", 0.05))
+        eps_rel = self.envelope_floor / max(self.envelope_alpha, 1e-9)
+
+        use_full_envelope = (
+            getattr(self, "sigma_F_pool", None) is not None
+            and getattr(self, "mu_F_pool", None) is not None
+            and len(np.asarray(self.sigma_F_pool)) == int(np.sum(self.pool_atom_counts)) * 3
+        )
+        if use_full_envelope:
+            sigma_F_pool_frames = _as_frame_arrays(
+                self.sigma_F_pool,
+                frame_counts=self.pool_atom_counts.astype(int),
+                name="sigma_F_pool_env",
+            )
+            mu_F_pool_frames = _as_frame_arrays(
+                self.mu_F_pool,
+                frame_counts=self.pool_atom_counts.astype(int),
+                name="mu_F_pool_env",
+            )
+            margins, rel_uncs = [], []
+            for sf, mf in zip(sigma_F_pool_frames, mu_F_pool_frames):
+                sigma_atom = np.linalg.norm(np.asarray(sf, dtype=float).reshape(-1, 3), axis=1)
+                force_atom = np.linalg.norm(np.asarray(mf, dtype=float).reshape(-1, 3), axis=1)
+                margins.append(float(np.max(sigma_atom - self.envelope_alpha * force_atom)) if sigma_atom.size else -np.inf)
+                rel_uncs.append(float(np.nanmax(sigma_atom / (force_atom + eps_rel))) if sigma_atom.size else np.nan)
+            self.frame_env_margin = np.asarray(margins, dtype=float)
+            self.frame_rel_unc = np.asarray(rel_uncs, dtype=float)
+        else:
+            frame_mean_force_pool = np.asarray(self.frame_mean_force_pool, dtype=float)
+            env_mean = np.where(
+                np.isfinite(frame_mean_force_pool),
+                np.asarray(self.sigma_F_pool_mean, dtype=float) - self.envelope_alpha * frame_mean_force_pool,
+                -np.inf,
+            )
+            env_max = np.asarray(self.sigma_F_pool_max, dtype=float) - self.envelope_alpha * np.asarray(
+                self.frame_max_force_pool, dtype=float
+            )
+            self.frame_env_margin = np.fmax(env_mean, env_max)
+            self.frame_rel_unc = np.where(
+                np.isfinite(frame_mean_force_pool),
+                np.asarray(self.sigma_F_pool_mean, dtype=float) / (frame_mean_force_pool + eps_rel),
+                np.nan,
+            )
+        print(
+            f"[AL] Force envelope: α={self.envelope_alpha:.3f}, Atol={self.envelope_floor:.4g} eV/Å "
+            f"(ε={eps_rel:.4g}). Frame margins: min={np.nanmin(self.frame_env_margin):.4g}, "
+            f"max={np.nanmax(self.frame_env_margin):.4g}, >Atol: "
+            f"{int(np.sum(self.frame_env_margin > self.envelope_floor))}/{len(self.frame_env_margin)} frames."
+        )
+
         # Baseline Thresholds (optional stratification by cluster size for mixed train sets)
         stratify = bool(getattr(self, "stratify_train_by_size", False))
         size_split = int(getattr(self, "size_split_atoms", self.large_cluster_threshold))
@@ -626,6 +690,22 @@ class _PoolActiveLearner:
         # ---------------------------------------------------------
         ok_idx = np.where(self.rdf_ok_mask)[0]
 
+        # Absolute physical ceilings (non-negotiable red zone) and robust
+        # pool-statistic parameters shared by both branches below.
+        self.pool_hi_k = float(getattr(self, "pool_hi_k", 3.0))
+        self.abs_ceiling_sE_atom = float(getattr(self, "abs_ceiling_sE_atom", 0.010))
+        self.abs_ceiling_sF_max = float(getattr(self, "abs_ceiling_sF_max", 0.25))
+        self.abs_ceiling_sF_mean = float(getattr(self, "abs_ceiling_sF_mean", 0.20))
+
+        def _robust_upper(values, k):
+            arr = np.asarray(values, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                return np.nan
+            med = float(np.median(arr))
+            mad = float(np.median(np.abs(arr - med)))
+            return med + k * 1.4826 * mad
+
         # Calculate Adaptive Upper Caps from OK frames
         if len(ok_idx) > 0:
             # ---> NEW: Define a "Calibration Subset" of strictly healthy frames <---
@@ -648,50 +728,60 @@ class _PoolActiveLearner:
             else:
                 print(f"[AL] Calibrating adaptive caps using {len(calib_idx)} energy-stable inlier frames.")
 
-            # 1. Calculate the adaptive percentile from the CALIBRATION pool only
-            pool_E_hi = np.percentile(self.sigma_E_atom_pool[calib_idx], self.percentile_F_hi)
-            pool_F_hi = np.percentile(self.sigma_F_pool_max[calib_idx], self.percentile_F_hi)
-            pool_Fmean_hi = np.percentile(self.sigma_F_pool_mean[calib_idx], self.percentile_F_hi)
-            pool_Fmag_hi = np.percentile(self.frame_max_force_pool[calib_idx], self.percentile_F_hi)
+            # 1. Robust upper statistics (median + k*1.4826*MAD) from the energy-stable inlier subset of the pool.
+            #    MAD * 1.4826 is the standard robust estimator of the standard
+            #    deviation for Gaussian data (1.4826 = 1/Phi^-1(0.75)), so
+            #    med + k*1.4826*MAD is the outlier-resistant analogue of
+            #    mean + k*sigma (k=3 ~ 99.7th percentile of the Gaussian core).
+            #    Unlike a plain percentile, median/MAD has a 50% breakdown point:
+            #    broken trajectory frames cannot inflate the statistic
+            #    unless they contaminate more than half of the subset.
+            pool_E_hi = _robust_upper(self.sigma_E_atom_pool[calib_idx], self.pool_hi_k)
+            pool_F_hi = _robust_upper(self.sigma_F_pool_max[calib_idx], self.pool_hi_k)
+            pool_Fmean_hi = _robust_upper(self.sigma_F_pool_mean[calib_idx], self.pool_hi_k)
+            pool_Fmag_hi = _robust_upper(self.frame_max_force_pool[calib_idx], self.pool_hi_k)
 
-            # 2. Hard caps relative to the training data max uncertainty.
-            # Force uncertainty ceilings are anchored to the hard AL floors so
-            # broken trajectory frames cannot inflate the physically useful cap.
-            floor_E = getattr(self, 'hard_sigma_E_atom_min', 0.0)
-            floor_Fmax = getattr(self, 'hard_sigma_F_max_min', 0.0)
-            floor_Fmean = getattr(self, 'hard_sigma_F_mean_min', 0.0)
-            floor_E_user = getattr(self, 'user_hard_sigma_E_atom_min', 0.001)
-            floor_Fmax_user = getattr(self, 'user_hard_sigma_F_max_min', 0.15)
-            floor_Fmean_user = getattr(self, 'user_hard_sigma_F_mean_min', 0.075)
-
-            unc_mult = 15.0
-            max_allowed_E_hi = max(self.sigma_E_atom_train.max() * unc_mult, floor_E * 5.0)
             max_allowed_Fmag_hi = max(self.frame_max_force_train.max() * 5.0, 20.0)
-            force_hi_mult = 3.0
 
-            # 3. Final effective thresholds (bounded by the hard caps)
-            # Decoupled from pool percentiles to prevent outlier contamination
-            self.thr_sigma_E_hi_eff = floor_E_user * 2.5
-            self.thr_sigma_F_hi_eff = floor_Fmax_user * 2.5
-            self.thr_sigma_Fmean_hi_eff = floor_Fmean_user * 2.5
-            self.thr_Fmag_hi_eff = min(max(pool_Fmag_hi, self.thr_Fmag * 2.0), max_allowed_Fmag_hi)
+            # 2. Effective ceilings: baseline = legacy user-floor x 2.5 (the
+            # tuned red-zone); the pool-robust statistic may only RAISE it
+            # when the trajectory baseline is genuinely elevated (domain
+            # shift), never lower it -- a healthy narrow distribution must
+            # not get over-dropped. Bounded below by the train-anchor
+            # percentile and above by the absolute physical ceiling.
+            pool_reliable = len(calib_idx) >= 20
+            legacy_E = float(self.user_hard_sigma_E_atom_min) * 2.5
+            legacy_Fmax = float(self.user_hard_sigma_F_max_min) * 2.5
+            legacy_Fmean = float(self.user_hard_sigma_F_mean_min) * 2.5
 
-            # Ensure it never drops below the absolute low percentiles either
-            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, self.thr_sigma_E_hi_eff)
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, self.thr_sigma_F_hi_eff)
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, self.thr_sigma_Fmean_hi_eff)
-            self.thr_Fmag_hi_eff = max(self.thr_Fmag, self.thr_Fmag_hi_eff)
+            def _eff_ceiling(pool_hi, low_anchor, abs_ceiling, legacy):
+                if pool_reliable and pool_hi is not None and np.isfinite(pool_hi):
+                    base = max(pool_hi, legacy)
+                else:
+                    base = legacy
+                return float(min(abs_ceiling, max(low_anchor, base)))
+
+            self.thr_sigma_E_hi_eff = _eff_ceiling(pool_E_hi, self.thr_sigma_E_low, self.abs_ceiling_sE_atom, legacy_E)
+            self.thr_sigma_F_hi_eff = _eff_ceiling(pool_F_hi, self.thr_sigma_F, self.abs_ceiling_sF_max, legacy_Fmax)
+            self.thr_sigma_Fmean_hi_eff = _eff_ceiling(pool_Fmean_hi, self.thr_sigma_Fmean, self.abs_ceiling_sF_mean, legacy_Fmean)
+            self.thr_Fmag_hi_eff = max(
+                self.thr_Fmag, min(max(pool_Fmag_hi, self.thr_Fmag * 2.0), max_allowed_Fmag_hi)
+            )
+
+            print(
+                f"[AL] Effective ceilings: σE_atom={self.thr_sigma_E_hi_eff:.4g} "
+                f"(pool_robust={pool_E_hi:.4g}, legacy={legacy_E:.4g}, abs={self.abs_ceiling_sE_atom:.4g}) | "
+                f"σF_mean={self.thr_sigma_Fmean_hi_eff:.4g} (pool={pool_Fmean_hi:.4g}, legacy={legacy_Fmean:.4g}, abs={self.abs_ceiling_sF_mean:.4g}) | "
+                f"σF_max={self.thr_sigma_F_hi_eff:.4g} (pool={pool_F_hi:.4g}, legacy={legacy_Fmax:.4g}, abs={self.abs_ceiling_sF_max:.4g}) | "
+                f"Fmag={self.thr_Fmag_hi_eff:.4g} (pool={pool_Fmag_hi:.4g})"
+            )
 
             self.allowed_offset_eff = max(0.0, np.percentile(self.mu_E_atom_pool[calib_idx], 5) - np.percentile(self.mu_E_atom_train, 95)) + 0.05
 
         else:
-            floor_E_user = getattr(self, 'user_hard_sigma_E_atom_min', 0.001)
-            floor_Fmax_user = getattr(self, 'user_hard_sigma_F_max_min', 0.15)
-            floor_Fmean_user = getattr(self, 'user_hard_sigma_F_mean_min', 0.075)
-
-            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, floor_E_user * 2.5)
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, floor_Fmax_user * 2.5)
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, floor_Fmean_user * 2.5)
+            self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, float(self.user_hard_sigma_E_atom_min) * 2.5)
+            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, min(self.abs_ceiling_sF_max, float(self.user_hard_sigma_F_max_min) * 2.5))
+            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, min(self.abs_ceiling_sF_mean, float(self.user_hard_sigma_F_mean_min) * 2.5))
             self.thr_Fmag_hi_eff = max(self.thr_Fmag, 2.0 * self.frame_max_force_train.max())
             self.allowed_offset_eff = 2.0 / float(np.nanmedian(self.train_atom_counts))
 
@@ -759,25 +849,20 @@ class _PoolActiveLearner:
                 )
             )
             _thr_fmax = self.hard_sigma_F_max_min * _srf
-            high = [
-                i for i in win_phys
-                if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap
-                and (
-                    self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min
-                    or self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min
-                    or self.sigma_F_pool_max[i] >= _thr_fmax
+
+            def _trig(i):
+                return (
+                    self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap
+                    and (
+                        self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min
+                        or self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min
+                        or self.sigma_F_pool_max[i] >= _thr_fmax
+                        or self.frame_env_margin[i] > self.envelope_floor
+                    )
                 )
-            ]
-            ood_high = [
-                i for i in win_phys
-                if self.ood_risk_mask[i]
-                and self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap
-                and (
-                    self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min
-                    or self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min
-                    or self.sigma_F_pool_max[i] >= _thr_fmax
-                )
-            ]
+
+            high = [i for i in win_phys if _trig(i)]
+            ood_high = [i for i in win_phys if self.ood_risk_mask[i] and _trig(i)]
             if ood_high:
                 high = sorted(set(high).union(ood_high))
 
@@ -788,6 +873,14 @@ class _PoolActiveLearner:
             gamma_all = np.sqrt(quad_all)
             diff_all = sub_G_all - self.mu_Gtrain
             dM_all = np.sqrt(np.einsum("id,dk,ik->i", diff_all, self.Cov_inv, diff_all))
+
+            # Relative-uncertainty ranking weight (bounded [0,1]): frames whose
+            # relative force error is below α are down-weighted in the score.
+            rel_w_win = np.ones(len(win_all), dtype=float)
+            if bool(getattr(self, "relative_uncertainty_weight", True)):
+                rel_unc_win = self.frame_rel_unc[win_all]
+                rel_w_win = np.clip(rel_unc_win / self.envelope_alpha, 0.0, 1.0)
+                rel_w_win = np.where(np.isfinite(rel_w_win), rel_w_win, 1.0)
 
             keep_gamma_mask = (gamma_all > self.gamma_thr)
             cand_mask = np.isin(win_all, high) & keep_gamma_mask
@@ -826,7 +919,7 @@ class _PoolActiveLearner:
                         )
                         div_weight = 1.0 if not selected_local else float(1.0 - np.exp(-min_dist / tau))
                         div_weight = max(div_weight, 1e-6)
-                        score = gains[r] * div_weight
+                        score = gains[r] * div_weight * rel_w_win[cand_idx_local[r]]
                         if score > best_score:
                             best_score, best_r = score, r
                     selected_local.append(best_r)
@@ -852,12 +945,14 @@ class _PoolActiveLearner:
                 trig_sE = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_E_atom_pool[i] >= self.hard_sigma_E_atom_min)
                 trig_sFmean = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_F_pool_mean[i] >= self.hard_sigma_F_mean_min)
                 trig_sFmax = sum(1 for i in win_phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap and self.sigma_F_pool_max[i] >= _thr_fmax)
+                trig_env = sum(1 for i in win_phys if self.frame_env_margin[i] > self.envelope_floor)
                 trig_ood = len(ood_high)
                 
                 reasons_trig = []
                 if trig_sE: reasons_trig.append(f"σE Floor={trig_sE}")
                 if trig_sFmax: reasons_trig.append(f"σFmax Floor={trig_sFmax}")
                 if trig_sFmean: reasons_trig.append(f"σFmean Floor={trig_sFmean}")
+                if trig_env: reasons_trig.append(f"Envelope={trig_env}")
                 if trig_ood: reasons_trig.append(f"OOD={trig_ood}")
                 print(f"       Floor Triggers: {', '.join(reasons_trig)}")
             # ------------------------------------------------------------
@@ -871,12 +966,15 @@ class _PoolActiveLearner:
                     "force_inf": pidx in high, "gamma_gate": keep_gamma_mask[j_local],
                     "gamma0": gamma_all[j_local], "dM": dM_all[j_local],
                     "dgain_train": np.log1p(quad_all[j_local]),
-                    "raw_score_window": gamma_all[j_local] * np.log1p(quad_all[j_local]),
+                    "raw_score_window": gamma_all[j_local] * np.log1p(quad_all[j_local]) * rel_w_win[j_local],
                     "mu_E": self.mu_E_pool[pidx],
                     "sigma_E": self.sigma_E_pool[pidx],
                     "sigma_E_atom": self.sigma_E_atom_pool[pidx],
                     "sigma_F_max": self.sigma_F_pool_max[pidx],
                     "sigma_F_mean": self.sigma_F_pool_mean[pidx],
+                    "env_margin": self.frame_env_margin[pidx],
+                    "rel_unc": self.frame_rel_unc[pidx],
+                    "rel_weight": rel_w_win[j_local],
                     "exp_abs_E_atom": self.expected_abs_E_atom[pidx],
                     "exp_abs_F_mean": self.expected_abs_F_mean[pidx],
                     "exp_abs_F_max": self.expected_abs_F_max[pidx],
@@ -892,7 +990,8 @@ class _PoolActiveLearner:
                 j_local = cand_idx_local[r_sel]
                 pidx = win_all[j_local]
                 self.records_tmp.append({
-                    "pool_idx": pidx, "raw_score": gamma_all[j_local] * np.log1p(quad_all[j_local])
+                    "pool_idx": pidx,
+                    "raw_score": gamma_all[j_local] * np.log1p(quad_all[j_local]) * rel_w_win[j_local],
                 })
 
     def _finalize_selection(self):
@@ -926,6 +1025,12 @@ class _PoolActiveLearner:
             fh.write(f"# hard_sigma_F_mean_min  = {getattr(self, 'hard_sigma_F_mean_min', np.nan):.6f}\n")
             fh.write(f"# hard_sigma_F_max_min   = {getattr(self, 'hard_sigma_F_max_min', np.nan):.6f}\n")
             fh.write(f"# train_Fmax_hard_cap    = {self.train_Fmax_hard_cap:.6f}\n")
+            fh.write(f"# envelope_alpha         = {getattr(self, 'envelope_alpha', np.nan):.6f}\n")
+            fh.write(f"# envelope_floor         = {getattr(self, 'envelope_floor', np.nan):.6f}\n")
+            fh.write(f"# pool_hi_k              = {getattr(self, 'pool_hi_k', np.nan):.6f}\n")
+            fh.write(f"# abs_ceiling_sE_atom    = {getattr(self, 'abs_ceiling_sE_atom', np.nan):.6f}\n")
+            fh.write(f"# abs_ceiling_sF_max     = {getattr(self, 'abs_ceiling_sF_max', np.nan):.6f}\n")
+            fh.write(f"# abs_ceiling_sF_mean    = {getattr(self, 'abs_ceiling_sF_mean', np.nan):.6f}\n")
             fh.write(f"# calibration_support_fraction = {float(np.mean(self.calibration_in_support)):.6f}\n")
             fh.write("# ----------------------------------------\n\n")
 
@@ -933,6 +1038,7 @@ class _PoolActiveLearner:
             fh.write(f"{'idx':<8} {'window':>12} {'geom_ok':>8} {'caps_ok':>8} {'force_inf':>10} {'γ_gate':>8} "
                      f"{'gamma0':>12} {'dM':>12} {'Dgain':>14} {'raw_score':>12} {'σE_atom':>12} "
                      f"{'σF_max':>12} {'σF_mean':>12} {'Eabs_exp':>12} {'Fabs_mean':>12} "
+                     f"{'env_margin':>12} {'rel_unc':>10} {'rel_weight':>10} "
                      f"{'cal_ok':>8} {'ood':>6} {'Fmax':>12} {'selected':>10} {'shortlist':>11}\n")
             
             shortlist_set = set(self.final_pool_indices)
@@ -942,7 +1048,8 @@ class _PoolActiveLearner:
                          f"{int(R['force_inf']):>10d} {int(R['gamma_gate']):>8d} {R['gamma0']:>12.6f} {R['dM']:>12.6f} "
                          f"{R['dgain_train']:>14.6f} {R['raw_score_window']:>12.6f} {R['sigma_E_atom']:>12.6f} "
                          f"{R['sigma_F_max']:>12.6f} {R['sigma_F_mean']:>12.6f} {R['exp_abs_E_atom']:>12.6f} "
-                         f"{R['exp_abs_F_mean']:>12.6f} {int(R['cal_support']):>8d} {int(R['ood_risk']):>6d} "
+                         f"{R['exp_abs_F_mean']:>12.6f} {R['env_margin']:>12.6f} {R['rel_unc']:>10.6f} "
+                         f"{R['rel_weight']:>10.6f} {int(R['cal_support']):>8d} {int(R['ood_risk']):>6d} "
                          f"{R['Fmax']:>12.6f} "
                          f"{int(R['selected']):>10d} {int(pidx in shortlist_set):>11d}\n")
 
@@ -996,7 +1103,8 @@ def write_pool_al_diagnostics_csv(runs, path="al_pool_diagnostics.csv"):
         "gamma0", "dM", "Dgain", "raw_score",
         "E_pred", "E_pred_atom", "sigma_E", "sigma_E_atom",
         "sigma_F_max", "sigma_F_mean", "Eabs_exp", "Fabs_mean", "Fabs_max",
-        "cal_ok", "ood", "Fmax", "Fmean", "selected", "shortlist",
+        "cal_ok", "ood", "Fmax", "Fmean", "env_margin", "rel_unc", "rel_weight",
+        "selected", "shortlist",
     ]
     states = [str(run.get("state", "unknown")) for run in runs]
     rows = []
