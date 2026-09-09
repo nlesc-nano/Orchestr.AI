@@ -363,6 +363,7 @@ class _PoolActiveLearner:
             "envelope_alpha": getattr(self, "envelope_alpha", np.nan),
             "envelope_floor": getattr(self, "envelope_floor", np.nan),
             "pool_hi_k": getattr(self, "pool_hi_k", np.nan),
+            "red_zone_train_mult": getattr(self, "red_zone_train_mult", np.nan),
             "abs_ceiling_sE_atom": getattr(self, "abs_ceiling_sE_atom", np.nan),
             "abs_ceiling_sF_max": getattr(self, "abs_ceiling_sF_max", np.nan),
             "abs_ceiling_sF_mean": getattr(self, "abs_ceiling_sF_mean", np.nan),
@@ -693,6 +694,7 @@ class _PoolActiveLearner:
         # Absolute physical ceilings (non-negotiable red zone) and robust
         # pool-statistic parameters shared by both branches below.
         self.pool_hi_k = float(getattr(self, "pool_hi_k", 3.0))
+        self.red_zone_train_mult = float(getattr(self, "red_zone_train_mult", 5.0))
         self.abs_ceiling_sE_atom = float(getattr(self, "abs_ceiling_sE_atom", 0.010))
         self.abs_ceiling_sF_max = float(getattr(self, "abs_ceiling_sF_max", 0.25))
         self.abs_ceiling_sF_mean = float(getattr(self, "abs_ceiling_sF_mean", 0.20))
@@ -748,31 +750,45 @@ class _PoolActiveLearner:
             # when the trajectory baseline is genuinely elevated (domain
             # shift), never lower it -- a healthy narrow distribution must
             # not get over-dropped. Bounded below by the train-anchor
-            # percentile and above by the absolute physical ceiling.
+            # percentile. The red zone self-scales with the model: it is the
+            # max of (a) the tuned legacy baseline, (b) the user abs ceiling
+            # (a safety valve that may only WIDEN the band) and (c) the
+            # train-anchored value M x robust_upper(train sigma)
             pool_reliable = len(calib_idx) >= 20
             legacy_E = float(self.user_hard_sigma_E_atom_min) * 2.5
             legacy_Fmax = float(self.user_hard_sigma_F_max_min) * 2.5
             legacy_Fmean = float(self.user_hard_sigma_F_mean_min) * 2.5
 
-            def _eff_ceiling(pool_hi, low_anchor, abs_ceiling, legacy):
+            def _red_zone(abs_ceiling, legacy, train_anchor):
+                vals = [v for v in (abs_ceiling, legacy, train_anchor) if np.isfinite(v)]
+                return max(vals) if vals else legacy
+
+            train_red_E = _robust_upper(self.sigma_E_atom_train, self.pool_hi_k) * self.red_zone_train_mult
+            train_red_Fmax = _robust_upper(self.sigma_F_train_max, self.pool_hi_k) * self.red_zone_train_mult
+            train_red_Fmean = _robust_upper(self.sigma_F_train_mean, self.pool_hi_k) * self.red_zone_train_mult
+            red_E = _red_zone(self.abs_ceiling_sE_atom, legacy_E, train_red_E)
+            red_Fmax = _red_zone(self.abs_ceiling_sF_max, legacy_Fmax, train_red_Fmax)
+            red_Fmean = _red_zone(self.abs_ceiling_sF_mean, legacy_Fmean, train_red_Fmean)
+
+            def _eff_ceiling(pool_hi, low_anchor, red_zone, legacy):
                 if pool_reliable and pool_hi is not None and np.isfinite(pool_hi):
                     base = max(pool_hi, legacy)
                 else:
                     base = legacy
-                return float(min(abs_ceiling, max(low_anchor, base)))
+                return float(min(red_zone, max(low_anchor, base)))
 
-            self.thr_sigma_E_hi_eff = _eff_ceiling(pool_E_hi, self.thr_sigma_E_low, self.abs_ceiling_sE_atom, legacy_E)
-            self.thr_sigma_F_hi_eff = _eff_ceiling(pool_F_hi, self.thr_sigma_F, self.abs_ceiling_sF_max, legacy_Fmax)
-            self.thr_sigma_Fmean_hi_eff = _eff_ceiling(pool_Fmean_hi, self.thr_sigma_Fmean, self.abs_ceiling_sF_mean, legacy_Fmean)
+            self.thr_sigma_E_hi_eff = _eff_ceiling(pool_E_hi, self.thr_sigma_E_low, red_E, legacy_E)
+            self.thr_sigma_F_hi_eff = _eff_ceiling(pool_F_hi, self.thr_sigma_F, red_Fmax, legacy_Fmax)
+            self.thr_sigma_Fmean_hi_eff = _eff_ceiling(pool_Fmean_hi, self.thr_sigma_Fmean, red_Fmean, legacy_Fmean)
             self.thr_Fmag_hi_eff = max(
                 self.thr_Fmag, min(max(pool_Fmag_hi, self.thr_Fmag * 2.0), max_allowed_Fmag_hi)
             )
 
             print(
                 f"[AL] Effective ceilings: σE_atom={self.thr_sigma_E_hi_eff:.4g} "
-                f"(pool_robust={pool_E_hi:.4g}, legacy={legacy_E:.4g}, abs={self.abs_ceiling_sE_atom:.4g}) | "
-                f"σF_mean={self.thr_sigma_Fmean_hi_eff:.4g} (pool={pool_Fmean_hi:.4g}, legacy={legacy_Fmean:.4g}, abs={self.abs_ceiling_sF_mean:.4g}) | "
-                f"σF_max={self.thr_sigma_F_hi_eff:.4g} (pool={pool_F_hi:.4g}, legacy={legacy_Fmax:.4g}, abs={self.abs_ceiling_sF_max:.4g}) | "
+                f"(pool_robust={pool_E_hi:.4g}, legacy={legacy_E:.4g}, train={train_red_E:.4g}, abs={self.abs_ceiling_sE_atom:.4g}) | "
+                f"σF_mean={self.thr_sigma_Fmean_hi_eff:.4g} (pool={pool_Fmean_hi:.4g}, legacy={legacy_Fmean:.4g}, train={train_red_Fmean:.4g}, abs={self.abs_ceiling_sF_mean:.4g}) | "
+                f"σF_max={self.thr_sigma_F_hi_eff:.4g} (pool={pool_F_hi:.4g}, legacy={legacy_Fmax:.4g}, train={train_red_Fmax:.4g}, abs={self.abs_ceiling_sF_max:.4g}) | "
                 f"Fmag={self.thr_Fmag_hi_eff:.4g} (pool={pool_Fmag_hi:.4g})"
             )
 
@@ -780,8 +796,8 @@ class _PoolActiveLearner:
 
         else:
             self.thr_sigma_E_hi_eff = max(self.thr_sigma_E_low, float(self.user_hard_sigma_E_atom_min) * 2.5)
-            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, min(self.abs_ceiling_sF_max, float(self.user_hard_sigma_F_max_min) * 2.5))
-            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, min(self.abs_ceiling_sF_mean, float(self.user_hard_sigma_F_mean_min) * 2.5))
+            self.thr_sigma_F_hi_eff = max(self.thr_sigma_F, float(self.user_hard_sigma_F_max_min) * 2.5)
+            self.thr_sigma_Fmean_hi_eff = max(self.thr_sigma_Fmean, float(self.user_hard_sigma_F_mean_min) * 2.5)
             self.thr_Fmag_hi_eff = max(self.thr_Fmag, 2.0 * self.frame_max_force_train.max())
             self.allowed_offset_eff = 2.0 / float(np.nanmedian(self.train_atom_counts))
 
@@ -891,6 +907,7 @@ class _PoolActiveLearner:
 
             cand_idx_local = np.where(cand_mask)[0]
             selected_local = []
+
 
             # D-Optimal Selection
             if cand_idx_local.size > 0:
