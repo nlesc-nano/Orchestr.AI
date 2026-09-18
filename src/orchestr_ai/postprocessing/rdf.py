@@ -5,6 +5,7 @@ Handles geometric sanity checks and Radial Distribution Function (RDF)
 calculations to filter unphysical frames during active learning.
 """
 
+import os
 import time
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,9 +16,10 @@ from itertools import combinations
 from scipy.spatial import cKDTree
 from scipy.sparse.csgraph import connected_components
 
-def debug_plot_rdfs(reference_frames, rdf_thresholds, r_max=6.0, dr=0.02, outprefix="rdf_DEBUG"):
+def debug_plot_rdfs(reference_frames, rdf_thresholds, r_max=6.0, dr=0.02, outprefix="rdf/DEBUG"):
     """Saves RDF plots for all active species pairs."""
     print("[RDF] Debug plotting RDFs for each pair...")
+    os.makedirs("rdf", exist_ok=True)
     all_pairs = list(rdf_thresholds.keys())
     ref_pos  = [atoms.get_positions() for atoms in reference_frames]
     ref_syms = [atoms.get_chemical_symbols() for atoms in reference_frames]
