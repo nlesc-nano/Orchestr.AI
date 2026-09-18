@@ -47,7 +47,6 @@ def generate_uq_plots(npz_plot_data_path, set_name, set_uq,
         sigma_E_cal_iso  = data.get("sigma_energy_cal_iso")
         sigma_E_cal_legacy = data.get("sigma_energy_cal")
         delta_E          = data.get("delta_energy")
-        print(delta_E.mean(), np.median(delta_E))
         err_E_abs        = np.abs(delta_E) if delta_E is not None else None
 
         # precomputed scalars & coverage

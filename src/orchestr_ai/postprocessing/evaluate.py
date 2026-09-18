@@ -478,6 +478,7 @@ class DatasetManager:
         train_E,
         train_pos,
         train_frames,
+        label="validation",
     ):
         if not _parse_bool_like(self.eval_cfg.get("purge_redundant_validation", True), default=True):
             return val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet
@@ -486,7 +487,7 @@ class DatasetManager:
         val_centered = any("centered" in (f.info or {}) for f in val_frames)
         if train_centered != val_centered:
             print(f"[Dataset] Centering mismatch: train={'centered' if train_centered else 'raw'}, "
-                  f"val={'centered' if val_centered else 'raw'}. Subtracting centroids before comparison.")
+                  f"{label}={'centered' if val_centered else 'raw'}. Subtracting centroids before comparison.")
 
         train_keys = {
             self._structure_key(e,
@@ -506,13 +507,13 @@ class DatasetManager:
             if redundant:
                 removed.append(i)
 
-        print("[Dataset] Redundant validation purge enabled.")
+        print(f"[Dataset] Redundant {label} purge enabled.")
         print(f"[Dataset] Training frames: {len(train_frames)}")
-        print(f"[Dataset] Validation frames before purge: {len(val_frames)}")
-        print(f"[Dataset] Removed redundant validation frames: {len(removed)}")
+        print(f"[Dataset] {label.capitalize()} frames before purge: {len(val_frames)}")
+        print(f"[Dataset] Removed redundant {label} frames: {len(removed)}")
         if removed:
-            with open("redundant_validation_frames.txt", "w") as fh:
-                fh.write("# validation_frame_index redundant_with_training\n")
+            with open(f"redundant_{label}_frames.txt", "w") as fh:
+                fh.write(f"# {label}_frame_index redundant_with_training\n")
                 for idx in removed:
                     fh.write(f"{idx} 1\n")
 
@@ -527,7 +528,7 @@ class DatasetManager:
             val_E_triplet = [e for e, k in zip(val_E_triplet, keep) if k]
         if val_F_triplet and len(val_F_triplet) == len(keep):
             val_F_triplet = [f for f, k in zip(val_F_triplet, keep) if k]
-        print(f"[Dataset] Validation frames after purge: {len(val_frames)}")
+        print(f"[Dataset] {label.capitalize()} frames after purge: {len(val_frames)}")
         return val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet
 
     def load_datasets(self):
@@ -566,6 +567,7 @@ class DatasetManager:
                     val_E_singlet, val_F_singlet,
                     val_E_triplet, val_F_triplet,
                     train_E, train_pos, train_frames,
+                    label="validation",
                 )
 
                 if len(val_frames) == 0:
@@ -717,6 +719,7 @@ class DatasetManager:
                     cal_E_singlet, cal_F_singlet,
                     cal_E_triplet, cal_F_triplet,
                     train_E, train_pos, train_frames,
+                    label="calibration",
                 )
             (
                 val_frames, val_E, val_F,
@@ -727,6 +730,7 @@ class DatasetManager:
                 val_E_singlet, val_F_singlet,
                 val_E_triplet, val_F_triplet,
                 train_E, train_pos, train_frames,
+                label="validation",
             )
 
         if not separate_calibration:
@@ -2223,8 +2227,8 @@ class EvaluationPipeline:
         if mode not in {"var", "iso"}:
             mode = "var"
         print("\n[Calibration] Active-learning calibration summary")
-        print("[Calibration] Source: validation")
-        print(f"[Calibration] Frames used: {len(self.ds['frames'])}")
+        print(f"[Calibration] Source: {"calibration_data" if self.ds.get("fit_label", "val") == "cal" else "validation"}")
+        print(f"[Calibration] Frames used: {int(np.sum(self.ds["train_mask"]))}")
         print(f"[Calibration] Method requested for AL selection: {mode.upper()}")
         print("[Calibration] Diagnostics below are computed on the calibration source itself.")
         def _fmt(value):

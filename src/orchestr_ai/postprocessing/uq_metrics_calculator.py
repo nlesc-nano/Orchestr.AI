@@ -403,6 +403,8 @@ def run_uq_metrics(
     frame_mask = stats.train_mask if split.lower() == "train" else stats.eval_mask
     atom_mask = stats._get_atom_mask(frame_mask)
     comp_mask = np.repeat(atom_mask, 3)
+    set_desc = split_label or split
+    is_apply_call = bool(calibrators)
 
     delta_c = delta_comp[comp_mask]
     sigma_c = sigma_comp[comp_mask]
@@ -486,13 +488,15 @@ def run_uq_metrics(
         sigma_c_cal_var = np.empty_like(sigma_c)
         n_total = len(delta_c)
 
-        print(f"\n[Calibration] Per-element calibration ({len(unique_elements)} elements, {n_total} components):")
         provided_var = calibrators.get('cal_var_F') if calibrators is not None else None
         provided_iso = calibrators.get('cal_iso_F') if calibrators is not None else None
         if not isinstance(provided_var, PerElementCalibrator):
             provided_var = None
         if not isinstance(provided_iso, PerElementCalibrator):
             provided_iso = None
+        if not is_apply_call:
+            print(f"\n[Calibration] Per-element calibration: fitting "
+                  f"({len(unique_elements)} elements, {n_total} components).")
         for elem in unique_elements:
             mask = force_symbols == elem
             d_e, s_e = delta_c[mask], sigma_c[mask]
@@ -504,7 +508,8 @@ def run_uq_metrics(
                     vsc = VarianceScalingCalibrator().fit(d_e, s_e)
             per_elem_var[elem] = vsc
             sigma_c_cal_var[mask] = vsc.transform(s_e)
-            print(f"    {elem:>4s}: s = {vsc.s:8.4f}  (n_components = {len(d_e)})")
+            if not is_apply_call:
+                print(f"    {elem:>4s}: s = {vsc.s:8.4f}  (n_components = {len(d_e)})")
 
             ic = provided_iso.get(elem) if provided_iso is not None else None
             if ic is None and provided_iso is None:
@@ -527,14 +532,15 @@ def run_uq_metrics(
             if a_mask.any():
                 sigma_a_cal_var[a_mask] = cal_var_F.get(elem).transform(sigma_a[a_mask])
 
-        print(f"\n[Calibration] Per-element error/sigma ratios:")
-        print(f"    {'Element':>6s}  {'mean|delta|':>12s}  {'mean_sigma':>12s}  {'ratio':>8s}")
-        for elem in unique_elements:
-            mask = force_symbols == elem
-            md = np.mean(np.abs(delta_c[mask]))
-            ms = np.mean(sigma_c[mask])
-            print(f"    {elem:>6s}  {md:12.6f}  {ms:12.6f}  {md/max(ms,1e-12):8.2f}")
-        print()
+        if not is_apply_call:
+            print(f"\n[Calibration] Per-element error/sigma ratios [{set_desc} split]:")
+            print(f"    {'Element':>6s}  {'mean|delta|':>12s}  {'mean_sigma':>12s}  {'ratio':>8s}")
+            for elem in unique_elements:
+                mask = force_symbols == elem
+                md = np.mean(np.abs(delta_c[mask]))
+                ms = np.mean(sigma_c[mask])
+                print(f"    {elem:>6s}  {md:12.6f}  {ms:12.6f}  {md/max(ms,1e-12):8.2f}")
+            print()
 
         # Per-element isotonic apply
         if any(per_elem_iso.values()):
@@ -580,6 +586,37 @@ def run_uq_metrics(
             sigma_e_cal_iso = sigma_e_cal_var
     else:
         sigma_e_cal_var = sigma_e_cal_iso = None
+
+    # ========= DESCRIPTIVE DIAGNOSTICS AFTER CALIBRATION =========
+    if is_apply_call:
+        print(f"\n====== Sigma diagnostics AFTER calibration [{set_desc} split] ======")
+        print(f"  samples: frames={int(np.sum(frame_mask))} atoms={delta_c.size // 3} "
+              f"components={delta_c.size}"
+              + (f" energy_frames={delta_e.size}" if delta_e is not None else ""))
+
+        f_raw = (np.nanmean(sigma_c) * 1000.0, np.nanmedian(sigma_c) * 1000.0)
+        f_var = (np.nanmean(sigma_c_cal_var) * 1000.0, np.nanmedian(sigma_c_cal_var) * 1000.0)
+        f_iso = (np.nanmean(sigma_c_cal_iso) * 1000.0, np.nanmedian(sigma_c_cal_iso) * 1000.0)
+        print(f"  force sigma (component)  [   meV/Å]  "
+              f"raw: mean={f_raw[0]:.3f} med={f_raw[1]:.3f} | "
+              f"VAR: mean={f_var[0]:.3f} med={f_var[1]:.3f} | "
+              f"ISO: mean={f_iso[0]:.3f} med={f_iso[1]:.3f}")
+        d_c = (np.nanmean(np.abs(delta_c)) * 1000.0, np.nanmedian(np.abs(delta_c)) * 1000.0)
+        print(f"  force |delta| (error)    [   meV/Å]  "
+              f"mean={d_c[0]:.3f} med={d_c[1]:.3f}")
+
+        if delta_e is not None:
+            e_raw = (np.nanmean(sigma_e) * 1000.0, np.nanmedian(sigma_e) * 1000.0)
+            e_var = (np.nanmean(sigma_e_cal_var) * 1000.0, np.nanmedian(sigma_e_cal_var) * 1000.0)
+            e_iso = (np.nanmean(sigma_e_cal_iso) * 1000.0, np.nanmedian(sigma_e_cal_iso) * 1000.0)
+            print(f"  energy sigma             [{'meV/atom' if energy_per_atom else 'meV':>8s}]  "
+                  f"raw: mean={e_raw[0]:.3f} med={e_raw[1]:.3f} | "
+                  f"VAR: mean={e_var[0]:.3f} med={e_var[1]:.3f} | "
+                  f"ISO: mean={e_iso[0]:.3f} med={e_iso[1]:.3f}")
+            d_e = (np.nanmean(np.abs(delta_e)) * 1000.0, np.nanmedian(np.abs(delta_e)) * 1000.0)
+            print(f"  energy |delta| (error)   [{'meV/atom' if energy_per_atom else 'meV':>8s}]  "
+                  f"mean={d_e[0]:.3f} med={d_e[1]:.3f}")
+        print("====================================================================\n")
 
     # ----------- Normality checks (p-values) --------------------------
     z_comp      = delta_c / _safe_sigma(sigma_c)
@@ -770,11 +807,6 @@ def run_uq_metrics(
     if delta_e is not None:
         print("\nENERGY UNCERTAINTY METRICS:\n" + pretty_table_full(e_groups, col_names, e_verdicts))
 
-    _LOGGER.info(banner)
-    _LOGGER.info("\nFORCE UNCERTAINTY METRICS:\n" + pretty_table_full(f_groups, col_names, f_verdicts))
-    if delta_e is not None:
-        _LOGGER.info("\nENERGY UNCERTAINTY METRICS:\n" + pretty_table_full(e_groups, col_names, e_verdicts))
-
     # ------------ SUGGESTION SUMMARY -------------------------------
     forces_raw_verdict = qualitative_label(m_raw_F['ENCE_raw'], "ENCE_raw")
 
@@ -799,7 +831,6 @@ def run_uq_metrics(
 
     suggestion_block = "\n".join(lines)
     print("\n" + suggestion_block + "\n")
-    _LOGGER.info("\n" + suggestion_block)
     # --------- MetricResult list, including all variants --------------
     metrics: list[MetricResult] = [
         MetricResult("NLL_base", mean_nll_base_c, "probabilistic"),
