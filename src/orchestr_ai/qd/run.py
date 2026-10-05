@@ -91,10 +91,20 @@ class Settings:
     detach_max_steps: int = 4        # stepwise MX_q removals
     detach_max_candidates: int = 12  # symmetry-unique sites relaxed per step
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
+    relax_batch_atoms: int = 20000      # desorption candidates relaxed together, at most this many atoms per
+                                        # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS)
     sites_hessian_max_atoms: int = 0    # per-site Hessians for the binding-site map up to this size (0: never;
                                         # otherwise the first path step's thermal part is used for every site)
     sites_solvation: str = "scf"        # scf: a GFN2-xTB single point per site | frozen: the intact dot's charges
     mu_grid: List[float] = field(default_factory=lambda: [round(-3.0 + 0.02 * i, 4) for i in range(201)])
+
+    def relaxer(self) -> str:
+        """How desorption products are relaxed (enters the step hashes and the relaxation cache)."""
+        if not self.relax_batch_atoms:
+            return "serial-bfgs-0.02"
+        from . import batch_relax as b
+        return (f"batched-lbfgs-{b.FMAX}-plateau-{b.PLATEAU_FMAX}-{b.PLATEAU_WINDOW}-{b.PLATEAU_DE_ATOM}"
+                f"-stall-{b.STALL_WINDOWS}-{b.MAX_STEPS}")
 
     def for_step(self, step: str) -> dict:
         from .engines import resolve_device
@@ -111,12 +121,12 @@ class Settings:
                         "field": self.vibspec_field, "max_atoms": self.vibspec_max_atoms, "cif": "record"},
             "electronic": {"method": self.xtb_method, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
-            "detachment": {**mace, "fmax": self.fmax, "max_steps": self.detach_max_steps,
+            "detachment": {**mace, "fmax": self.fmax, "max_steps": self.detach_max_steps, "relaxer": self.relaxer(),
                            "max_candidates": self.detach_max_candidates,
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
                            "temperatures": self.temperatures},
             "solvation": {"method": "gfn2", "checks": self.solvation_checks},
-            "sites": {**mace, "method": "gfn2", "thermo_max_atoms": self.detach_thermo_max_atoms,
+            "sites": {**mace, "method": "gfn2", "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
                       "hessian_max_atoms": self.sites_hessian_max_atoms, "solvation": self.sites_solvation},
             "report": {},
         }[step]
