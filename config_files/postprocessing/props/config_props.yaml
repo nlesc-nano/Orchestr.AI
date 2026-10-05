@@ -1,0 +1,20 @@
+# QD properties of library records: python -m orchestr_ai.postprocessing config_props.yaml
+# xtb binaries: QDPROPS_XTB (GFN2-xTB, xtb 6.7.1) and QDPROPS_GXTB (g-xTB);
+# bulk CIFs: QDPROPS_CIF_DIRS; shared references: QDPROPS_REFS.
+run_type: PROPS
+platform: mace
+model_path: /path/to/macemh1model
+mace_head: omat_pbe
+
+props:
+  records:
+    - /path/to/library/II-VI/CdSe/builder/CdSe-Se-Cd16Se13Cl6-clean
+    - /path/to/library/II-VI/CdSe/builder/CdSe-Se-Cd68Se55Cl26-clean
+  # tree: /path/to/library     # or every record.json below a directory
+  # max_atoms: 300
+  steps: [relax, structure, hessian, vibspec, electronic, stability, detachment, solvation, sites, report]
+  force: false
+  settings:
+    device: auto               # CUDA GPU, else Apple GPU, else CPU
+    dtype: float64
+    fmax: 0.01

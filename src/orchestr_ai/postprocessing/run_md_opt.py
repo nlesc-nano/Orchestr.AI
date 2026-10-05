@@ -112,6 +112,18 @@ def main():
             sys.exit(1)
         return
 
+    # QD properties pipeline (MACE-MH-1, g-xTB, GFN2-xTB) over library records.
+    if run_type == "PROPS":
+        from orchestr_ai.qd.props_run import run_props
+
+        try:
+            failed = run_props(config)
+        except Exception as e:
+            logging.error(f"--- PROPS Run Failed --- {type(e).__name__}: {e}")
+            logging.error(traceback.format_exc())
+            sys.exit(1)
+        sys.exit(1 if failed else 0)
+
     # Lazy import simulation only after dispatch.
     from orchestr_ai.postprocessing.simulation import (
         run_md,
