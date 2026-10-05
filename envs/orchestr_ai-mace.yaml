@@ -17,4 +17,9 @@ dependencies:
       - cuequivariance-ops-torch-cu12
       - scikit-learn
       - dscribe
+      # QD properties (run_type PROPS)
+      - ase
+      - pymatgen
+      - h5py
+      - pyyaml
 
