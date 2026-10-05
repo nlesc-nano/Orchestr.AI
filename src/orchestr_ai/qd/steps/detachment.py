@@ -92,6 +92,19 @@ def _relax_task(args):
     return atoms.get_positions(), e, ok
 
 
+def _relax_batch(structures, settings):
+    """[(positions, energy, converged), ...]: all structures relaxed together (batch_relax)."""
+    from ..batch_relax import BatchMACE, relax_many
+    calc = mace_calculator(settings.head, settings.model, settings.device, settings.dtype)
+    res = relax_many(structures, BatchMACE(calc, settings.relax_batch_atoms))
+    return [(r.positions, r.energy, r.converged) for r in res]
+
+
+def _relax_batch_task(args):
+    structures, settings = args
+    return _relax_batch(structures, settings)
+
+
 def _frequencies_local(symbols, pts, settings) -> np.ndarray:
     from ase import Atoms
     atoms = Atoms(list(symbols), positions=np.asarray(pts, float))
@@ -135,6 +148,10 @@ class _Worker:
     def relax(self, symbols, pts, settings):
         return self._pool().apply(_relax_task, ((list(symbols), np.asarray(pts, float), settings),))
 
+    def relax_many(self, structures, settings):
+        return self._pool().apply(_relax_batch_task, (([(list(a), np.asarray(b, float)) for a, b in structures],
+                                                       settings),))
+
     def frequencies(self, symbols, pts, settings):
         return self._pool().apply(_frequencies_task, ((list(symbols), np.asarray(pts, float), settings),))
 
@@ -164,28 +181,52 @@ class RelaxCache:
         from ..engines import resolve_device
         self.path = ctx.props / "detach_cache.json"
         s = ctx.settings
-        self.tag = f"v2|{s.head}|{s.model}|{s.device}|{s.dtype}|{TRAIN_FMAX}|{TRAIN_STEPS}"
+        self.tag = (f"v2|{s.head}|{s.model}|{s.device}|{s.dtype}|{TRAIN_FMAX}|{TRAIN_STEPS}" if not s.relax_batch_atoms
+                    else f"v3|{s.head}|{s.model}|{s.device}|{s.dtype}|{s.relaxer()}")
         self.data = json.loads(self.path.read_text()) if self.path.is_file() else {}
         self.worker = _Worker() if resolve_device(s.device) == "mps" else None
         self.n_new = 0
 
     def relax(self, symbols, pts, settings):
+        return self.relax_many([(symbols, pts)], settings)[0]
+
+    def relax_many(self, structures, settings):
+        """
+        [(atoms, energy, converged), ...] for every (symbols, positions): cached ones
+        are reused, the others relaxed together in one batch (settings.relax_batch_atoms > 0)
+        or one at a time (ASE BFGS), and checkpointed.
+        """
         from ase import Atoms
-        key = f"{self.tag}|{geometry_key(symbols, pts)}"
-        hit = self.data.get(key)
-        if hit is None:
-            if self.worker is not None:
-                pos, e, ok = self.worker.relax(symbols, pts, settings)
+        keys = [f"{self.tag}|{geometry_key(sy, p)}" for sy, p in structures]
+        todo = {}
+        for k, (sy, p) in zip(keys, structures):
+            if k not in self.data and k not in todo:
+                todo[k] = (list(sy), np.asarray(p, float))
+        if todo:
+            new = list(todo.values())
+            if settings.relax_batch_atoms:
+                res = (self.worker.relax_many(new, settings) if self.worker is not None
+                       else _relax_batch(new, settings))
             else:
-                atoms, e, ok = _relax(symbols, pts, settings)
-                pos = atoms.get_positions()
-            hit = {"energy": e, "converged": ok, "positions": np.asarray(pos).round(6).tolist()}
-            self.data[key] = hit
+                res = []
+                for sy, p in new:
+                    if self.worker is not None:
+                        res.append(self.worker.relax(sy, p, settings))
+                    else:
+                        atoms, e, ok = _relax(sy, p, settings)
+                        res.append((atoms.get_positions(), e, ok))
+            for k, (pos, e, ok) in zip(todo, res):
+                self.data[k] = {"energy": float(e), "converged": bool(ok),
+                                "positions": np.asarray(pos).round(6).tolist()}
             self.path.write_text(json.dumps(self.data))
-            self.n_new += 1
+            self.n_new += len(todo)
             _free_device_memory(settings)
-        atoms = Atoms(list(symbols), positions=np.asarray(hit["positions"], float))
-        return atoms, float(hit["energy"]), bool(hit["converged"])
+        out = []
+        for k, (sy, _p) in zip(keys, structures):
+            hit = self.data[k]
+            out.append((Atoms(list(sy), positions=np.asarray(hit["positions"], float)),
+                        float(hit["energy"]), bool(hit["converged"])))
+        return out
 
     def frequencies(self, symbols, pts, settings):
         key = f"freq|{self.tag}|{settings.hessian}|{geometry_key(symbols, pts)}"
@@ -322,9 +363,12 @@ def _add_configuration(ensemble, atoms, k, energy):
         ensemble[fp] = (k, energy, rotational_symmetry_number(sym, pts))
 
 
-def evaluate(state, units, cache, settings, e_full, ensemble, stats, local_r=LOCAL_R):
-    """dE table of the state's units: relaxed near the last removal (one per
-    symmetry class), estimated from the parent elsewhere."""
+def plan(state, units, local_r=LOCAL_R):
+    """
+    The state's dE table: units far from the last removal keep the parent's value as
+    an estimate (filled here); the others are grouped by symmetry (product fingerprint),
+    one relaxation per group. Returns {fingerprint: [(key, unit), ...]} to relax.
+    """
     exact_groups = {}
     for un in units:
         key = _key(state, un)
@@ -335,10 +379,18 @@ def evaluate(state, units, cache, settings, e_full, ensemble, stats, local_r=LOC
             continue
         fp = fingerprint(*_product(state.sym, state.pts, un["atoms"]))
         exact_groups.setdefault(fp, []).append((key, un))
-    for fp, members in exact_groups.items():
-        key0, un0 = members[0]
-        atoms, e, ok = cache.relax(*_product(state.sym, state.pts, un0["atoms"]), settings)
-        stats["relaxations"] += 1
+    return exact_groups
+
+
+def evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats):
+    """Relax the representative of every group of every beam state in one batch and fill the tables."""
+    reqs = [(si, members) for si, g in enumerate(groups) for members in g.values()]
+    res = cache.relax_many([_product(beam[si].sym, beam[si].pts, members[0][1]["atoms"]) for si, members in reqs],
+                           settings)
+    stats["relaxations"] += len(reqs)
+    for (si, members), (atoms, e, ok) in zip(reqs, res):
+        state = beam[si]
+        key0, _un0 = members[0]
         J = e - e_full - state.energy
         for key, un in members:
             state.table[key] = {"J": J, "exact": True, "rep": key0, "unit": un, "converged": ok,
@@ -347,36 +399,48 @@ def evaluate(state, units, cache, settings, e_full, ensemble, stats, local_r=LOC
         _add_configuration(ensemble, atoms, state.k + 1, state.energy + J)
 
 
+def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
+    """Relax estimated entries [(state index, key), ...] in one batch."""
+    if not todo:
+        return
+    res = cache.relax_many([_product(beam[si].sym, beam[si].pts, beam[si].table[key]["unit"]["atoms"])
+                            for si, key in todo], settings)
+    stats["relaxations"] += len(todo)
+    stats["lazy"] += len(todo)
+    for (si, key), (atoms, e, ok) in zip(todo, res):
+        state = beam[si]
+        entry = state.table[key]
+        entry.update(J=e - e_full - state.energy, exact=True, rep=key, product=atoms, converged=ok, multiplicity=1)
+        _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"])
+
+
 def relax_estimate(state, key, cache, settings, e_full, ensemble, stats):
-    entry = state.table[key]
-    un = entry["unit"]
-    sym, pts = _product(state.sym, state.pts, un["atoms"])
-    atoms, e, ok = cache.relax(sym, pts, settings)
-    stats["relaxations"] += 1
-    stats["lazy"] += 1
-    entry.update(J=e - e_full - state.energy, exact=True, rep=key, product=atoms, converged=ok, multiplicity=1)
-    _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"])
+    relax_estimates([state], [(0, key)], cache, settings, e_full, ensemble, stats)
 
 
 def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, local_r=LOCAL_R):
     """Next level: the BEAM best children of the current beam (lazy, deduplicated)."""
     import heapq
     heap = []
+    # Every candidate of the level (all beam states) is relaxed in one batch.
+    groups = [plan(st, enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q), local_r)
+              for st in beam]
+    evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats)
     for si, st in enumerate(beam):
-        units = enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q)
-        evaluate(st, units, cache, settings, e_full, ensemble, stats, local_r)
         for key, entry in st.table.items():
             heapq.heappush(heap, (st.energy + entry["J"], si, key))
-    # Refresh: relax estimated candidates close to the best relaxed one, per beam state.
+    # Refresh: relax estimated candidates close to the best relaxed one, per beam state (one batch).
+    todo = []
     for si, st in enumerate(beam):
         exact = [v["J"] for v in st.table.values() if v["exact"]]
         if not exact:
             continue
         best = min(exact)
-        for key, entry in list(st.table.items()):
-            if not entry["exact"] and entry["J"] <= best + REFRESH_WINDOW:
-                relax_estimate(st, key, cache, settings, e_full, ensemble, stats)
-                heapq.heappush(heap, (st.energy + st.table[key]["J"], si, key))
+        todo += [(si, key) for key, entry in st.table.items()
+                 if not entry["exact"] and entry["J"] <= best + REFRESH_WINDOW]
+    relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
+    for si, key in todo:
+        heapq.heappush(heap, (beam[si].energy + beam[si].table[key]["J"], si, key))
     children, seen = [], set()
     while heap and len(children) < BEAM:
         e_child, si, key = heapq.heappop(heap)
