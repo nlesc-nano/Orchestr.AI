@@ -42,8 +42,11 @@ DEFAULT_GXTB = os.environ.get("QDPROPS_GXTB") or (
     str(_GXTB_ROOT / "bin/xtb") if (_GXTB_ROOT / "bin/xtb").is_file() else "xtb")
 DEFAULT_XTB = os.environ.get("QDPROPS_XTB") or (str(_MAC_XTB) if _MAC_XTB.is_file() else (shutil.which("xtb") or "xtb"))
 XTB_METHODS = {"gfn2": ["--gfn", "2"], "gxtb": ["--gxtb"]}
-# Last-resort SCF annealing (electronic temperatures, K): converge hot, then cool.
-ANNEAL_ETEMPS = (10000, 3000, 1500)
+# Last-resort SCF annealing (electronic temperatures, K): converge hot, then cool. Cd14Se13Cl2
+# desorption products failed at every fixed temperature up to 10000 K; 20000 K converges and
+# the ladder below reaches the base temperature.
+ANNEAL_ETEMPS = (20000, 10000, 6000, 3000, 1500)
+ANNEAL_ITERATIONS = 1000
 # Extra library directories for the macOS g-xTB build; the static Linux binary needs none.
 DEFAULT_XTB_LIBS = os.environ.get(
     "QDPROPS_XTB_LIBS",
@@ -267,7 +270,7 @@ class XtbRunner:
             if out is None:
                 (tmp / "xtbrestart").unlink(missing_ok=True)
                 for etemp in ANNEAL_ETEMPS:
-                    used[:] = ["--etemp", str(etemp), "--iterations", "500"]
+                    used[:] = ["--etemp", str(etemp), "--iterations", str(ANNEAL_ITERATIONS)]
                     if call([]) is None:
                         break
                 else:
