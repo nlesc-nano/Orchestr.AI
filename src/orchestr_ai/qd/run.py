@@ -121,8 +121,9 @@ class Settings:
         if not self.relax_batch_atoms:
             return "serial-bfgs-0.02"
         from . import batch_relax as b
+        from .steps import detachment as d
         return (f"batched-lbfgs-{b.FMAX}-plateau-{b.PLATEAU_FMAX}-{b.PLATEAU_WINDOW}-{b.PLATEAU_DE_ATOM}"
-                f"-stall-{b.STALL_WINDOWS}-{b.MAX_STEPS}")
+                f"-stall-{b.STALL_WINDOWS}-{b.MAX_STEPS}-polish-{d.POLISH_FMAX}-{d.POLISH_WINDOW}")
 
     def for_step(self, step: str) -> dict:
         from .engines import resolve_device

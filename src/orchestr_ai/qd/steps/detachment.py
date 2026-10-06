@@ -66,6 +66,10 @@ LOCAL_FRAC = 0.6         # ... or this fraction of the dot's largest native-atom
                          # (in small dots a removal relaxes the whole cluster)
 REFRESH_WINDOW = 1.0     # eV, estimated units within this of the best relaxed candidate are relaxed too
                          # (a removal can make a distant unit much cheaper; stale estimates are too high)
+POLISH_FMAX = 0.005      # eV/Å: candidates that can enter the beam are re-relaxed to this before ranking.
+POLISH_WINDOW = 0.3      # eV above the level's best. A product can pass 0.02 eV/Å in a flat valley
+POLISH_STEPS = 1000      # (soft surface / Cl motion) 0.1 eV above its minimum (Cd68, level 5), and
+                         # then the beam follows another branch; polishing makes the ranking robust.
 TASKS_PER_WORKER = 15    # GPU tasks per worker process before it is replaced
 KB_EV = 8.617333262e-5
 
@@ -93,17 +97,18 @@ def _relax_task(args):
     return atoms.get_positions(), e, ok
 
 
-def _relax_batch(structures, settings):
+def _relax_batch(structures, settings, polish=False):
     """[(positions, energy, converged), ...]: all structures relaxed together (batch_relax)."""
     from ..batch_relax import BatchMACE, relax_many
     calc = mace_calculator(settings.head, settings.model, settings.device, settings.dtype)
-    res = relax_many(structures, BatchMACE(calc, settings.relax_batch_atoms))
+    kw = {"fmax": POLISH_FMAX, "plateau_fmax": 0.05, "max_steps": POLISH_STEPS} if polish else {}
+    res = relax_many(structures, BatchMACE(calc, settings.relax_batch_atoms), **kw)
     return [(r.positions, r.energy, r.converged) for r in res]
 
 
 def _relax_batch_task(args):
-    structures, settings = args
-    return _relax_batch(structures, settings)
+    structures, settings, polish = (*args, False)[:3]
+    return _relax_batch(structures, settings, polish)
 
 
 def _frequencies_local(symbols, pts, settings) -> np.ndarray:
@@ -150,9 +155,9 @@ class _Worker:
     def relax(self, symbols, pts, settings):
         return self._pool().apply(_relax_task, ((list(symbols), np.asarray(pts, float), settings),))
 
-    def relax_many(self, structures, settings):
+    def relax_many(self, structures, settings, polish=False):
         return self._pool().apply(_relax_batch_task, (([(list(a), np.asarray(b, float)) for a, b in structures],
-                                                       settings),))
+                                                       settings, polish),))
 
     def frequencies(self, symbols, pts, settings):
         return self._pool().apply(_frequencies_task, ((list(symbols), np.asarray(pts, float), settings),))
@@ -197,14 +202,15 @@ class RelaxCache:
     def relax(self, symbols, pts, settings):
         return self.relax_many([(symbols, pts)], settings)[0]
 
-    def relax_many(self, structures, settings):
+    def relax_many(self, structures, settings, polish=False):
         """
         [(atoms, energy, converged), ...] for every (symbols, positions): cached ones
         are reused, the others relaxed together in one batch (settings.relax_batch_atoms > 0)
-        or one at a time (ASE BFGS), and checkpointed.
+        or one at a time (ASE BFGS), and checkpointed. polish: to POLISH_FMAX.
         """
         from ase import Atoms
-        keys = [f"{self.tag}|{geometry_key(sy, p)}" for sy, p in structures]
+        tag = f"{self.tag}|polish-{POLISH_FMAX}" if polish else self.tag
+        keys = [f"{tag}|{geometry_key(sy, p)}" for sy, p in structures]
         todo = {}
         for k, (sy, p) in zip(keys, structures):
             if k not in self.data and k not in todo:
@@ -212,15 +218,16 @@ class RelaxCache:
         if todo:
             new = list(todo.values())
             if settings.relax_batch_atoms:
-                res = (self.worker.relax_many(new, settings) if self.worker is not None
-                       else _relax_batch(new, settings))
+                res = (self.worker.relax_many(new, settings, polish) if self.worker is not None
+                       else _relax_batch(new, settings, polish))
             else:
                 res = []
                 for sy, p in new:
-                    if self.worker is not None:
+                    if self.worker is not None and not polish:
                         res.append(self.worker.relax(sy, p, settings))
                     else:
-                        atoms, e, ok = _relax(sy, p, settings)
+                        atoms, e, ok = (_relax(sy, p, settings, fmax=POLISH_FMAX, steps=POLISH_STEPS) if polish
+                                        else _relax(sy, p, settings))
                         res.append((atoms.get_positions(), e, ok))
             for k, (pos, e, ok) in zip(todo, res):
                 self.data[k] = {"energy": float(e), "converged": bool(ok),
@@ -421,6 +428,35 @@ def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
         _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"])
 
 
+def polish(beam, todo, cache, settings, e_full, ensemble, stats):
+    """Re-relax relaxed candidates [(state index, representative key), ...] to POLISH_FMAX (one batch)."""
+    if not todo:
+        return
+    res = cache.relax_many([(beam[si].table[key]["product"].get_chemical_symbols(),
+                             beam[si].table[key]["product"].get_positions()) for si, key in todo], settings, polish=True)
+    stats["polished"] = stats.get("polished", 0) + len(todo)
+    for (si, key), (atoms, e, ok) in zip(todo, res):
+        state = beam[si]
+        J = e - e_full - state.energy
+        for entry in state.table.values():
+            if entry.get("rep") == key:
+                entry["J"] = J
+        state.table[key].update(product=atoms, converged=ok, polished=True)
+        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J)
+
+
+def polish_level(beam, cache, settings, e_full, ensemble, stats):
+    """Polish every relaxed representative within POLISH_WINDOW of the level's best."""
+    reps = [(si, key) for si, st in enumerate(beam) for key, e in st.table.items()
+            if e["exact"] and e.get("rep") == key and "product" in e]
+    if not reps:
+        return
+    energy = {c: beam[c[0]].energy + beam[c[0]].table[c[1]]["J"] for c in reps}
+    best = min(energy.values())
+    polish(beam, [c for c in reps if energy[c] <= best + POLISH_WINDOW and not beam[c[0]].table[c[1]].get("polished")],
+           cache, settings, e_full, ensemble, stats)
+
+
 def relax_estimate(state, key, cache, settings, e_full, ensemble, stats):
     relax_estimates([state], [(0, key)], cache, settings, e_full, ensemble, stats)
 
@@ -433,9 +469,6 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
     groups = [plan(st, enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q), local_r)
               for st in beam]
     evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats)
-    for si, st in enumerate(beam):
-        for key, entry in st.table.items():
-            heapq.heappush(heap, (st.energy + entry["J"], si, key))
     # Refresh: relax estimated candidates close to the best relaxed one, per beam state (one batch).
     todo = []
     for si, st in enumerate(beam):
@@ -446,8 +479,11 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
         todo += [(si, key) for key, entry in st.table.items()
                  if not entry["exact"] and entry["J"] <= best + REFRESH_WINDOW]
     relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
-    for si, key in todo:
-        heapq.heappush(heap, (beam[si].energy + beam[si].table[key]["J"], si, key))
+    # Polish the candidates that can enter the beam, then rank.
+    polish_level(beam, cache, settings, e_full, ensemble, stats)
+    for si, st in enumerate(beam):
+        for key, entry in st.table.items():
+            heapq.heappush(heap, (st.energy + entry["J"], si, key))
     children, seen = [], set()
     while heap and len(children) < BEAM:
         e_child, si, key = heapq.heappop(heap)
@@ -460,6 +496,12 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
             heapq.heappush(heap, (st.energy + st.table[key]["J"], si, key))
             continue
         rep = st.table[entry["rep"]]
+        if not rep.get("polished"):      # relaxed after the level was polished (lazy estimate)
+            polish(beam, [(si, entry["rep"])], cache, settings, e_full, ensemble, stats)
+            for k2, e2 in st.table.items():      # its equivalent units share the new energy
+                if e2.get("rep") == entry["rep"]:
+                    heapq.heappush(heap, (st.energy + e2["J"], si, k2))
+            continue
         un = rep["unit"]
         removed = set(un["atoms"])
         keep = [i for i in range(len(st.sym)) if i not in removed]
@@ -609,6 +651,8 @@ def run(ctx) -> dict:
             "method": f"beam search (width {BEAM}) with local updates", "unit": unit, "n_units": m,
             "n_steps": len(ladder), "beam": BEAM, "local_radius_A": local_r,
             "n_relaxations": stats["relaxations"], "n_lazy_checks": stats["lazy"],
+            "n_polished": stats.get("polished", 0), "polish_fmax_eV_A": POLISH_FMAX,
+            "polish_window_eV": POLISH_WINDOW,
             "n_relaxations_new": cache.n_new, "n_configurations": len(confs),
             "ensemble": "every relaxed configuration evaluated by the search",
             "dE_eV": [st["dE_eV"] for st in ladder],
