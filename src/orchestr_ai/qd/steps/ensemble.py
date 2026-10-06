@@ -174,7 +174,7 @@ def run_md(ctx) -> dict:
     masses = _masses(symbols)
     m = np.load(ctx.props / "modes.npz")
     freqs, modes = np.asarray(m["frequencies_cm1"], float), np.asarray(m["modes_mass_weighted"], float)
-    dt = s.md_timestep_fs or (0.5 if masses.min() < 4.0 else 2.0)          # H needs 0.5 fs
+    dt = float(s.md_timestep_fs)
     n_steps = int(round(s.md_ps * 1000 / dt))
     stride = max(1, int(round(s.md_stride_fs / dt)))
     skip = int(round(s.md_skip_ps * 1000 / dt))
