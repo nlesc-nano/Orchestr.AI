@@ -117,17 +117,21 @@ class BatchMACE:
     def _safe_chunk(self, chunk):
         """One MACE call; on CUDA out-of-memory split the chunk in half, retry, and lower
         max_atoms for the rest of the run (MACE-MH-1 in float64 needs ~5 MB per atom)."""
+        import gc
         import torch
         try:
             return self._chunk(chunk)
         except torch.OutOfMemoryError:
             if len(chunk) == 1:
                 raise
-            torch.cuda.empty_cache()
-            half = len(chunk) // 2
-            self.max_atoms = max(1, min(self.max_atoms, sum(len(s) for s, _ in chunk[:half])))
-            self.n_oom += 1
-            return self._safe_chunk(chunk[:half]) + self._safe_chunk(chunk[half:])
+        # Retry outside the except block: the exception's traceback keeps the failed
+        # call's tensors alive, so memory can only be released once it is gone.
+        gc.collect()
+        torch.cuda.empty_cache()
+        half = len(chunk) // 2
+        self.max_atoms = max(1, min(self.max_atoms, sum(len(s) for s, _ in chunk[:half])))
+        self.n_oom += 1
+        return self._safe_chunk(chunk[:half]) + self._safe_chunk(chunk[half:])
 
     def __call__(self, structures: Sequence[Tuple[Sequence[str], np.ndarray]]):
         out, chunk, n = [], [], 0
