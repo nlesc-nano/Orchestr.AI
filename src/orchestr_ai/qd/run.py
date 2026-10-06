@@ -109,7 +109,7 @@ class Settings:
     md_schedule: List = field(default_factory=lambda: [[300.0], [400.0], [500.0], [600.0],
                                                        [300.0, 1000.0], [300.0, 1000.0]])  # [T] or ramp [T0, T1]
     md_ps: float = 5.0                  # length of every replica
-    md_timestep_fs: float = 0.0         # 0: 2 fs, 0.5 fs with H
+    md_timestep_fs: float = 2.0         # fs; the library's dots are heavy elements only
     md_friction_fs: float = 0.01        # Langevin friction (1/fs; 100 fs relaxation time)
     md_stride_fs: float = 100.0         # one stored frame every stride
     md_skip_ps: float = 0.5             # not stored at the start
