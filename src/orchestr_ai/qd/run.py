@@ -95,9 +95,9 @@ class Settings:
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
     detach_perturb_A: float = 0.0       # random displacement (sigma, A) of every candidate's start (search tests)
     detach_seed: int = 0
-    relax_batch_atoms: int = 8000       # desorption candidates relaxed together, at most this many atoms per
+    relax_batch_atoms: int = 4000       # desorption candidates relaxed together, at most this many atoms per
                                         # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS).
-                                        # MACE-MH-1 in float64 needs ~5.5 MB per atom: 8,000 atoms fit an 80 GB A100
+                                        # MACE-MH-1 in float64 needs 11.4 MB per atom (A100 benchmark): 4,000 atoms (46 GB)
                                         # (larger chunks are split automatically when the GPU runs out of memory)
     sites_hessian_max_atoms: int = 0    # per-site Hessians for the binding-site map up to this size (0: never;
                                         # otherwise the first path step's thermal part is used for every site)
