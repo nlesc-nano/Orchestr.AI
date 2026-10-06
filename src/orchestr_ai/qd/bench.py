@@ -7,7 +7,8 @@ For CdSe zinc-blende spheres of the requested sizes it times, with MACE-MH-1:
   force      one energy+forces call on one structure
   batched    energy+forces per structure when as many copies as fit in one call
              (batch_atoms) go together (the desorption and Wigner path)
-  analytic   autograd Hessian (qdprops uses it up to 300 atoms); 'oom' when it does not fit
+  analytic   autograd Hessian (qdprops uses it up to 300 atoms), timed on 48 sampled rows and
+             scaled to 3N; 'oom' when the force graph does not fit
   fd         batched central finite-difference Hessian, 6N displaced copies; above
              fd_full_atoms timed on a sample of columns and scaled to all 3N
 
@@ -73,8 +74,31 @@ def _is_oom(exc) -> bool:
     return "out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"
 
 
+def analytic_rows(ev, sym, pts, rows):
+    """Rows of the analytic (autograd) Hessian, eV/A^2: one forward pass with the force graph
+    kept, one backward pass per row. Timing a sample of rows and scaling to 3N gives the cost
+    of the full analytic Hessian without computing it."""
+    import torch
+    from mace.tools import torch_geometric
+    batch = torch_geometric.Batch.from_data_list([ev._graph(sym, pts)]).to(ev.calc.device)
+    dtype = next(ev.model.parameters()).dtype
+    for key in batch.keys:
+        if torch.is_tensor(batch[key]) and torch.is_floating_point(batch[key]):
+            batch[key] = batch[key].to(dtype=dtype)
+    d = batch.to_dict()
+    out = ev.model(d, compute_force=True, compute_stress=False, training=True)
+    F = out["forces"].reshape(-1)
+    pos = d["positions"]
+    H = []
+    for j in rows:
+        g, = torch.autograd.grad(-F[j], pos, retain_graph=True)
+        H.append(g.reshape(-1).detach().cpu().numpy())
+    return np.array(H)
+
+
 def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_atoms=8000,
-          analytic_max=2000, fd_full_atoms=300, fd_sample_columns=96, delta=0.01, log=print) -> dict:
+          analytic_max=5000, analytic_rows_sampled=48, fd_full_atoms=300, fd_sample_columns=96, delta=0.01,
+          log=print, output=None) -> dict:
     from ase import Atoms
     device = resolve_device(device)
     calc = mace_calculator(head, model, device, dtype)
@@ -97,29 +121,33 @@ def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_a
             row["batched_s_per_structure"], row["batch_size"] = t / k, k
             row["batched_peak_gb"] = _peak_gb(device)
             row["max_atoms_per_call"] = ev.max_atoms        # lowered if the GPU ran out of memory
+        h_an = None
         if n <= analytic_max:
-            atoms = Atoms(sym, positions=pts)
+            k_rows = list(np.linspace(0, 3 * n - 1, min(3 * n, analytic_rows_sampled)).astype(int))
             _peak_reset(device)
             try:
-                t, h_an = _timed(lambda: mace_hessian(atoms, calc), device)
-                row["analytic_s"], row["analytic_peak_gb"] = t, _peak_gb(device)
+                t, _ = _timed(lambda: analytic_rows(ev, sym, pts, k_rows), device)
+                row["analytic_s"] = t * 3 * n / len(k_rows)          # forward pass included once per sample
+                row["analytic_sampled_rows"], row["analytic_peak_gb"] = len(k_rows), _peak_gb(device)
             except RuntimeError as exc:
                 if not _is_oom(exc):
                     raise
-                row["analytic_s"], h_an = "oom", None
-                _peak_reset(device)
-        else:
-            h_an = None
+                row["analytic_s"] = "oom"
+            _peak_reset(device)
+            if n == min(sizes) and n <= fd_full_atoms:              # one full check of analytic vs FD
+                h_an = mace_hessian(Atoms(sym, positions=pts), calc)
         cols = None if n <= fd_full_atoms else list(np.linspace(0, 3 * n - 1, min(3 * n, fd_sample_columns)).astype(int))
         _peak_reset(device)
         t, h_fd = _timed(lambda: fd_hessian(sym, pts, ev, delta, columns=cols), device)
         row["fd_s"] = t if cols is None else t * 3 * n / len(cols)
         row["fd_sampled_columns"] = None if cols is None else len(cols)
         row["fd_peak_gb"] = _peak_gb(device)
-        if cols is None and isinstance(h_an, np.ndarray):
+        if h_an is not None and cols is None:
             row["fd_vs_analytic_max_abs"] = float(np.abs(h_fd - h_an).max())     # eV/Å²
         rows.append(row)
-        log(json.dumps(row))
+        log(json.dumps(row), flush=True)
+        if output:                                             # keep what is done if the job is stopped
+            open(output, "w").write(json.dumps({"rows": rows}, indent=1) + "\n")
     fits = {}
     for key in ("force_s", "batched_s_per_structure", "analytic_s", "fd_s"):
         xy = [(r["n_atoms"], r[key]) for r in rows if isinstance(r.get(key), float) and r[key] > 0]
@@ -141,13 +169,14 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--dtype", default="float64")
     ap.add_argument("--batch-atoms", type=int, default=8000)
-    ap.add_argument("--analytic-max", type=int, default=2000)
+    ap.add_argument("--analytic-max", type=int, default=5000)
     ap.add_argument("--fd-full-atoms", type=int, default=300)
     ap.add_argument("--fd-sample-columns", type=int, default=96)
     ap.add_argument("-o", "--output", default="bench.json")
     a = ap.parse_args(argv)
     res = bench([int(x) for x in a.sizes.split(",")], a.model, a.head, a.device, a.dtype, a.batch_atoms,
-                a.analytic_max, a.fd_full_atoms, a.fd_sample_columns)
+                a.analytic_max, fd_full_atoms=a.fd_full_atoms, fd_sample_columns=a.fd_sample_columns,
+                output=a.output)
     open(a.output, "w").write(json.dumps(res, indent=1) + "\n")
     print(json.dumps(res["power_law_fits"], indent=1))
     return 0
