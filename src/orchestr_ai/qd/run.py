@@ -244,7 +244,9 @@ def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optiona
         res["_hash"] = h
         res["_inputs"] = inputs
         res["_seconds"] = round(time.time() - t0, 2)
-        out.write_text(json.dumps(res, indent=1, default=_json_default))
+        tmp = out.with_suffix(".tmp")
+        tmp.write_text(json.dumps(res, indent=1, default=_json_default))
+        os.replace(tmp, out)
         ctx.results[step] = res
         log(f"[qdprops]   {step}: done in {res['_seconds']:.1f} s")
     summary = _write_properties(ctx)
