@@ -113,7 +113,8 @@ def _frequencies_local(symbols, pts, settings) -> np.ndarray:
     method = settings.hessian
     if method == "auto":
         method = "analytic" if len(atoms) <= settings.analytic_max_atoms else "fd"
-    h = mace_hessian(atoms, atoms.calc) if method == "analytic" else _fd_hessian(atoms, settings.fd_step)
+    h = (mace_hessian(atoms, atoms.calc) if method == "analytic"
+         else _fd_hessian(atoms, settings.fd_step, settings.relax_batch_atoms))
     freqs, _, _ = vibrations(h, atoms.get_positions(), atoms.get_masses())
     return freqs
 

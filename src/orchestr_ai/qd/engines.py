@@ -76,6 +76,35 @@ def _allow_mps_double() -> None:
 
 
 @functools.lru_cache(maxsize=4)
+def available_cpus() -> int:
+    """CPU cores this process may use (the SLURM allocation on Linux, all cores elsewhere)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def xtb_pool(n_jobs: int, threads_per_run: int = 4) -> tuple:
+    """
+    (concurrent runs, OpenMP threads per run) for `n_jobs` independent xtb single
+    points. A 100-200 atom dot gains little beyond ~4 threads, so the cores are
+    split between runs rather than given to one run at a time.
+    """
+    cpus = available_cpus()
+    workers = max(1, min(n_jobs, cpus // max(1, threads_per_run)))
+    return workers, max(1, cpus // workers)
+
+
+def parallel_map(fn, items, workers: int) -> list:
+    """fn over items, in order, on `workers` threads (xtb runs as a subprocess, so threads suffice)."""
+    items = list(items)
+    if workers <= 1 or len(items) <= 1:
+        return [fn(x) for x in items]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(fn, items))
+
+
 def mace_calculator(head: str = DEFAULT_HEAD, model: str = DEFAULT_MODEL,
                     device: str = "cpu", dtype: str = "float64"):
     """
