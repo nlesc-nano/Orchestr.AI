@@ -93,6 +93,8 @@ class Settings:
     detach_max_steps: int = 4        # stepwise MX_q removals
     detach_max_candidates: int = 12  # symmetry-unique sites relaxed per step
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
+    detach_perturb_A: float = 0.0       # random displacement (sigma, A) of every candidate's start (search tests)
+    detach_seed: int = 0
     relax_batch_atoms: int = 8000       # desorption candidates relaxed together, at most this many atoms per
                                         # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS).
                                         # MACE-MH-1 in float64 needs ~5.5 MB per atom: 8,000 atoms fit an 80 GB A100
@@ -144,6 +146,8 @@ class Settings:
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
             "detachment": {**mace, "fmax": self.fmax, "max_steps": self.detach_max_steps, "relaxer": self.relaxer(),
                            "max_candidates": self.detach_max_candidates,
+                           **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
+                              if self.detach_perturb_A else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
                            "temperatures": self.temperatures},
             "solvation": {"method": "gfn2", "checks": self.solvation_checks},
