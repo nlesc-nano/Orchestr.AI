@@ -96,7 +96,7 @@ def analytic_rows(ev, sym, pts, rows):
     return np.array(H)
 
 
-def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_atoms=8000,
+def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_atoms=4000,
           analytic_max=5000, analytic_rows_sampled=48, fd_full_atoms=300, fd_sample_columns=96, delta=0.01,
           log=print, output=None) -> dict:
     from ase import Atoms
@@ -168,7 +168,7 @@ def main(argv=None) -> int:
     ap.add_argument("--sizes", default="100,300,1000,2000,5000")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--dtype", default="float64")
-    ap.add_argument("--batch-atoms", type=int, default=8000)
+    ap.add_argument("--batch-atoms", type=int, default=4000)
     ap.add_argument("--analytic-max", type=int, default=5000)
     ap.add_argument("--fd-full-atoms", type=int, default=300)
     ap.add_argument("--fd-sample-columns", type=int, default=96)

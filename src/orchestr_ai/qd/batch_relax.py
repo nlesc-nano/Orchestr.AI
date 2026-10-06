@@ -62,7 +62,7 @@ class RelaxResult:
 class BatchMACE:
     """Energies (eV) and forces (eV/Å) of many structures per MACE call, chunked by total atom count."""
 
-    def __init__(self, calc, max_atoms: int = 8000, descriptors: bool = False):
+    def __init__(self, calc, max_atoms: int = 4000, descriptors: bool = False):
         self.calc = calc                      # mace.calculators.MACECalculator (one model)
         self.model = calc.models[0]
         self.max_atoms = int(max_atoms)
@@ -116,7 +116,7 @@ class BatchMACE:
 
     def _safe_chunk(self, chunk):
         """One MACE call; on CUDA out-of-memory split the chunk in half, retry, and lower
-        max_atoms for the rest of the run (MACE-MH-1 in float64 needs ~5 MB per atom)."""
+        max_atoms for the rest of the run (MACE-MH-1 in float64 needs 11.4 MB per atom)."""
         import gc
         import torch
         try:
