@@ -62,10 +62,11 @@ class RelaxResult:
 class BatchMACE:
     """Energies (eV) and forces (eV/Å) of many structures per MACE call, chunked by total atom count."""
 
-    def __init__(self, calc, max_atoms: int = 20000):
+    def __init__(self, calc, max_atoms: int = 20000, descriptors: bool = False):
         self.calc = calc                      # mace.calculators.MACECalculator (one model)
         self.model = calc.models[0]
         self.max_atoms = int(max_atoms)
+        self.descriptors = descriptors        # also return MACE's invariant node features (n_atoms, n_desc)
         self.n_calls = 0
         self.n_oom = 0                        # chunks split after a CUDA out-of-memory error
 
@@ -97,8 +98,21 @@ class BatchMACE:
         f = out["forces"].detach().cpu().numpy().astype(float) * (
             self.calc.energy_units_to_eV / self.calc.length_units_to_A)
         sizes = [len(s) for s, _ in structures]
-        return [(float(e[i]), f[a:b]) for i, (a, b) in
-                enumerate(zip(np.cumsum([0] + sizes[:-1]), np.cumsum(sizes)))]
+        bounds = list(zip(np.cumsum([0] + sizes[:-1]), np.cumsum(sizes)))
+        if not self.descriptors:
+            return [(float(e[i]), f[a:b]) for i, (a, b) in enumerate(bounds)]
+        d = self._invariants(out["node_feats"]).detach().cpu().numpy().astype(np.float32)
+        return [(float(e[i]), f[a:b], d[a:b]) for i, (a, b) in enumerate(bounds)]
+
+    def _invariants(self, node_feats):
+        """The invariant (scalar) channels of every interaction layer, as calc.get_descriptors."""
+        from e3nn import o3
+        from mace.modules.utils import extract_invariant
+        irreps_out = o3.Irreps(str(self.model.products[0].linear.irreps_out))
+        l_max = irreps_out.lmax
+        n_inv = irreps_out.dim // (l_max + 1) ** 2
+        return extract_invariant(node_feats, num_layers=int(self.model.num_interactions),
+                                 num_features=n_inv, l_max=l_max)
 
     def _safe_chunk(self, chunk):
         """One MACE call; on CUDA out-of-memory split the chunk in half, retry, and lower
