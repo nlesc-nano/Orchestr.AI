@@ -94,7 +94,7 @@ def _write_extxyz(path, symbols, frames):
 def _evaluator(s, descriptors=False):
     from ..batch_relax import BatchMACE
     calc = mace_calculator(s.head, s.model, s.device, s.dtype)
-    return BatchMACE(calc, s.relax_batch_atoms or 8000, descriptors=descriptors)
+    return BatchMACE(calc, s.relax_batch_atoms or 4000, descriptors=descriptors)
 
 
 def _label(ev, symbols, positions):
