@@ -62,7 +62,7 @@ class RelaxResult:
 class BatchMACE:
     """Energies (eV) and forces (eV/Å) of many structures per MACE call, chunked by total atom count."""
 
-    def __init__(self, calc, max_atoms: int = 20000, descriptors: bool = False):
+    def __init__(self, calc, max_atoms: int = 8000, descriptors: bool = False):
         self.calc = calc                      # mace.calculators.MACECalculator (one model)
         self.model = calc.models[0]
         self.max_atoms = int(max_atoms)
