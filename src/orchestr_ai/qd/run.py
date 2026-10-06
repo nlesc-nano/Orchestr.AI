@@ -93,8 +93,10 @@ class Settings:
     detach_max_steps: int = 4        # stepwise MX_q removals
     detach_max_candidates: int = 12  # symmetry-unique sites relaxed per step
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
-    relax_batch_atoms: int = 20000      # desorption candidates relaxed together, at most this many atoms per
-                                        # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS)
+    relax_batch_atoms: int = 8000       # desorption candidates relaxed together, at most this many atoms per
+                                        # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS).
+                                        # MACE-MH-1 in float64 needs ~5.5 MB per atom: 8,000 atoms fit an 80 GB A100
+                                        # (larger chunks are split automatically when the GPU runs out of memory)
     sites_hessian_max_atoms: int = 0    # per-site Hessians for the binding-site map up to this size (0: never;
                                         # otherwise the first path step's thermal part is used for every site)
     sites_solvation: str = "scf"        # scf: a GFN2-xTB single point per site | frozen: the intact dot's charges

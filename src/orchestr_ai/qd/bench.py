@@ -73,7 +73,7 @@ def _is_oom(exc) -> bool:
     return "out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"
 
 
-def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_atoms=20000,
+def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_atoms=8000,
           analytic_max=2000, fd_full_atoms=300, fd_sample_columns=96, delta=0.01, log=print) -> dict:
     from ase import Atoms
     device = resolve_device(device)
@@ -140,7 +140,7 @@ def main(argv=None) -> int:
     ap.add_argument("--sizes", default="100,300,1000,2000,5000")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--dtype", default="float64")
-    ap.add_argument("--batch-atoms", type=int, default=20000)
+    ap.add_argument("--batch-atoms", type=int, default=8000)
     ap.add_argument("--analytic-max", type=int, default=2000)
     ap.add_argument("--fd-full-atoms", type=int, default=300)
     ap.add_argument("--fd-sample-columns", type=int, default=96)
