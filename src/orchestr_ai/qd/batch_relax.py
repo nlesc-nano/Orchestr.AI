@@ -195,3 +195,34 @@ def relax_many(structures: Sequence[Tuple[Sequence[str], np.ndarray]], evaluator
         active = still
         step += 1
     return done
+
+
+def fd_hessian(symbols: Sequence[str], pts: np.ndarray, evaluator, delta: float = 0.01,
+               columns: Sequence[int] | None = None) -> np.ndarray:
+    """
+    Central finite-difference Hessian (eV/Å², shape (3N, 3N)) from batched force
+    calls: the 6N displaced copies are independent, so they go through `evaluator`
+    (a BatchMACE) many at a time, in blocks small enough that only one block of
+    geometries is held at once. Same formula as the serial steps.hessian._fd_hessian.
+    `columns` restricts the work to some Cartesian columns (the others stay zero),
+    for timing a large structure on a sample.
+    """
+    pos0 = np.asarray(pts, float)
+    n = len(symbols)
+    cols = list(range(3 * n)) if columns is None else list(columns)
+    h = np.zeros((3 * n, 3 * n))
+    per_call = max(1, getattr(evaluator, "max_atoms", 20000) // (2 * n))   # columns per MACE call
+    block = per_call * 8
+    for b in range(0, len(cols), block):
+        ks = cols[b:b + block]
+        structures = []
+        for k in ks:
+            i, a = divmod(k, 3)
+            for sgn in (1.0, -1.0):
+                p = pos0.copy()
+                p[i, a] += sgn * delta
+                structures.append((symbols, p))
+        res = evaluator(structures)
+        for j, k in enumerate(ks):
+            h[:, k] = -(res[2 * j][1].ravel() - res[2 * j + 1][1].ravel()) / (2.0 * delta)
+    return h

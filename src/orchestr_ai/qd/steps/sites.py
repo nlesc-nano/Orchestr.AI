@@ -40,7 +40,7 @@ import numpy as np
 
 from ..records import read_xyz_first_frame
 
-from ..engines import XtbRunner
+from ..engines import XtbRunner, parallel_map, xtb_pool
 from ..references import binary_units, ideal_gas_g, reference_set
 from ..solution import EXPORT_T
 from .detachment import RelaxCache, _product
@@ -175,15 +175,18 @@ def run(ctx) -> dict:
         g1 = _g_label(s1, p1, e1, steps[0]["frequencies_cm1"]) - e1          # thermal part only
     thermo_ok = exact or g1 is not None
     cache = RelaxCache(ctx)
-    runner = XtbRunner("gfn2")
+    frozen = s.sites_solvation == "frozen"
+    workers, threads = xtb_pool(1 + (0 if frozen else len(classes)))
+    runner = XtbRunner("gfn2", threads=threads)
     gas0, _e, _u = runner.run_series(sym0, pts0, [], base=SMEAR, fallbacks=SMEAR_FALLBACKS)
     gb0 = gb_conductor_energy(sym0, pts0, gas0.charges)
     g0 = _g_label(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"])
-    out = []
+    out, products = [], []
     try:
-        for c in classes:
-            psym, ppts = _product(sym0, pts0, [c["cation"]] + list(c["ligands"]))
-            atoms, e_prod, ok = cache.relax(psym, ppts, s)           # cached by the detachment search
+        removed = [[c["cation"]] + list(c["ligands"]) for c in classes]
+        prods = [_product(sym0, pts0, r) for r in removed]
+        relaxed = cache.relax_many([(psym, ppts) for psym, ppts in prods], s)   # cached by the detachment search
+        for c, r, (psym, _p), (atoms, e_prod, ok) in zip(classes, removed, prods, relaxed):
             pos = atoms.get_positions()
             row = {**c, "relaxed_converged": ok, "E_prod_eV": e_prod}
             if exact:
@@ -192,18 +195,22 @@ def run(ctx) -> dict:
                 row["n_imaginary"] = int((fr < -10.0).sum())
             elif g1 is not None:
                 row["G_prod_eV"] = (g1 + e_prod).round(6).tolist()
-            if s.sites_solvation == "frozen":
+            if frozen:
                 # the intact dot's charges on the remaining atoms, re-neutralised (no new SCF)
-                keep = [i for i in range(len(sym0)) if i not in set([c["cation"]] + list(c["ligands"]))]
+                keep = [i for i in range(len(sym0)) if i not in set(r)]
                 qk = np.asarray(gas0.charges)[keep]
                 row["solv_inf_eV"] = gb_conductor_energy(list(psym), pos, qk - qk.sum() / len(qk))
-            else:
-                gas, _e, used = runner.run_series(list(psym), pos, [], base=SMEAR, fallbacks=SMEAR_FALLBACKS)
-                row["solv_inf_eV"] = gb_conductor_energy(list(psym), pos, gas.charges)
-                row["smearing"] = " ".join(used) or "none"
             out.append(row)
+            products.append((list(psym), pos))
     finally:
         cache.close()
+    if not frozen:
+        # per-site GFN2-xTB charges: independent single points, side by side on the job's cores
+        series = parallel_map(lambda pp: runner.run_series(pp[0], pp[1], [], base=SMEAR, fallbacks=SMEAR_FALLBACKS),
+                              products, workers)
+        for row, (psym, pos), (gas, _e, used) in zip(out, products, series):
+            row["solv_inf_eV"] = gb_conductor_energy(psym, pos, gas.charges)
+            row["smearing"] = " ".join(used) or "none"
     orbits = _orbits(sym0, pts0, classes)
     for row, orb in zip(out, orbits):
         row["orbit"] = orb
@@ -219,7 +226,8 @@ def run(ctx) -> dict:
                     "hessian_method": method,
                     "n_atoms_coloured": len({a for r in out for o in r["orbit"] for a in o}),
                     "dE_eV_range": [min(r["dE_eV"] for r in out), max(r["dE_eV"] for r in out)],
-                    "n_new_relaxations": cache.n_new},
+                    "n_new_relaxations": cache.n_new,
+                    "xtb_parallel": f"{workers} x {threads} threads"},
         "T": EXPORT_T,
         "dot": {"symbols": sym0, "positions": (pts0 - centre).round(4).tolist(), "role": role,
                 "G_label_eV": g0.round(6).tolist(), "solv_inf_eV": gb0},

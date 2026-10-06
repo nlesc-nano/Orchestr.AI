@@ -25,7 +25,11 @@ CM1_TO_EV = 1.2398419843320026e-4
 KB_EV = 8.617333262e-5
 
 
-def _fd_hessian(atoms, delta: float) -> np.ndarray:
+def _fd_hessian(atoms, delta: float, batch_atoms: int = 0) -> np.ndarray:
+    """Central finite differences of the forces; batched on the GPU when batch_atoms > 0."""
+    if batch_atoms:
+        from ..batch_relax import BatchMACE, fd_hessian
+        return fd_hessian(atoms.get_chemical_symbols(), atoms.get_positions(), BatchMACE(atoms.calc, batch_atoms), delta)
     pos0 = atoms.get_positions().copy()
     n = len(atoms)
     h = np.zeros((3 * n, 3 * n))
@@ -150,7 +154,8 @@ def run(ctx) -> dict:
     method = s.hessian
     if method == "auto":
         method = "analytic" if n <= s.analytic_max_atoms else "fd"
-    h = mace_hessian(atoms, atoms.calc) if method == "analytic" else _fd_hessian(atoms, s.fd_step)
+    h = (mace_hessian(atoms, atoms.calc) if method == "analytic"
+         else _fd_hessian(atoms, s.fd_step, s.relax_batch_atoms))
     masses = atoms.get_masses()
     freqs, modes, tr = vibrations(h, atoms.get_positions(), masses)
 

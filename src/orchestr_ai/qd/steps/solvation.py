@@ -31,7 +31,7 @@ import numpy as np
 
 from ..records import read_xyz_first_frame
 
-from ..engines import XtbRunner
+from ..engines import XtbRunner, parallel_map, xtb_pool
 from ..references import binary_units, reference_set
 
 RADIUS_SCALE = 1.15
@@ -81,7 +81,6 @@ def gb_conductor_energy(symbols, pts, charges) -> float:
 
 def run(ctx) -> dict:
     u = binary_units(ctx.symbols, ctx.charges, ctx.native)
-    runner = XtbRunner("gfn2")                  # gas-phase single points: multithreaded is fine
     structures = [("dot_0", *ctx.relaxed())]
     for st in ctx.results.get("detachment", {}).get("steps", []):
         sym, pts = read_xyz_first_frame(str(ctx.props / f"detach_{st['k']}.xyz"))
@@ -96,8 +95,12 @@ def run(ctx) -> dict:
     flag_sets = ([["--cosmo", f"{e:g}"] for e in COSMO_CHECK] + [["--alpb", s, "gsolv"] for s in ALPB_SOLVENTS]
                  if checks else [])
     gb, cosmo, alpb, smearing = {}, {}, {s: {} for s in ALPB_SOLVENTS}, {}
-    for name, sym, pts in structures:
-        gas, energies, used = runner.run_series(list(sym), pts, flag_sets, base=SMEAR, fallbacks=SMEAR_FALLBACKS)
+    # the structures are independent: run them side by side on the job's cores
+    workers, threads = xtb_pool(len(structures))
+    runner = XtbRunner("gfn2", threads=threads)
+    series = parallel_map(lambda st: runner.run_series(list(st[1]), st[2], flag_sets, base=SMEAR,
+                                                       fallbacks=SMEAR_FALLBACKS), structures, workers)
+    for (name, sym, pts), (gas, energies, used) in zip(structures, series):
         smearing[name] = " ".join(used) or "none"
         gb[name] = gb_conductor_energy(list(sym), pts, gas.charges)
         e_gas = gas.energy_eV
@@ -115,6 +118,7 @@ def run(ctx) -> dict:
             "n_structures": len(structures),
             "n_cosmo_failed": sum(v is None for c in cosmo.values() for v in c.values()),
             "n_alpb_failed": sum(v is None for a in alpb.values() for v in a.values()),
+            "xtb_parallel": f"{workers} x {threads} threads",
         },
         "gb_inf": gb,
         "radius_scale": RADIUS_SCALE,
