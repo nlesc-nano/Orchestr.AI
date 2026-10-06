@@ -193,6 +193,25 @@ class RelaxCache:
         self.data = json.loads(self.path.read_text()) if self.path.is_file() else {}
         self.worker = _Worker() if resolve_device(s.device) == "mps" else None
         self.n_new = 0
+        # Optional random displacement of every candidate's starting geometry (reproducibility
+        # tests of the search): seeded by detach_seed and the record directory, so copies of a
+        # record in one job take different perturbations.
+        self.perturb = float(getattr(s, "detach_perturb_A", 0.0) or 0.0)
+        self.perturb_seed = f"{getattr(s, 'detach_seed', 0)}|{ctx.record_dir.name}"
+        if self.perturb:
+            self.tag += f"|perturb-{self.perturb}-{self.perturb_seed}"
+
+    def _perturbed(self, structures):
+        if not self.perturb:
+            return structures
+        import hashlib
+        out = []
+        for sy, p in structures:
+            h = hashlib.sha256(f"{self.perturb_seed}|{geometry_key(sy, p)}".encode()).digest()
+            rng = np.random.default_rng(int.from_bytes(h[:8], "little"))
+            p = np.asarray(p, float)
+            out.append((sy, p + rng.normal(0.0, self.perturb, p.shape)))
+        return out
 
     def _save(self):
         tmp = self.path.with_suffix(".tmp")
@@ -210,6 +229,8 @@ class RelaxCache:
         """
         from ase import Atoms
         tag = f"{self.tag}|polish-{POLISH_FMAX}" if polish else self.tag
+        if not polish:
+            structures = self._perturbed(structures)
         keys = [f"{tag}|{geometry_key(sy, p)}" for sy, p in structures]
         todo = {}
         for k, (sy, p) in zip(keys, structures):
