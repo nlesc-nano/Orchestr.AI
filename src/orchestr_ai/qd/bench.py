@@ -88,10 +88,15 @@ def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_a
         _peak_reset(device)
         row["force_s"], _ = _timed(lambda: ev([(sym, pts)]), device, repeat=3)
         row["force_peak_gb"] = _peak_gb(device)
-        k = max(1, batch_atoms // n)
+        if row["force_peak_gb"]:
+            row["force_mb_per_atom"] = round(1e3 * row["force_peak_gb"] / n, 3)
+        k = max(1, ev.max_atoms // n)
         if k > 1:
+            _peak_reset(device)
             t, _ = _timed(lambda: ev([(sym, pts)] * k), device, repeat=2)
             row["batched_s_per_structure"], row["batch_size"] = t / k, k
+            row["batched_peak_gb"] = _peak_gb(device)
+            row["max_atoms_per_call"] = ev.max_atoms        # lowered if the GPU ran out of memory
         if n <= analytic_max:
             atoms = Atoms(sym, positions=pts)
             _peak_reset(device)
@@ -124,6 +129,7 @@ def bench(sizes, model, head="omat_pbe", device="auto", dtype="float64", batch_a
     import torch
     gpu = torch.cuda.get_device_name(0) if str(device).startswith("cuda") else device
     return {"device": gpu, "dtype": dtype, "head": head, "model": model, "batch_atoms": batch_atoms,
+            "max_atoms_per_call": ev.max_atoms, "oom_splits": ev.n_oom,
             "fd_delta": delta, "rows": rows, "power_law_fits": fits}
 
 

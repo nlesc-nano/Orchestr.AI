@@ -67,6 +67,7 @@ class BatchMACE:
         self.model = calc.models[0]
         self.max_atoms = int(max_atoms)
         self.n_calls = 0
+        self.n_oom = 0                        # chunks split after a CUDA out-of-memory error
 
     def _graph(self, symbols, positions):
         import ase
@@ -99,16 +100,31 @@ class BatchMACE:
         return [(float(e[i]), f[a:b]) for i, (a, b) in
                 enumerate(zip(np.cumsum([0] + sizes[:-1]), np.cumsum(sizes)))]
 
+    def _safe_chunk(self, chunk):
+        """One MACE call; on CUDA out-of-memory split the chunk in half, retry, and lower
+        max_atoms for the rest of the run (MACE-MH-1 in float64 needs ~5 MB per atom)."""
+        import torch
+        try:
+            return self._chunk(chunk)
+        except torch.OutOfMemoryError:
+            if len(chunk) == 1:
+                raise
+            torch.cuda.empty_cache()
+            half = len(chunk) // 2
+            self.max_atoms = max(1, min(self.max_atoms, sum(len(s) for s, _ in chunk[:half])))
+            self.n_oom += 1
+            return self._safe_chunk(chunk[:half]) + self._safe_chunk(chunk[half:])
+
     def __call__(self, structures: Sequence[Tuple[Sequence[str], np.ndarray]]):
         out, chunk, n = [], [], 0
         for s, p in structures:
             if chunk and n + len(s) > self.max_atoms:
-                out += self._chunk(chunk)
+                out += self._safe_chunk(chunk)
                 chunk, n = [], 0
             chunk.append((s, p))
             n += len(s)
         if chunk:
-            out += self._chunk(chunk)
+            out += self._safe_chunk(chunk)
         return out
 
 
