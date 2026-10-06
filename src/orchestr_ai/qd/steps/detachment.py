@@ -45,6 +45,7 @@ from __future__ import annotations
 import gc
 import itertools
 import json
+import os
 import multiprocessing
 
 import numpy as np
@@ -187,6 +188,11 @@ class RelaxCache:
         self.worker = _Worker() if resolve_device(s.device) == "mps" else None
         self.n_new = 0
 
+    def _save(self):
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data))
+        os.replace(tmp, self.path)             # atomic: a job killed at its time limit keeps the checkpoint
+
     def relax(self, symbols, pts, settings):
         return self.relax_many([(symbols, pts)], settings)[0]
 
@@ -218,7 +224,7 @@ class RelaxCache:
             for k, (pos, e, ok) in zip(todo, res):
                 self.data[k] = {"energy": float(e), "converged": bool(ok),
                                 "positions": np.asarray(pos).round(6).tolist()}
-            self.path.write_text(json.dumps(self.data))
+            self._save()
             self.n_new += len(todo)
             _free_device_memory(settings)
         out = []
@@ -238,7 +244,7 @@ class RelaxCache:
             freqs = _frequencies_local(symbols, pts, settings)
             _free_device_memory(settings)
         self.data[key] = np.asarray(freqs).round(4).tolist()
-        self.path.write_text(json.dumps(self.data))
+        self._save()
         return freqs
 
     def close(self):
