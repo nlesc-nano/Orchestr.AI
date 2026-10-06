@@ -15,4 +15,5 @@ ingest folds them into the library index.
 """
 
 SCHEMA_VERSION = 1
-STEPS = ("relax", "structure", "hessian", "vibspec", "electronic", "stability", "detachment", "solvation", "sites", "report")
+STEPS = ("relax", "structure", "hessian", "vibspec", "electronic", "stability", "detachment", "solvation", "sites", "report",
+         "wigner", "md")

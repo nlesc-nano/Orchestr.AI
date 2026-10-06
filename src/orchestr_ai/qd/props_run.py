@@ -13,7 +13,8 @@ Runs the QD properties pipeline over library records (`<id>/record.json` +
       tree: path/to/library                # every record.json below it
       max_atoms: 300                       # skip larger records (optional)
       steps: [relax, structure, hessian, vibspec, electronic, stability,
-              detachment, solvation, sites, report]   # default: all
+              detachment, solvation, sites, report, wigner, md]   # default: all
+                                           # (md only with settings.md_enabled: the MD subset)
       force: false                         # ignore cached step results
       cif: null                            # bulk CIF (default: from record.origin.cif)
       settings:                            # any field of orchestr_ai.qd.run.Settings

@@ -51,6 +51,7 @@ DEPS = {
     "solvation": ["relax", "detachment"],
     "sites": ["relax", "structure", "hessian", "detachment", "solvation"],
     "report": ["relax", "structure", "hessian", "vibspec", "stability", "detachment", "solvation", "sites"],
+    "wigner": ["relax", "structure", "hessian"], "md": ["relax", "hessian", "wigner"],
 }
 # Source files whose content enters a step's cache key (engine versions are in the provenance).
 CODE_DEPS = {
@@ -59,6 +60,7 @@ CODE_DEPS = {
     "electronic": ["steps/electronic.py"], "stability": ["steps/stability.py", "references.py"],
     "detachment": ["steps/detachment.py", "references.py"], "solvation": ["steps/solvation.py"], "sites": ["steps/sites.py"],
     "report": ["steps/report.py", "steps/vibplots.py", "bulk.py", "solution.py", "dashboards.py"],
+    "wigner": ["steps/ensemble.py"], "md": ["steps/ensemble.py"],
 }
 FORMAL_CHARGES = {
     "Cd": 2, "Zn": 2, "Pb": 2, "Hg": 2, "In": 3, "Ga": 3, "Al": 3, "Cs": 1, "Rb": 1,
@@ -97,6 +99,22 @@ class Settings:
                                         # otherwise the first path step's thermal part is used for every site)
     sites_solvation: str = "scf"        # scf: a GFN2-xTB single point per site | frozen: the intact dot's charges
     mu_grid: List[float] = field(default_factory=lambda: [round(-3.0 + 0.02 * i, 4) for i in range(201)])
+    # ensembles for DFT labelling (steps/ensemble.py)
+    wigner_temperatures: List[float] = field(default_factory=lambda: [300.0, 400.0, 500.0, 600.0])
+    wigner_samples: int = 100           # per temperature
+    wigner_cutoff_cm: float = 20.0      # modes below are not sampled (translations, rotations, numerical noise)
+    wigner_soft_cm: float = 50.0        # modes below are sampled with the width of a mode at this frequency
+    wigner_seed: int = 0
+    md_enabled: bool = False            # MD runs on a subset of the library: switch on per job
+    md_schedule: List = field(default_factory=lambda: [[300.0], [400.0], [500.0], [600.0],
+                                                       [300.0, 1000.0], [300.0, 1000.0]])  # [T] or ramp [T0, T1]
+    md_ps: float = 5.0                  # length of every replica
+    md_timestep_fs: float = 0.0         # 0: 2 fs, 0.5 fs with H
+    md_friction_fs: float = 0.01        # Langevin friction (1/fs; 100 fs relaxation time)
+    md_stride_fs: float = 100.0         # one stored frame every stride
+    md_skip_ps: float = 0.5             # not stored at the start
+    md_max_force: float = 50.0          # eV/A: a replica above this is stopped (model out of its domain)
+    md_seed: int = 0
 
     def relaxer(self) -> str:
         """How desorption products are relaxed (enters the step hashes and the relaxation cache)."""
@@ -129,6 +147,12 @@ class Settings:
             "sites": {**mace, "method": "gfn2", "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
                       "hessian_max_atoms": self.sites_hessian_max_atoms, "solvation": self.sites_solvation},
             "report": {},
+            "wigner": {**mace, "temperatures": self.wigner_temperatures, "samples": self.wigner_samples,
+                       "cutoff_cm": self.wigner_cutoff_cm, "soft_cm": self.wigner_soft_cm, "seed": self.wigner_seed},
+            "md": {**mace, "enabled": self.md_enabled, "schedule": self.md_schedule, "ps": self.md_ps,
+                   "timestep_fs": self.md_timestep_fs, "friction_fs": self.md_friction_fs,
+                   "stride_fs": self.md_stride_fs, "skip_ps": self.md_skip_ps, "max_force": self.md_max_force,
+                   "seed": self.md_seed},
         }[step]
 
 
@@ -214,8 +238,10 @@ def _step_inputs(ctx: Context, step: str) -> dict:
 
 def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optional[Settings] = None,
                cif: Optional[str] = None, force: bool = False, log: Callable[[str], None] = print) -> dict:
-    from .steps import detachment, electronic, hessian, relax, report, sites, solvation, stability, structure, vibspec
-    impl = {"relax": relax.run, "structure": structure.run, "hessian": hessian.run, "vibspec": vibspec.run,
+    from .steps import (detachment, electronic, ensemble, hessian, relax, report, sites, solvation, stability,
+                        structure, vibspec)
+    impl = {"wigner": ensemble.run_wigner, "md": ensemble.run_md,
+            "relax": relax.run, "structure": structure.run, "hessian": hessian.run, "vibspec": vibspec.run,
             "electronic": electronic.run, "stability": stability.run, "detachment": detachment.run,
             "solvation": solvation.run, "sites": sites.run, "report": report.run}
     settings = settings or Settings()
