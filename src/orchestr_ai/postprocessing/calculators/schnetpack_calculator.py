@@ -217,3 +217,32 @@ class SchnetpackCalculator(BaseCalculator):
             ]
 
         return energies_np, forces_list, latent_frame_list, latent_atom_list
+
+    def embedding_graph(self, frames):
+        """Energies of `frames` with their autograd graph to the positions and to the species-embedding output h0,
+        for the NTK features of pool active learning (postprocessing.features.ntk_frame_features). The Forces output
+        module is skipped: in eval mode it frees the energy graph."""
+        from schnetpack.atomistic import Forces
+
+        rep = self.model.representation
+        captured = {}
+        hook = rep.embedding.register_forward_hook(lambda mod, inp, out: captured.update(h0=out))
+        try:
+            inputs = self.prepare_batch(frames)
+            with torch.set_grad_enabled(True):
+                for m in self.model.input_modules:
+                    inputs = m(inputs)
+                inputs = rep(inputs)
+                for m in self.model.output_modules:
+                    if not isinstance(m, Forces):
+                        inputs = m(inputs)
+        finally:
+            hook.remove()
+        return {
+            "energy": inputs["energy"],
+            "h0": captured["h0"],
+            "positions": inputs[Properties.R],
+            "atom_frame": inputs[Properties.idx_m],
+            "atom_species": inputs[Properties.Z],
+            "n_species": 119,  # species index = atomic number
+        }

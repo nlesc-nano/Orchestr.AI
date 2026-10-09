@@ -5,3 +5,5 @@ cuequivariance-torch
 cuequivariance-ops-torch-cu12
 scikit-learn
 dscribe
+numba>=0.59.0
+quests>=2026.2.22

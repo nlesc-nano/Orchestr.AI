@@ -29,6 +29,11 @@ class NequipCalculator(BaseCalculator):
                     "NequIP is required for NequIP/Allegro postprocessing, "
                     "but it is not installed."
                 ) from e
+            try:  # TorchScript ops of models compiled with cuEquivariance (need a GPU)
+                import cuequivariance_torch  # noqa: F401
+                import cuequivariance_ops_torch  # noqa: F401
+            except ImportError:
+                pass
 
             species = sorted(list(set(frames[0].get_chemical_symbols())))
             chemical_map = {s: s for s in species}
@@ -42,44 +47,30 @@ class NequipCalculator(BaseCalculator):
         return frames
 
     def forward(self, frames, n_atoms_list):
+        """Energies, forces and invariant latents straight from the model output: the final node features
+        (NequIP) or the final edge features summed on their central atom (Allegro)."""
         e_list = []
         f_list = []
         latent_frame_list = []
         latent_atom_list = []
 
         for atoms in frames:
-            atoms.calc = self.calc
-
-            energy = atoms.get_potential_energy()
-            forces = atoms.get_forces()
-
-            e_list.append(energy)
-            f_list.append(forces)
-
-            force_magnitudes = np.linalg.norm(forces, axis=1)
-
-            hist, _ = np.histogram(
-                force_magnitudes,
-                bins=20,
-                range=(0.0, 10.0),
-            )
-            hist = hist.astype(np.float64) / max(1, len(force_magnitudes))
-
-            moments = np.array(
-                [
-                    force_magnitudes.mean(),
-                    force_magnitudes.std(),
-                    force_magnitudes.max(),
-                    energy / len(atoms),
-                ]
+            out = self.calc.call_model(self.calc.atoms_to_data(atoms))
+            e_list.append(float(out["total_energy"].detach().cpu()) * self.calc.energy_units_to_eV)
+            f_list.append(
+                out["forces"].detach().cpu().numpy().astype(np.float64)
+                * self.calc.energy_units_to_eV / self.calc.length_units_to_A
             )
 
-            frame_latent = np.concatenate([hist, moments]).astype(np.float64)
-            atom_latents = np.hstack(
-                [forces, force_magnitudes.reshape(-1, 1)]
-            ).astype(np.float64)
+            if "node_features" in out:
+                latent = out["node_features"].detach()
+            else:
+                edge = out["edge_features"].detach()
+                latent = torch.zeros(len(atoms), edge.shape[1], dtype=edge.dtype, device=edge.device)
+                latent.index_add_(0, out["edge_index"][0], edge)
+            atom_latents = latent.cpu().numpy().astype(np.float64)
 
-            latent_frame_list.append(frame_latent)
+            latent_frame_list.append(atom_latents.mean(axis=0))
             latent_atom_list.append(atom_latents)
 
         return np.array(e_list), f_list, latent_frame_list, latent_atom_list

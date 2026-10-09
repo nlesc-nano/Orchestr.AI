@@ -5,3 +5,5 @@ scikit-learn
 wandb
 schnetpack
 dscribe
+numba>=0.59.0
+quests>=2026.2.22

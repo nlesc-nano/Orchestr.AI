@@ -39,17 +39,21 @@ eval:
   # --- Out-of-Distribution Pool AL ---
   unlabeled_pool_path: "md_trajectory.extxyz"
   active_learning: "influence"
-  budget_max: 50
+  budget_max: 50 # Number of pool frames to select for DFT labelling
+  candidate_tol: 0.01 # Label nothing if candidates (above a floor, below the ceilings) are <= this fraction of the pool
+  al_kernel: latent # Redundancy features: latent (invariant node features) | soap | ntk_e (energy NTK; MACE, SchNet, PaiNN) | ntk_ef (energy + force NTK; MACE, SchNet, PaiNN) | quests (per-atom QUESTS coverage)
+  al_quality: sigma # sigma: candidates ranked by ensemble sigmaF_mean x redundancy | pv: the kernel alone decides (posterior variance; plain LCMD)
+  al_selector: greedy # greedy (log-det, rank-1 updates) | lcmd (cluster-based; not with quests)
+  al_members: all # latent, ntk_e, ntk_ef: "all" concatenates every member (NTK cost grows with members); an index (e.g. 0) keeps one
+  ntk_probes: 16 # ntk_ef only: random probes for the force part (cost grows linearly)
+  quests_report: false # Print the per-element QUESTS coverage of the pool (share of atoms with dH > 0)
   merge_al_selections: true
 
-  # Pool processing window & stride
+  # Pool stride
   pool_stride: 1 # Thin the pool by taking every Nth frame
-  pool_window: 100 # Number of frames per AL evaluation window
-  pool_min_k: 5 # Target number of diverse frames to pick per window
   rdf_stride: 2 # Subsample validation frames for RDF thresholding
 
   # Percentile bounds (Adaptive Caps & Novelty)
-  percentile_gamma: 99 # GP leverage γ gate in whitened latent space (98-99 recommended)
   percentile_F_low: 99.5 # Lower bound for force uncertainty
   percentile_F_hi: 95 # Adaptive upper cap limit
 

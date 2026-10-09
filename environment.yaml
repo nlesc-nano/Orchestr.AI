@@ -14,5 +14,7 @@ dependencies:
       - torch>=2.6,<2.7 
       - schnetpack
       - dscribe
+      - numba>=0.59.0
+      - quests>=2026.2.22
       - nequip==0.16.0
       - git+https://github.com/mir-group/allegro.git@v0.8.0

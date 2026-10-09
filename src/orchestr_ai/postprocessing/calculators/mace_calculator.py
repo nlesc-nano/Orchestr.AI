@@ -25,6 +25,18 @@ class MaceCalculator(BaseCalculator):
         self._prepare_z_table()
         self._detect_cuequivariance()
 
+        # node_feats concatenates the product output of every layer; keep its
+        # rotation-invariant (l = 0) channels only
+        self.scalar_idx = None
+        if hasattr(self.model, "products"):
+            idx, start = [], 0
+            for product in self.model.products:
+                for mul, ir in product.linear.irreps_out:
+                    if ir.l == 0:
+                        idx.extend(range(start, start + mul))
+                    start += mul * ir.dim
+            self.scalar_idx = torch.tensor(idx, dtype=torch.long, device=self.device)
+
         # Handle MACE heads dynamically for multi-head models
         try:
             self.available_heads = self.model.heads
@@ -148,7 +160,10 @@ class MaceCalculator(BaseCalculator):
         latent_atom_list = [None] * len(n_atoms_list)
 
         if "node_feats" in results and results["node_feats"] is not None:
-            latents_cpu = results["node_feats"].detach().cpu()
+            latents = results["node_feats"].detach()
+            if self.scalar_idx is not None:
+                latents = latents[:, self.scalar_idx]
+            latents_cpu = latents.cpu()
 
             latent_atom_list = [
                 l.numpy()
@@ -160,6 +175,26 @@ class MaceCalculator(BaseCalculator):
                 for l in latent_atom_list
             ]
         return energies_np, forces_list, latent_frame_list, latent_atom_list
+
+    def embedding_graph(self, frames):
+        """Energies of `frames` with their autograd graph to the positions and to the species-embedding output h0,
+        for the NTK features of pool active learning (postprocessing.features.ntk_frame_features)."""
+        captured = {}
+        hook = self.model.node_embedding.register_forward_hook(lambda mod, inp, out: captured.update(h0=out))
+        try:
+            data = self.prepare_batch(frames).to_dict()
+            with torch.set_grad_enabled(True):
+                energy = self.model(data, compute_force=False)["energy"]
+        finally:
+            hook.remove()
+        return {
+            "energy": energy,
+            "h0": captured["h0"],
+            "positions": data["positions"],
+            "atom_frame": data["batch"],
+            "atom_species": data["node_attrs"].argmax(dim=1),
+            "n_species": data["node_attrs"].shape[1],
+        }
 
 
 class AutoScaledReconstructedMaceCalculator(MaceCalculator):
@@ -245,7 +280,10 @@ class AutoScaledReconstructedMaceCalculator(MaceCalculator):
         latent_atom_list = [None] * len(n_atoms_list)
 
         if "node_feats" in results_base and results_base["node_feats"] is not None:
-            latents_cpu = results_base["node_feats"].detach().cpu()
+            latents = results_base["node_feats"].detach()
+            if self.scalar_idx is not None:
+                latents = latents[:, self.scalar_idx]
+            latents_cpu = latents.cpu()
             latent_atom_list = [
                 l.numpy()
                 for l in torch.split(latents_cpu, n_atoms_list, dim=0)

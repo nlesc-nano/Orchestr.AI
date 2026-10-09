@@ -8,6 +8,7 @@ Refactored in 2025: Fully object-oriented, removing all legacy code.
 import os
 import time
 import shutil
+import hashlib
 import multiprocessing as mp
 import numpy as np
 import pandas as pd
@@ -27,7 +28,8 @@ from orchestr_ai.postprocessing.metrics import (
 from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_schnetpack
 from orchestr_ai.postprocessing.calculator import evaluate_model
 from orchestr_ai.postprocessing.stats import MLFFStats
-from orchestr_ai.postprocessing.features import compute_features
+from orchestr_ai.postprocessing.features import al_feature_space, al_options, compute_features, member_features
+from orchestr_ai.postprocessing.calculators.factory import create_calculator
 from orchestr_ai.postprocessing.uq_metrics_calculator import (
     VarianceScalingCalibrator,
     calculate_uq_metrics,
@@ -40,7 +42,6 @@ from orchestr_ai.postprocessing.active_learning import (
     adaptive_learning_mig_pool_windowed,
     adaptive_learning_ensemble_calibrated,
     UQCalibrator,
-    compute_soap_features,
     apply_sigma_comp_calibration,
     apply_sigma_energy_calibration,
     calibrate_sigma_force_frames,
@@ -49,7 +50,7 @@ from orchestr_ai.postprocessing.active_learning import (
     write_pool_al_diagnostics_csv,
 )
 from orchestr_ai.postprocessing.plots.al_diagnostics import (
-    generate_al_diagnostic_plots, generate_per_atom_uncertainty_plots, generate_force_envelope_scatter
+    generate_al_diagnostic_plots, generate_per_atom_uncertainty_plots
     )
 from orchestr_ai.postprocessing.rdf import (
     compute_rdf_thresholds_from_reference,
@@ -818,6 +819,11 @@ class EnsembleRunner:
 
         return model_paths_to_run
 
+    def _calculator(self, model_path):
+        """Calculator of one ensemble member (used by the pool AL feature spaces)."""
+        model_obj = _load_eval_model(model_path, self.framework, self.device)
+        return create_calculator(self.framework, model_obj, self.device, self.config, self.neighbor_list)
+
     def _multi_gpu_enabled(self):
         flag = self.eval_cfg.get("multi_gpu_inference", "auto")
         if isinstance(flag, str) and flag.strip().lower() == "auto":
@@ -834,6 +840,35 @@ class EnsembleRunner:
             return f"{os.path.abspath(model_path)}|{stat.st_size}|{stat.st_mtime_ns}"
         except OSError:
             return os.path.abspath(model_path)
+
+    def _cache_fingerprint(self, frames, head=None):
+        """Hash of the frames (species + positions) and of the model files and head behind a cache."""
+        data_hash = hashlib.blake2b(digest_size=16)
+        for fr in frames:
+            data_hash.update(np.asarray(fr.numbers, dtype=np.int64).tobytes())
+            data_hash.update(np.asarray(fr.positions, dtype=np.float64).tobytes())
+        model_hash = hashlib.blake2b(str(head or self.config.get("mace_head")).encode(), digest_size=16)
+        for path in self._model_paths():
+            with open(path, "rb") as fh:
+                model_hash.update(fh.read())
+        return f"{data_hash.hexdigest()}:{model_hash.hexdigest()}"
+
+    @staticmethod
+    def _check_cache(data, cache_file, fingerprint):
+        cached = str(data["fingerprint"]) if "fingerprint" in data else ""
+        if cached == fingerprint:
+            return
+        if not cached:
+            reason = "it has no fingerprint (written by an older version), so it cannot be verified"
+        else:
+            changes = ("the frames (species/positions) changed", "the model files or head changed")
+            reason = " and ".join(
+                msg for old, new, msg in zip(cached.split(":"), fingerprint.split(":"), changes) if old != new
+            )
+        print(
+            f"[EnsembleRunner] WARNING: cache '{cache_file}' may not match this run: {reason}. "
+            "Using it anyway; delete it or set eval.ensemble_force_recompute: true to rebuild it."
+        )
 
     @staticmethod
     def _atomic_savez(path, compressed=True, **arrays):
@@ -1021,10 +1056,12 @@ class EnsembleRunner:
         if force_recompute:
             print(f"\n[EnsembleRunner] ensemble_force_recompute=true; rebuilding {cache_file} from scratch.")
             self._clear_resume_artifacts(cache_file)
+        fingerprint = self._cache_fingerprint(frames)
 
         if not force_recompute and os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading cached predictions from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
+            self._check_cache(data, cache_file, fingerprint)
 
             # --- Safely load ens_L_atom only if it exists in the cache ---
             ens_L_atom_cached = data["ens_L_atom"] if "ens_L_atom" in data else None
@@ -1147,6 +1184,7 @@ class EnsembleRunner:
         self._atomic_savez(
             cache_file,
             compressed=False,
+            fingerprint=np.array(fingerprint),
             ens_E=ens_E,
             ens_F=ens_F,
             ens_L_frame=ens_L_frame
@@ -1163,6 +1201,7 @@ class EnsembleRunner:
         if force_recompute:
             print(f"\n[EnsembleRunner] ensemble_force_recompute=true; rebuilding {cache_file} from scratch.")
             self._clear_resume_artifacts(cache_file)
+        fingerprint = self._cache_fingerprint(frames)
 
         if not force_recompute and os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading aggregate cache from {cache_file}...")
@@ -1172,7 +1211,8 @@ class EnsembleRunner:
                 if n_cached is not None and len(n_cached) != len(frames):
                     print("[EnsembleRunner] Cached stats frame count does not match current dataset; rebuilding.")
                 else:
-                    return {key: data[key] for key in data.files if key != "cache_format"}
+                    self._check_cache(data, cache_file, fingerprint)
+                    return {key: data[key] for key in data.files if key not in ("cache_format", "fingerprint")}
             print("[EnsembleRunner] Existing cache is not aggregate stats; rebuilding.")
 
         print(f"\n[EnsembleRunner] Aggregate inference for {len(frames)} labeled frames...")
@@ -1181,8 +1221,7 @@ class EnsembleRunner:
 
         sum_E = sum_E2 = None
         sum_F = sum_F2 = None
-        sum_L = sum_L2 = None
-        count_E = count_F = count_L = None
+        count_E = count_F = None
         n_models_done = 0
         model_keys_done = []
         model_paths_done = []
@@ -1195,11 +1234,8 @@ class EnsembleRunner:
                     sum_E2 = ckpt["sum_E2"]
                     sum_F = ckpt["sum_F"]
                     sum_F2 = ckpt["sum_F2"]
-                    sum_L = ckpt["sum_L"]
-                    sum_L2 = ckpt["sum_L2"]
                     count_E = ckpt["count_E"]
                     count_F = ckpt["count_F"]
-                    count_L = ckpt["count_L"]
                     loaded_model_keys_done = [str(x) for x in ckpt["model_keys_done"]]
                     if not set(loaded_model_keys_done).issubset(current_model_keys):
                         raise ValueError("checkpoint model list does not match current ensemble files")
@@ -1216,8 +1252,7 @@ class EnsembleRunner:
                 print(f"[EnsembleRunner] Failed to load checkpoint {checkpoint_file}: {exc}; rebuilding.")
                 sum_E = sum_E2 = None
                 sum_F = sum_F2 = None
-                sum_L = sum_L2 = None
-                count_E = count_F = count_L = None
+                count_E = count_F = None
                 n_models_done = 0
                 model_keys_done = []
                 model_paths_done = []
@@ -1285,27 +1320,22 @@ class EnsembleRunner:
                     sum_E2 = np.zeros_like(e, dtype=float)
                     sum_F = np.zeros_like(f, dtype=float)
                     sum_F2 = np.zeros_like(f, dtype=float)
-                    sum_L = np.zeros_like(l_frame, dtype=float)
-                    sum_L2 = np.zeros_like(l_frame, dtype=float)
                     count_E = np.zeros_like(e, dtype=float)
                     count_F = np.zeros_like(f, dtype=float)
-                    count_L = np.zeros_like(l_frame, dtype=float)
 
                 e_mask = np.isfinite(e)
                 f_mask = np.isfinite(f)
-                l_mask = np.isfinite(l_frame)
                 sum_E += np.where(e_mask, e, 0.0)
                 sum_E2 += np.where(e_mask, e**2, 0.0)
                 sum_F += np.where(f_mask, f, 0.0)
                 sum_F2 += np.where(f_mask, f**2, 0.0)
-                sum_L += np.where(l_mask, l_frame, 0.0)
-                sum_L2 += np.where(l_mask, l_frame**2, 0.0)
                 count_E += e_mask.astype(float)
                 count_F += f_mask.astype(float)
-                count_L += l_mask.astype(float)
                 n_models_done += 1
                 model_keys_done.append(model_key)
                 model_paths_done.append(model_path)
+                # this member's frame latents, for the latent AL feature space
+                member_features("latent", m_idx, model_key, frames, lambda idx: l_frame[idx], chunk=len(frames))
 
                 self._atomic_savez(
                     checkpoint_file,
@@ -1319,11 +1349,8 @@ class EnsembleRunner:
                     sum_E2=sum_E2,
                     sum_F=sum_F,
                     sum_F2=sum_F2,
-                    sum_L=sum_L,
-                    sum_L2=sum_L2,
                     count_E=count_E,
                     count_F=count_F,
-                    count_L=count_L,
                 )
                 print(f"     Saved aggregate checkpoint to {checkpoint_file}")
 
@@ -1337,7 +1364,7 @@ class EnsembleRunner:
         if n_models_done == 0:
             raise ValueError("No ensemble models were successfully evaluated.")
 
-        if np.any(count_E < n_models_done) or np.any(count_F < n_models_done) or np.any(count_L < n_models_done):
+        if np.any(count_E < n_models_done) or np.any(count_F < n_models_done):
             print(
                 "[EnsembleRunner] WARNING: Some model/frame predictions failed; "
                 "aggregate statistics use finite predictions only."
@@ -1346,13 +1373,10 @@ class EnsembleRunner:
         with np.errstate(invalid="ignore", divide="ignore"):
             mu_E = np.where(count_E > 0, sum_E / count_E, np.nan)
             mu_F = np.where(count_F > 0, sum_F / count_F, np.nan)
-            mu_L_frame = np.where(count_L > 0, sum_L / count_L, np.nan)
             var_E = np.where(count_E > 1, (sum_E2 - count_E * mu_E**2) / (count_E - 1), 0.0)
             var_F = np.where(count_F > 1, (sum_F2 - count_F * mu_F**2) / (count_F - 1), 0.0)
-            var_L = np.where(count_L > 1, (sum_L2 - count_L * mu_L_frame**2) / (count_L - 1), 0.0)
         sigma_E = np.sqrt(np.maximum(var_E, 0.0))
         sigma_F = np.sqrt(np.maximum(var_F, 0.0))
-        sigma_L_frame = np.sqrt(np.maximum(var_L, 0.0))
         n_atoms_per_frame = np.array([len(fr) for fr in frames], dtype=int)
 
         result = {
@@ -1361,13 +1385,11 @@ class EnsembleRunner:
             "sigma_E": sigma_E,
             "mu_F": mu_F,
             "sigma_F": sigma_F,
-            "mu_L_frame": mu_L_frame,
-            "sigma_L_frame": sigma_L_frame,
             "n_atoms_per_frame": n_atoms_per_frame,
         }
 
         print(f"[EnsembleRunner] Saving aggregate cache to {cache_file}...")
-        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", **result)
+        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", fingerprint=np.array(fingerprint), **result)
         try:
             if os.path.exists(checkpoint_file):
                 os.remove(checkpoint_file)
@@ -1378,41 +1400,28 @@ class EnsembleRunner:
     def _aggregate_prediction_sets(self, pred_sets, frames):
         sum_E = sum_E2 = None
         sum_F = sum_F2 = None
-        sum_L = sum_L2 = None
-        count_E = count_F = count_L = None
+        count_E = count_F = None
         n_models_done = 0
 
-        for preds_E, preds_F, preds_L_frame in pred_sets:
+        for preds_E, preds_F, _ in pred_sets:
             e = np.asarray(preds_E, dtype=float)
             f = np.concatenate(preds_F, axis=0).astype(float, copy=False)
-            l_frame = _coerce_frame_latents(
-                preds_L_frame,
-                len(frames),
-                context=f"model {n_models_done+1} frame latents",
-            )
             if sum_E is None:
                 sum_E = np.zeros_like(e, dtype=float)
                 sum_E2 = np.zeros_like(e, dtype=float)
                 sum_F = np.zeros_like(f, dtype=float)
                 sum_F2 = np.zeros_like(f, dtype=float)
-                sum_L = np.zeros_like(l_frame, dtype=float)
-                sum_L2 = np.zeros_like(l_frame, dtype=float)
                 count_E = np.zeros_like(e, dtype=float)
                 count_F = np.zeros_like(f, dtype=float)
-                count_L = np.zeros_like(l_frame, dtype=float)
 
             e_mask = np.isfinite(e)
             f_mask = np.isfinite(f)
-            l_mask = np.isfinite(l_frame)
             sum_E += np.where(e_mask, e, 0.0)
             sum_E2 += np.where(e_mask, e**2, 0.0)
             sum_F += np.where(f_mask, f, 0.0)
             sum_F2 += np.where(f_mask, f**2, 0.0)
-            sum_L += np.where(l_mask, l_frame, 0.0)
-            sum_L2 += np.where(l_mask, l_frame**2, 0.0)
             count_E += e_mask.astype(float)
             count_F += f_mask.astype(float)
-            count_L += l_mask.astype(float)
             n_models_done += 1
 
         if n_models_done == 0:
@@ -1421,10 +1430,8 @@ class EnsembleRunner:
         with np.errstate(invalid="ignore", divide="ignore"):
             mu_E = np.where(count_E > 0, sum_E / count_E, np.nan)
             mu_F = np.where(count_F > 0, sum_F / count_F, np.nan)
-            mu_L_frame = np.where(count_L > 0, sum_L / count_L, np.nan)
             var_E = np.where(count_E > 1, (sum_E2 - count_E * mu_E**2) / (count_E - 1), 0.0)
             var_F = np.where(count_F > 1, (sum_F2 - count_F * mu_F**2) / (count_F - 1), 0.0)
-            var_L = np.where(count_L > 1, (sum_L2 - count_L * mu_L_frame**2) / (count_L - 1), 0.0)
 
         return {
             "n_models": np.array(n_models_done, dtype=int),
@@ -1432,8 +1439,6 @@ class EnsembleRunner:
             "sigma_E": np.sqrt(np.maximum(var_E, 0.0)),
             "mu_F": mu_F,
             "sigma_F": np.sqrt(np.maximum(var_F, 0.0)),
-            "mu_L_frame": mu_L_frame,
-            "sigma_L_frame": np.sqrt(np.maximum(var_L, 0.0)),
             "n_atoms_per_frame": np.array([len(fr) for fr in frames], dtype=int),
         }
 
@@ -1456,6 +1461,8 @@ class EnsembleRunner:
                         os.remove(path)
                 except OSError as exc:
                     print(f"[EnsembleRunner] WARNING: Could not remove {path}: {exc}")
+        fingerprint = self._cache_fingerprint(frames)
+        other_fingerprint = self._cache_fingerprint(frames, head=other_head)
 
         if not force_recompute and os.path.exists(cache_file) and os.path.exists(other_cache_file):
             data_a = np.load(cache_file, allow_pickle=True)
@@ -1470,10 +1477,12 @@ class EnsembleRunner:
                     if n_cached is not None and len(n_cached) != len(frames):
                         sizes_ok = False
                 if sizes_ok:
+                    self._check_cache(data_a, cache_file, fingerprint)
+                    self._check_cache(data_b, other_cache_file, other_fingerprint)
                     print(f"[EnsembleRunner] Loading dual-head aggregate caches from {cache_file} and {other_cache_file}.")
                     return (
-                        {key: data_a[key] for key in data_a.files if key != "cache_format"},
-                        {key: data_b[key] for key in data_b.files if key != "cache_format"},
+                        {key: data_a[key] for key in data_a.files if key not in ("cache_format", "fingerprint")},
+                        {key: data_b[key] for key in data_b.files if key not in ("cache_format", "fingerprint")},
                     )
                 print("[EnsembleRunner] Cached stats frame count does not match current dataset; rebuilding.")
 
@@ -1592,8 +1601,8 @@ class EnsembleRunner:
 
         primary = self._aggregate_prediction_sets(primary_sets, frames)
         other = self._aggregate_prediction_sets(other_sets, frames)
-        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", **primary)
-        self._atomic_savez(other_cache_file, compressed=True, cache_format="ensemble_stats_v1", **other)
+        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_stats_v1", fingerprint=np.array(fingerprint), **primary)
+        self._atomic_savez(other_cache_file, compressed=True, cache_format="ensemble_stats_v1", fingerprint=np.array(other_fingerprint), **other)
         try:
             if os.path.exists(checkpoint_file):
                 os.remove(checkpoint_file)
@@ -1606,12 +1615,14 @@ class EnsembleRunner:
         if force_recompute:
             print(f"\n[EnsembleRunner] ensemble_force_recompute=true; rebuilding {cache_file} from scratch.")
             self._clear_resume_artifacts(cache_file)
+        fingerprint = self._cache_fingerprint(frames)
 
         if not force_recompute and os.path.exists(cache_file):
             print(f"\n[EnsembleRunner] Loading light pool cache from {cache_file}...")
             data = np.load(cache_file, allow_pickle=True)
             if "cache_format" in data and str(data["cache_format"]) == "ensemble_pool_light_v1":
-                return {key: data[key] for key in data.files if key != "cache_format"}
+                self._check_cache(data, cache_file, fingerprint)
+                return {key: data[key] for key in data.files if key not in ("cache_format", "fingerprint")}
             print("[EnsembleRunner] Existing pool cache is not light format; rebuilding.")
 
         print(f"\n[EnsembleRunner] Light aggregate inference for {len(frames)} pool frames...")
@@ -1623,7 +1634,6 @@ class EnsembleRunner:
             "n_models": stats["n_models"],
             "mu_E": stats["mu_E"],
             "sigma_E": stats["sigma_E"],
-            "mu_L_frame": stats["mu_L_frame"],
             "sigma_F_mean": sigma_F_mean,
             "sigma_F_max": sigma_F_max,
             "frame_mean_force": frame_mean_force,
@@ -1632,7 +1642,7 @@ class EnsembleRunner:
         }
 
         print(f"[EnsembleRunner] Saving light pool cache to {cache_file}...")
-        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_pool_light_v1", **result)
+        self._atomic_savez(cache_file, compressed=True, cache_format="ensemble_pool_light_v1", fingerprint=np.array(fingerprint), **result)
         return result
 
 def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):
@@ -1731,25 +1741,22 @@ class EvaluationPipeline:
     def run(self):
         data_mgr = DatasetManager(self.config)
         mode = str(self.eval_cfg.get("mode", "all")).lower()
+        if mode in ("active_learning", "all"):
+            al_options(self.eval_cfg, self.config.get("model_framework"))   # fail before any ensemble work
 
         if mode == "active_learning":
             self.ds = data_mgr.load_active_learning_datasets()
             if "ensemble" not in self.uq_methods:
                 raise ValueError("eval.mode='active_learning' requires eval.uncertainty to include 'ensemble'.")
-            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval = (
+            stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval = (
                 self._run_ensemble_calibration()
             )
             if _parse_bool_like(self.eval_cfg.get("train_UQstats"), False):
                 self._run_train_uq_plots(uq_calibrators)
-            soap_species = self._maybe_replace_latents_with_soap(mean_L_frame)
-            if soap_species is not None:
-                mean_L_frame = self._soap_labeled
             self._run_pool_al(
                 stats_ens,
-                mean_L_frame,
                 sigma_E_raw,
                 sigma_comp,
-                soap_species=soap_species,
                 uq_calibrators=uq_calibrators,
                 metrics_train=metrics_cal,
                 metrics_eval=metrics_eval if metrics_eval is not None else metrics_cal,
@@ -1774,49 +1781,29 @@ class EvaluationPipeline:
             
         # 3. Evaluate Ensemble & Run Active Learning
         if "ensemble" in self.uq_methods:
-            stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_train, metrics_eval = (
+            stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_train, metrics_eval = (
                 self._run_ensemble_labeled()
             )
-            
-            soap_species = None
-            if mode == "all":
-                soap_species = self._maybe_replace_latents_with_soap(mean_L_frame)
-                if soap_species is not None:
-                    mean_L_frame = self._soap_labeled
-            
+
             if mode == "all" and self.al_val_flag and self.al_val_flag.lower() == "influence":
-                self._run_validation_al(stats_ens, mean_L_frame, sigma_comp)
-                
+                train_frames = [self.ds["frames"][i] for i in self.ds["train_idx"]]
+                feat_labelled = al_feature_space(
+                    self.eval_cfg, EnsembleRunner(self.config, self.device, self.neighbour_list),
+                    self.ds["frames"], train_frames, [], np.zeros(0, dtype=bool),
+                )[0]
+                self._run_validation_al(stats_ens, feat_labelled, sigma_comp)
+
             if mode == "all" and self.pool_xyz_path and os.path.exists(self.pool_xyz_path):
                 self._run_pool_al(
                     stats_ens,
-                    mean_L_frame,
                     sigma_E_raw,
                     sigma_comp,
-                    soap_species=soap_species,
                     uq_calibrators=uq_calibrators,
                     metrics_train=metrics_train,
                     metrics_eval=metrics_eval,
                 )
 
         print("Evaluation Pipeline Completed.")
-
-    def _maybe_replace_latents_with_soap(self, mean_L_frame):
-        use_soap = self.eval_cfg.get("use_soap", True)
-        if not use_soap:
-            return None
-        print("\n[Active Learning] Computing model-independent SOAP descriptors for active learning latent space...")
-        soap_all, soap_species = compute_soap_features(
-            self.ds["frames"],
-            r_cut=self.eval_cfg.get("soap_rcut", 4.0),
-            n_max=self.eval_cfg.get("soap_nmax", 4),
-            l_max=self.eval_cfg.get("soap_lmax", 4),
-        )
-        if soap_all is not None:
-            self._soap_labeled = soap_all
-            return soap_species
-        self._soap_labeled = mean_L_frame
-        return None
 
     def _run_base_model(self):
         """Runs the standard single-model evaluation."""
@@ -1903,26 +1890,26 @@ class EvaluationPipeline:
                 tag=f"ensemble_calibration_{other_head}",
             )
             self.stats_ens_other = other[0]
-            self.sigma_comp_other = other[2]
-            self.sigma_E_raw_other = other[3]
-            self.metrics_train_other = other[5]
-            self.metrics_eval_other = other[6] if other[6] is not None else other[5]
+            self.sigma_comp_other = other[1]
+            self.sigma_E_raw_other = other[2]
+            self.metrics_train_other = other[4]
+            self.metrics_eval_other = other[5] if other[5] is not None else other[4]
             shared_calibrators = self._build_shared_var_calibrators(
-                primary[0], primary[2], primary[3], other[0], other[2], other[3]
+                primary[0], primary[1], primary[2], other[0], other[1], other[2]
             )
-            primary[5]["calibrators"] = shared_calibrators
+            primary[4]["calibrators"] = shared_calibrators
             self.metrics_train_other["calibrators"] = shared_calibrators
             if str(self.eval_cfg.get("selection_calibration", "var")).lower() != "var":
                 print("[Calibration] Shared dual-head calibration is VAR-based; using selection_calibration='var'.")
                 self.eval_cfg["selection_calibration"] = "var"
             print("[Calibration] Dual-head AL uses one shared VAR calibration for both heads.")
-            return primary[0], primary[1], primary[2], primary[3], shared_calibrators, primary[5], primary[6]
+            return primary[0], primary[1], primary[2], shared_calibrators, primary[4], primary[5]
 
         primary = self._evaluate_calibration_head(
             cache_file="ensemble_calibration.npz",
             tag="ensemble_calibration",
         )
-        return primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6]
+        return primary
 
     def _uq_metrics_eval_split(self, stats_ens, sigma_comp, sigma_E_raw, calibrators, tag, cal_factor):
         """Apply calibration-fitted calibrators on the held-out validation split."""
@@ -2011,7 +1998,6 @@ class EvaluationPipeline:
         sigma_E_raw = stats_cache["sigma_E"]
         mu_F_comp = stats_cache["mu_F"]
         sigma_F_flat = stats_cache["sigma_F"]
-        mean_L_frame = stats_cache["mu_L_frame"]
 
         mf_list, idx = [], 0
         for fr in self.ds["frames"]:
@@ -2057,7 +2043,7 @@ class EvaluationPipeline:
                 generate_uq_plots(metrics_eval["npz_path"], "Val", tag, calibration="var")
         self._print_active_learning_calibration_summary(metrics_cal)
         self._run_reference_slope_validation(stats_ens)
-        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval
+        return stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval
 
     def _evaluate_calibration_head(self, cache_file, tag, true_E=None, true_F=None):
         """Evaluate one head on validation/calibration frames and fit diagnostics."""
@@ -2082,7 +2068,6 @@ class EvaluationPipeline:
             sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
             mu_F_comp = np.mean(ens_F_sel, axis=0)
             sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
-            mean_L_frame = np.mean(ens_L_frame_sel, axis=0)
         else:
             stats_cache = runner.evaluate_stats(
                 self.ds["frames"],
@@ -2098,7 +2083,6 @@ class EvaluationPipeline:
             sigma_E_raw = stats_cache["sigma_E"]
             mu_F_comp = stats_cache["mu_F"]
             sigma_F_flat = stats_cache["sigma_F"]
-            mean_L_frame = stats_cache["mu_L_frame"]
 
         mf_list, idx = [], 0
         for fr in self.ds["frames"]:
@@ -2152,7 +2136,7 @@ class EvaluationPipeline:
                 generate_uq_plots(metrics_eval["npz_path"], "Val", tag, calibration="var")
         self._print_active_learning_calibration_summary(metrics_cal)
         self._run_reference_slope_validation(stats_ens)
-        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval
+        return stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval
 
     def _dual_head_other_head(self, orig_mace_head):
         al_multihead_mode = self.eval_cfg.get("al_multihead_mode", "reconstructed").lower()
@@ -2272,7 +2256,6 @@ class EvaluationPipeline:
             sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
             mu_F_comp = np.mean(ens_F_sel, axis=0)
             sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
-            mean_L_frame = np.mean(ens_L_frame_sel, axis=0)
         else:
             stats_cache = runner.evaluate_stats(
                 self.ds["frames"], self.ds["E_true"], self.ds["F_true"], cache_file="ensemble.npz",
@@ -2288,7 +2271,6 @@ class EvaluationPipeline:
             sigma_E_raw = stats_cache["sigma_E"]
             mu_F_comp = stats_cache["mu_F"]
             sigma_F_flat = stats_cache["sigma_F"]
-            mean_L_frame = stats_cache["mu_L_frame"]
 
         std_F_comp = sigma_F_flat.flatten()
 
@@ -2426,7 +2408,7 @@ class EvaluationPipeline:
 
         self._run_reference_slope_validation(stats_ens)
 
-        return stats_ens, mean_L_frame, sigma_comp, sigma_E_raw, uq_calibrators, metrics_train, metrics_eval
+        return stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_train, metrics_eval
 
     def _run_reference_slope_validation(self, stats_ens):
         """Consecutive ΔE/force transition checks on labeled train/eval (by size class)."""
@@ -2467,12 +2449,12 @@ class EvaluationPipeline:
                 system_tag=tag,
             )
 
-    def _run_validation_al(self, stats_ens, mean_L_frame, sigma_comp):
+    def _run_validation_al(self, stats_ens, feat_labelled, sigma_comp):
         """Active Learning on the validation set."""
         print("\n[Val-AL] Running Influence-based Active Learning on Validation Set...")
         _, sel_idx = adaptive_learning_ensemble_calibrated(
             all_frames=self.ds["frames"], eval_mask=self.ds["val_mask"], 
-            delta_E_frame=stats_ens.delta_E_frame, mean_l_al=mean_L_frame, 
+            delta_E_frame=stats_ens.delta_E_frame, mean_l_al=feat_labelled, 
             force_rmse_per_comp=sigma_comp, denom_all=self.ds["F_true"], 
             reference_frames=self.ds["val_frames_ref"], base="al_ens_val"
         )
@@ -2491,15 +2473,14 @@ class EvaluationPipeline:
     def _run_pool_al(
         self,
         stats_ens,
-        mean_L_frame,
         sigma_E_raw,
         sigma_comp,
-        soap_species=None,
         uq_calibrators=None,
         metrics_train=None,
         metrics_eval=None,
     ):
         """Active Learning on the unlabelled out-of-distribution pool."""
+        kernel, quality, selector = al_options(self.eval_cfg, self.config.get("model_framework"))
         print(f"\n[Pool-AL] Parsing unlabeled pool from {self.pool_xyz_path}")
         pool_frames = read(self.pool_xyz_path, index=":", format="extxyz")
 
@@ -2529,7 +2510,6 @@ class EvaluationPipeline:
             sigma_E_pool = pool_stats["sigma_E"]
             mu_F_pool = pool_stats["mu_F"]
             sigma_F_pool = pool_stats["sigma_F"]
-            mu_L_pool = pool_stats["mu_L_frame"]
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
             frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
             mu_E_pool_other = pool_stats_other["mu_E"]
@@ -2547,7 +2527,6 @@ class EvaluationPipeline:
             sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
             mu_F_pool = np.mean(ens_F_pool, axis=0)
             sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
-            mu_L_pool = np.mean(ens_L_pool, axis=0)
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
             frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
         elif pool_cache_mode == "stats":
@@ -2557,7 +2536,6 @@ class EvaluationPipeline:
             sigma_E_pool = pool_stats["sigma_E"]
             mu_F_pool = pool_stats["mu_F"]
             sigma_F_pool = pool_stats["sigma_F"]
-            mu_L_pool = pool_stats["mu_L_frame"]
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
             frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
         else:
@@ -2565,7 +2543,6 @@ class EvaluationPipeline:
 
             mu_E_pool = pool_light["mu_E"]
             sigma_E_pool = pool_light["sigma_E"]
-            mu_L_pool = pool_light["mu_L_frame"]
             sigma_F_pool_mean = pool_light["sigma_F_mean"]
             sigma_F_pool_max = pool_light["sigma_F_max"]
             frame_mean_force_pool = pool_light.get("frame_mean_force", np.full(len(pool_frames), np.nan))
@@ -2650,12 +2627,6 @@ class EvaluationPipeline:
                 
                 print(f"[Pool-AL] Successfully evaluated original head '{orig_mace_head}' and other head '{other_head}' uncertainties.")
         pool_frames_thin = [pool_frames[i] for i in thin_idx]
-        F_pool_thin = mu_L_pool[thin_idx].astype(float)
-
-        mu_F_pool_env = _thin_flat_pool(mu_F_pool, pool_frames, thin_idx)
-        sigma_F_pool_env = _thin_flat_pool(sigma_F_pool, pool_frames, thin_idx)
-        mu_F_pool_other_env = _thin_flat_pool(mu_F_pool_other, pool_frames, thin_idx)
-        sigma_F_pool_other_env = _thin_flat_pool(sigma_F_pool_other, pool_frames, thin_idx)
 
         # --- Compute RDF thresholds and physical mask first ---
         rdf_cache = "rdf_thresholds_cache.npz"
@@ -2691,35 +2662,8 @@ class EvaluationPipeline:
             verbose=True
         )
 
-        # --- Compute SOAP for thinned pool frames ---
-        if soap_species is not None:
-            print("[Pool-AL] Computing model-independent SOAP descriptors for thinned pool frames...")
-            physical_indices = np.where(rdf_ok_mask)[0]
-            physical_frames = [pool_frames_thin[i] for i in physical_indices]
-            
-            soap_pool_thin = None
-            if len(physical_frames) > 0:
-                print(f"[Pool-AL] Computing SOAP only for {len(physical_frames)} physical frames out of {len(pool_frames_thin)} total thin frames...")
-                soap_phys, _ = compute_soap_features(
-                    physical_frames,
-                    species=soap_species,
-                    r_cut=self.eval_cfg.get("soap_rcut", 4.0),
-                    n_max=self.eval_cfg.get("soap_nmax", 4),
-                    l_max=self.eval_cfg.get("soap_lmax", 4),
-                )
-                if soap_phys is not None:
-                    n_features = soap_phys.shape[1]
-                    soap_pool_thin = np.zeros((len(pool_frames_thin), n_features))
-                    soap_pool_thin[physical_indices] = soap_phys
-            else:
-                print("[Pool-AL] Warning: No physical frames found in the thinned pool. Skipping SOAP.")
-                
-            if soap_pool_thin is not None:
-                F_pool_thin = soap_pool_thin
-
         mu_E_pool_thin = mu_E_pool[thin_idx].astype(float)
         sigma_E_pool_thin = sigma_E_pool[thin_idx].astype(float)
-        F_train_thin = mean_L_frame[self.ds["train_idx"]].astype(float)
         sigma_F_pool_mean_thin = sigma_F_pool_mean[thin_idx].astype(float)
         sigma_F_pool_max_thin = sigma_F_pool_max[thin_idx].astype(float)
         frame_mean_force_pool_thin = frame_mean_force_pool[thin_idx].astype(float)
@@ -2862,9 +2806,6 @@ class EvaluationPipeline:
                 )
             expected_abs_F_mean = sigma_F_pool_mean_thin * _GAUSSIAN_SIGMA_TO_ABS
             expected_abs_F_max = sigma_F_pool_max_thin * _GAUSSIAN_SIGMA_TO_ABS
-
-        if sigma_F_pool is not None:
-            sigma_F_pool_env = _thin_flat_pool(sigma_F_pool, pool_frames, thin_idx)
 
         # --- Per-atom uncertainty ---
         if sigma_F_pool is not None:
@@ -3025,13 +2966,27 @@ class EvaluationPipeline:
             
         np.savez_compressed("pool_energy_trace.npz", steps=np.arange(len(mu_E_pool)), mu=sm["mu"].values, sigma=sm["sigma"].values, bad=bad_mask)
 
-        # Calibrations
-        good_rows = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[train_idx])
+        # Calibrations. Features of the calibration (GCV), training (novelty reference) and pool frames in the
+        # redundancy space of al_kernel (features.al_feature_space).
+        feat_cal, feat_ref, feat_pool_thin, quests = al_feature_space(
+            self.eval_cfg,
+            runner,
+            [self.ds["frames"][i] for i in train_idx],
+            self.ds.get("train_frames") or [self.ds["frames"][i] for i in train_idx],
+            pool_frames_thin,
+            rdf_ok_mask,
+            quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
+        )
+        al_opts = dict(al_kernel=kernel, al_quality=quality, al_selector=selector, quests=quests, quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False))
+        good_rows = np.isfinite(feat_cal).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[train_idx])
         print(f"[Pool-AL] Extracted {good_rows.sum()} valid training frames for GP calibration.")
         if int(good_rows.sum()) < 2:
             raise ValueError("Pool AL needs at least two finite training latent rows for GP calibration")
         train_delta_E_atom = stats_ens.delta_E_frame[train_idx] / train_atom_counts
-        alpha_sq, _, _, _, L_chol = calibrate_alpha_reg_gcv(F_train_thin[good_rows], train_delta_E_atom[good_rows])
+        alpha_sq, lam_gcv, _, _, _ = calibrate_alpha_reg_gcv(feat_cal[good_rows], train_delta_E_atom[good_rows])
+
+        # Novelty reference = the frames the models were trained on (ridge lambda from the GCV above)
+        L_chol = np.linalg.cholesky(feat_ref.T @ feat_ref + lam_gcv * np.eye(feat_ref.shape[1]))
 
         calibrator = UQCalibrator()
         mu_E_train = stats_ens.pred_energies[train_idx]
@@ -3045,7 +3000,7 @@ class EvaluationPipeline:
         train_frames = [self.ds["frames"][i] for i in train_idx]
 
         # Selection
-        print("[Pool-AL] Running windowed active learning on thinned pool ...")
+        print("[Pool-AL] Running active learning on thinned pool ...")
         # Helper to write head-specific selection files
         def save_selected_frames(filename, sel_rel_indices, sigma_E_source, head_name):
             sel_global_idx = thin_idx[sel_rel_indices]
@@ -3073,23 +3028,25 @@ class EvaluationPipeline:
             try:
                 print(f"[Pool-AL] Running diagnostic selection for primary head '{orig_mace_head}'...")
                 _, sel_rel_thin_orig = adaptive_learning_mig_pool_windowed(
-                    pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
+                    pool_frames_thin, feat_pool_thin, feat_ref, alpha_sq, L_chol,
                     forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
                     mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_orig_thin,
                     rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
                     frame_mean_force_pool=frame_mean_force_pool_thin,
-                    mu_F_pool=mu_F_pool_env, sigma_F_pool=sigma_F_pool_env,
+                    mu_F_pool=_thin_flat_pool(mu_F_pool, pool_frames, thin_idx),
+                    sigma_F_pool=_thin_flat_pool(sigma_F_pool, pool_frames, thin_idx),
                     calibration_in_support=calibration_in_support,
                     ood_risk_mask=ood_risk_mask,
                     expected_abs_E_atom=expected_abs_E_atom,
                     expected_abs_F_mean=expected_abs_F_mean,
                     expected_abs_F_max=expected_abs_F_max,
                     train_frames=train_frames,
-                    rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
-                    window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
-                    percentile_gamma=self.eval_cfg.get("percentile_gamma", 99),
+                    rho_eV=self.eval_cfg.get("rho_eV", 0.002),
+                    budget_max=self.eval_cfg.get("budget_max", 50),
+                    candidate_tol=self.eval_cfg.get("candidate_tol", 0.01),
+                    **al_opts,
                     percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
                     percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
                     hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
@@ -3098,16 +3055,11 @@ class EvaluationPipeline:
                     hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
                     large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
                     surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
-                    envelope_alpha=self.eval_cfg.get("envelope_alpha", 0.20),
-                    envelope_floor=self.eval_cfg.get("envelope_floor", 0.05),
                     pool_hi_k=self.eval_cfg.get("pool_hi_k", 3.0),
                     red_zone_train_mult=self.eval_cfg.get("red_zone_train_mult", 5.0),
                     abs_ceiling_sE_atom=self.eval_cfg.get("abs_ceiling_sE_atom", 0.010),
                     abs_ceiling_sF_max=self.eval_cfg.get("abs_ceiling_sF_max", 0.25),
                     abs_ceiling_sF_mean=self.eval_cfg.get("abs_ceiling_sF_mean", 0.20),
-                    relative_uncertainty_weight=_parse_bool_like(
-                        self.eval_cfg.get("relative_uncertainty_weight"), True
-                    ),
                     stratify_train_by_size=_parse_bool_like(
                         self.eval_cfg.get("stratify_train_by_size"), True
                     ),
@@ -3128,8 +3080,6 @@ class EvaluationPipeline:
             if sigma_E_pool_other_thin is not None and self.stats_ens_other is not None and self.sigma_E_raw_other is not None and self.sigma_comp_other is not None:
                 try:
                     print(f"[Pool-AL] Running diagnostic selection for secondary head '{other_head}'...")
-                    good_rows_other = np.isfinite(F_train_thin).all(axis=1) & np.isfinite(self.stats_ens_other.delta_E_frame[self.ds["train_idx"]])
-                    alpha_sq_other, _, _, _, L_chol_other = calibrate_alpha_reg_gcv(F_train_thin[good_rows_other], self.stats_ens_other.delta_E_frame[self.ds["train_idx"]][good_rows_other])
                     mu_E_train_other = self.stats_ens_other.pred_energies[self.ds["train_idx"]]
                     
                     other_F_true = self.ds.get("F_singlet_true") if other_head == "singlet" else self.ds.get("F_triplet_true")
@@ -3138,23 +3088,25 @@ class EvaluationPipeline:
                     train_forces_other = [other_F_true[i] for i in train_idx]
 
                     _, sel_rel_thin_other = adaptive_learning_mig_pool_windowed(
-                        pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq_other, L_chol_other,
+                        pool_frames_thin, feat_pool_thin, feat_ref, alpha_sq, L_chol,
                         forces_train=train_forces_other, sigma_energy=sigma_energy_train_other, sigma_force=sigma_force_train_other,
                         mu_E_frame_train=mu_E_train_other, mu_E_pool=mu_E_pool_other_thin, sigma_E_pool=sigma_E_pool_other_thin,
                         rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
                         sigma_F_pool_mean=sigma_F_pool_mean_other_thin, sigma_F_pool_max=sigma_F_pool_max_other_thin,
                         frame_max_force_pool=frame_max_force_pool_thin,
                         frame_mean_force_pool=frame_mean_force_pool_thin,
-                        mu_F_pool=mu_F_pool_other_env, sigma_F_pool=sigma_F_pool_other_env,
+                        mu_F_pool=_thin_flat_pool(mu_F_pool_other, pool_frames, thin_idx),
+                        sigma_F_pool=_thin_flat_pool(sigma_F_pool_other, pool_frames, thin_idx),
                         calibration_in_support=calibration_in_support_other,
                         ood_risk_mask=ood_risk_mask_other,
                         expected_abs_E_atom=expected_abs_E_atom_other,
                         expected_abs_F_mean=expected_abs_F_mean_other,
                         expected_abs_F_max=expected_abs_F_max_other,
                         train_frames=train_frames,
-                        rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
-                        window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
-                        percentile_gamma=self.eval_cfg.get("percentile_gamma", 99),
+                        rho_eV=self.eval_cfg.get("rho_eV", 0.002),
+                        budget_max=self.eval_cfg.get("budget_max", 50),
+                        candidate_tol=self.eval_cfg.get("candidate_tol", 0.01),
+                        **al_opts,
                         percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
                         percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
                         hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
@@ -3163,16 +3115,11 @@ class EvaluationPipeline:
                         hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
                         large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
                         surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
-                    envelope_alpha=self.eval_cfg.get("envelope_alpha", 0.20),
-                    envelope_floor=self.eval_cfg.get("envelope_floor", 0.05),
                     pool_hi_k=self.eval_cfg.get("pool_hi_k", 3.0),
                     red_zone_train_mult=self.eval_cfg.get("red_zone_train_mult", 5.0),
                     abs_ceiling_sE_atom=self.eval_cfg.get("abs_ceiling_sE_atom", 0.010),
                     abs_ceiling_sF_max=self.eval_cfg.get("abs_ceiling_sF_max", 0.25),
                     abs_ceiling_sF_mean=self.eval_cfg.get("abs_ceiling_sF_mean", 0.20),
-                    relative_uncertainty_weight=_parse_bool_like(
-                        self.eval_cfg.get("relative_uncertainty_weight"), True
-                    ),
                         stratify_train_by_size=_parse_bool_like(
                             self.eval_cfg.get("stratify_train_by_size"), True
                         ),
@@ -3202,23 +3149,25 @@ class EvaluationPipeline:
             # Single-head fallback
             try:
                 _, sel_rel_thin_orig = adaptive_learning_mig_pool_windowed(
-                    pool_frames_thin, F_pool_thin, F_train_thin, alpha_sq, L_chol,
+                    pool_frames_thin, feat_pool_thin, feat_ref, alpha_sq, L_chol,
                     forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
                     mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
                     rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
                     sigma_F_pool_mean=sigma_F_pool_mean_thin, sigma_F_pool_max=sigma_F_pool_max_thin,
                     frame_max_force_pool=frame_max_force_pool_thin,
                     frame_mean_force_pool=frame_mean_force_pool_thin,
-                    mu_F_pool=mu_F_pool_env, sigma_F_pool=sigma_F_pool_env,
+                    mu_F_pool=_thin_flat_pool(mu_F_pool, pool_frames, thin_idx),
+                    sigma_F_pool=_thin_flat_pool(sigma_F_pool, pool_frames, thin_idx),
                     calibration_in_support=calibration_in_support,
                     ood_risk_mask=ood_risk_mask,
                     expected_abs_E_atom=expected_abs_E_atom,
                     expected_abs_F_mean=expected_abs_F_mean,
                     expected_abs_F_max=expected_abs_F_max,
                     train_frames=train_frames,
-                    rho_eV=self.eval_cfg.get("rho_eV", 0.002), min_k=self.eval_cfg.get("pool_min_k", 5),
-                    window_size=self.eval_cfg.get("pool_window", 100), budget_max=self.eval_cfg.get("budget_max", 50),
-                    percentile_gamma=self.eval_cfg.get("percentile_gamma", 99),
+                    rho_eV=self.eval_cfg.get("rho_eV", 0.002),
+                    budget_max=self.eval_cfg.get("budget_max", 50),
+                    candidate_tol=self.eval_cfg.get("candidate_tol", 0.01),
+                    **al_opts,
                     percentile_F_low=self.eval_cfg.get("percentile_F_low", 99.5),
                     percentile_F_hi=self.eval_cfg.get("percentile_F_hi", 93),
                     hard_sigma_E_atom_min=self.eval_cfg.get("thr_sE_atom", 0.001),
@@ -3227,16 +3176,11 @@ class EvaluationPipeline:
                     hard_Fmax_train_mult=self.eval_cfg.get("thr_Fmax_mult", 1.5),
                     large_cluster_threshold=self.eval_cfg.get("large_cluster_threshold", 300),
                     surface_relax_factor=self.eval_cfg.get("surface_relax_factor", None),
-                    envelope_alpha=self.eval_cfg.get("envelope_alpha", 0.20),
-                    envelope_floor=self.eval_cfg.get("envelope_floor", 0.05),
                     pool_hi_k=self.eval_cfg.get("pool_hi_k", 3.0),
                     red_zone_train_mult=self.eval_cfg.get("red_zone_train_mult", 5.0),
                     abs_ceiling_sE_atom=self.eval_cfg.get("abs_ceiling_sE_atom", 0.010),
                     abs_ceiling_sF_max=self.eval_cfg.get("abs_ceiling_sF_max", 0.25),
                     abs_ceiling_sF_mean=self.eval_cfg.get("abs_ceiling_sF_mean", 0.20),
-                    relative_uncertainty_weight=_parse_bool_like(
-                        self.eval_cfg.get("relative_uncertainty_weight"), True
-                    ),
                     stratify_train_by_size=_parse_bool_like(
                         self.eval_cfg.get("stratify_train_by_size"), True
                     ),
@@ -3318,18 +3262,6 @@ class EvaluationPipeline:
                         )
                     write(fh, atoms, format="xyz", comment=comment)
             print(f"[Pool-AL] Saved {len(sel_global_idx)} pool frames to 'to_DFT_labelling_from_pool.xyz'.")
-
-        if self.do_plot:
-            generate_force_envelope_scatter(
-                pool_frames_thin,
-                mu_F_pool_env,
-                sigma_F_pool_env,
-                rdf_ok_mask,
-                sel_rel_thin if isinstance(sel_rel_thin, (list, np.ndarray)) else [],
-                alpha=float(self.eval_cfg.get("envelope_alpha", 0.20)),
-                atol=float(self.eval_cfg.get("envelope_floor", 0.05)),
-                out_dir=self.eval_cfg.get("uq_plot_dir", "uq_plots"),
-            )
 
 
 def run_eval(config):

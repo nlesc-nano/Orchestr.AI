@@ -26,7 +26,6 @@ eval:
   active_learning: "influence"  
 #  plot_smooth_window: 50     # (optional) window for the rolling‐mean plot
   pool_stride:       1      # thin the pool by this many frames
-  pool_window:       200     # frames per AL window
 #  pool_max_per_window: 5     # max picks per window
   SOAP:
     species: ["Cd", "Se", "Cl"]

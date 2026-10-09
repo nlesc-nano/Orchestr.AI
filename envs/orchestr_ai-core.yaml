@@ -12,3 +12,5 @@ dependencies:
       - torch>=2.6,<2.7
       - schnetpack
       - dscribe
+      - numba>=0.59.0
+      - quests>=2026.2.22
