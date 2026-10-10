@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..engines import XTB_FAST_FAIL, XtbRunner, xtb_order
+from ..engines import XTB_FAST_FAIL, XtbRunner, available_cpus, xtb_order
 
 
 def run(ctx) -> dict:
@@ -23,7 +23,7 @@ def run(ctx) -> dict:
     symbols, pts = ctx.relaxed()
     order = xtb_order(s.xtb_method, len(symbols), s.gxtb_max_atoms)
     for i, method in enumerate(order):
-        runner = XtbRunner(method)
+        runner = XtbRunner(method, threads=available_cpus())   # the three runs are sequential: all cores each
         # a method with a fallback gets one short try (see engines.XTB_FAST_FAIL)
         kw = dict(attempts=1, extra=XTB_FAST_FAIL) if i < len(order) - 1 else {}
         try:
