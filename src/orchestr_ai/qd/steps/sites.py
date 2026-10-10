@@ -5,7 +5,7 @@ unit of the intact dot, for the binding-site map of the report.
 
 For every site class of the detachment step (first removal from the full
 shell) the relaxed product dot − unit is taken from the detachment cache and
-one GFN2-xTB single point gives its Generalized Born solvation.  The thermal
+one xTB single point (g-xTB, or GFN2-xTB where g-xTB fails) gives its Generalized Born solvation.  The thermal
 part (vibrations, rotation, translation) is by default that of the first
 step of the desorption path, shifted by each site's own energy:
 
@@ -40,7 +40,7 @@ import numpy as np
 
 from ..records import read_xyz_first_frame
 
-from ..engines import XtbRunner, parallel_map, xtb_pool
+from ..engines import xtb_pool, xtb_series
 from ..references import binary_units, ideal_gas_g, reference_set
 from ..solution import EXPORT_T
 from .detachment import RelaxCache, _product
@@ -177,8 +177,8 @@ def run(ctx) -> dict:
     cache = RelaxCache(ctx)
     frozen = s.sites_solvation == "frozen"
     workers, threads = xtb_pool(1 + (0 if frozen else len(classes)))
-    runner = XtbRunner("gfn2", threads=threads)
-    gas0, _e, _u = runner.run_series(sym0, pts0, [], base=SMEAR, fallbacks=SMEAR_FALLBACKS)
+    xkw = dict(base=SMEAR, fallbacks=SMEAR_FALLBACKS)
+    runner, [(gas0, _e, _u)] = xtb_series([(sym0, pts0)], [], 1, threads, s.xtb_method, **xkw)
     gb0 = gb_conductor_energy(sym0, pts0, gas0.charges)
     g0 = _g_label(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"])
     out, products = [], []
@@ -205,9 +205,12 @@ def run(ctx) -> dict:
     finally:
         cache.close()
     if not frozen:
-        # per-site GFN2-xTB charges: independent single points, side by side on the job's cores
-        series = parallel_map(lambda pp: runner.run_series(pp[0], pp[1], [], base=SMEAR, fallbacks=SMEAR_FALLBACKS),
-                              products, workers)
+        # per-site xTB charges: independent single points, side by side on the job's cores, in the
+        # same method as the intact dot (rerun with it if a product needs the fallback method)
+        runner, series = xtb_series([(sym0, pts0)] + products, [], workers, threads,
+                                    "gfn2" if runner.method == "gfn2" else s.xtb_method, **xkw)
+        (gas0, _e, _u), series = series[0], series[1:]
+        gb0 = gb_conductor_energy(sym0, pts0, gas0.charges)
         for row, (psym, pos), (gas, _e, used) in zip(out, products, series):
             row["solv_inf_eV"] = gb_conductor_energy(psym, pos, gas.charges)
             row["smearing"] = " ".join(used) or "none"
@@ -221,8 +224,9 @@ def run(ctx) -> dict:
     return {
         "summary": {"n_classes": len(out), "thermo": thermo_ok,
                     "thermal": "per-site Hessians" if exact else ("first path step" if g1 is not None else "none"),
-                    "solvation": "GB on per-site GFN2-xTB charges" if s.sites_solvation != "frozen"
-                    else "GB on the intact dot's charges (frozen)",
+                    "solvation": f"GB on per-site {runner.provenance()['engine']} charges" if s.sites_solvation != "frozen"
+                    else f"GB on the intact dot's {runner.provenance()['engine']} charges (frozen)",
+                    "xtb_method": runner.method,
                     "hessian_method": method,
                     "n_atoms_coloured": len({a for r in out for o in r["orbit"] for a in o}),
                     "dE_eV_range": [min(r["dE_eV"] for r in out), max(r["dE_eV"] for r in out)],
