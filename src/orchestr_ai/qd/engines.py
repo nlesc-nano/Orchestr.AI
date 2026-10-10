@@ -211,7 +211,6 @@ class XtbResult:
     dipole_debye: Optional[float]
     gradient_eV_A: Optional[np.ndarray] = None
     raw: Dict[str, str] = field(default_factory=dict)
-    annealed_from_K: Optional[float] = None    # SCF reached by cooling from this electronic temperature
 
 
 class XtbRunner:
@@ -247,70 +246,42 @@ class XtbRunner:
         """
         Single point; `solvation` adds flags, e.g. ["--cosmo", "9.0"] or ["--alpb", "toluene"].
         The SCC of small-gap structures occasionally fails at random (threaded runs are not
-        bit-reproducible), so a failed run is repeated up to `attempts` times; if all fail, the
-        SCF is annealed (see _anneal) and the run restarts from the cooled density.
+        bit-reproducible), so a failed run is repeated up to `attempts` times.
         """
-        kw = dict(charge=charge, uhf=uhf, gradient=gradient, solvation=solvation)
         for i in range(attempts):
             try:
-                return self._run_once(symbols, pts, **kw)
-            except RuntimeError as exc:
-                last = exc
+                return self._run_once(symbols, pts, charge=charge, uhf=uhf, gradient=gradient, solvation=solvation)
+            except RuntimeError:
+                if i == attempts - 1:
+                    raise
+
+    def _run_once(self, symbols, pts, *, charge, uhf, gradient, solvation) -> XtbResult:
         with tempfile.TemporaryDirectory(prefix="xtb_") as tmp:
             tmp = Path(tmp)
-            if not self._anneal(tmp, symbols, pts, charge, uhf):
-                raise last
-            res = self._run_once(symbols, pts, **kw, tmp=tmp)
-            res.annealed_from_K = ANNEAL_ETEMPS[0]
-            return res
-
-    @staticmethod
-    def _write_xyz(tmp: Path, symbols, pts) -> None:
-        lines = [str(len(symbols)), "qdprops"]
-        lines += [f"{s} {x:.10f} {y:.10f} {z:.10f}" for s, (x, y, z) in zip(symbols, np.asarray(pts, float))]
-        (tmp / "mol.xyz").write_text("\n".join(lines) + "\n")
-
-    def _anneal(self, tmp: Path, symbols, pts, charge: int = 0, uhf: int = 0) -> bool:
-        """Converge the SCF hot and cool it through ANNEAL_ETEMPS in `tmp`, each run restarting
-        from the previous density (xtbrestart). True if every temperature converged, leaving
-        the coolest density in `tmp` for the run at the base temperature."""
-        self._write_xyz(tmp, symbols, pts)
-        (tmp / "xtbrestart").unlink(missing_ok=True)
-        for etemp in ANNEAL_ETEMPS:
-            proc = subprocess.run([self.binary, "mol.xyz", *XTB_METHODS[self.method], "--chrg", str(int(charge)),
-                                   "--uhf", str(int(uhf)), "--etemp", str(etemp),
-                                   "--iterations", str(ANNEAL_ITERATIONS)],
-                                  cwd=tmp, env=self.env, capture_output=True, text=True)
+            xyz = tmp / "mol.xyz"
+            lines = [str(len(symbols)), "qdprops"]
+            lines += [f"{s} {x:.10f} {y:.10f} {z:.10f}" for s, (x, y, z) in zip(symbols, np.asarray(pts, float))]
+            xyz.write_text("\n".join(lines) + "\n")
+            cmd = [self.binary, xyz.name, *XTB_METHODS[self.method], "--chrg", str(int(charge)),
+                   "--uhf", str(int(uhf))]
+            if gradient:
+                cmd.append("--grad")
+            if solvation:
+                cmd.extend(str(x) for x in solvation)
+            proc = subprocess.run(cmd, cwd=tmp, env=self.env, capture_output=True, text=True)
             out = proc.stdout + proc.stderr
             if not re.search(r"^\s*normal termination of xtb", out, re.M) or "abnormal termination" in out:
-                return False
-        return True
+                tail = "\n".join(out.strip().splitlines()[-15:])
+                raise RuntimeError(f"xtb {self.method} failed (charge {charge}, uhf {uhf}):\n{tail}")
+            res = _parse_xtb(out)
+            charges_file = tmp / "charges"
+            if charges_file.exists():
+                res.charges = [float(x) for x in charges_file.read_text().split()]
+            engrad = tmp / "mol.engrad"
+            if gradient and engrad.exists():
+                res.gradient_eV_A = _read_engrad_gradient(engrad.read_text(), len(symbols))
+            return res
 
-    def _run_once(self, symbols, pts, *, charge, uhf, gradient, solvation, tmp: Optional[Path] = None) -> XtbResult:
-        if tmp is None:
-            with tempfile.TemporaryDirectory(prefix="xtb_") as d:
-                return self._run_once(symbols, pts, charge=charge, uhf=uhf, gradient=gradient,
-                                      solvation=solvation, tmp=Path(d))
-        self._write_xyz(tmp, symbols, pts)
-        cmd = [self.binary, "mol.xyz", *XTB_METHODS[self.method], "--chrg", str(int(charge)),
-               "--uhf", str(int(uhf))]
-        if gradient:
-            cmd.append("--grad")
-        if solvation:
-            cmd.extend(str(x) for x in solvation)
-        proc = subprocess.run(cmd, cwd=tmp, env=self.env, capture_output=True, text=True)
-        out = proc.stdout + proc.stderr
-        if not re.search(r"^\s*normal termination of xtb", out, re.M) or "abnormal termination" in out:
-            tail = "\n".join(out.strip().splitlines()[-15:])
-            raise RuntimeError(f"xtb {self.method} failed (charge {charge}, uhf {uhf}):\n{tail}")
-        res = _parse_xtb(out)
-        charges_file = tmp / "charges"
-        if charges_file.exists():
-            res.charges = [float(x) for x in charges_file.read_text().split()]
-        engrad = tmp / "mol.engrad"
-        if gradient and engrad.exists():
-            res.gradient_eV_A = _read_engrad_gradient(engrad.read_text(), len(symbols))
-        return res
 
     def run_series(self, symbols: Sequence[str], pts: np.ndarray, flag_sets: Sequence[Sequence[str]],
                    base: Sequence[str] = (), fallbacks: Sequence[Sequence[str]] = ()) -> tuple:
@@ -376,29 +347,22 @@ class XtbRunner:
             return gas, energies, list(used) + ([f"annealed-from-{annealed}K"] if annealed else [])
 
     def vipea(self, symbols: Sequence[str], pts: np.ndarray) -> Dict[str, float]:
-        """Vertical IP and EA (eV) from `xtb --vipea`: IPEA-xTB delta-SCC with its empirical shift.
-        If its SCF fails, it is rerun from an annealed neutral density (see _anneal)."""
-        def call(tmp):
+        """Vertical IP and EA (eV) from `xtb --vipea`: IPEA-xTB delta-SCC with its empirical shift."""
+        with tempfile.TemporaryDirectory(prefix="xtb_") as tmp:
+            tmp = Path(tmp)
+            lines = [str(len(symbols)), "qdprops"]
+            lines += [f"{s} {x:.10f} {y:.10f} {z:.10f}" for s, (x, y, z) in zip(symbols, np.asarray(pts, float))]
+            (tmp / "mol.xyz").write_text("\n".join(lines) + "\n")
             proc = subprocess.run([self.binary, "mol.xyz", "--vipea"], cwd=tmp, env=self.env,
                                   capture_output=True, text=True)
             out = proc.stdout + proc.stderr
-            ip = re.search(r"delta SCC IP \(eV\):\s+(-?\d+\.\d+)", out)
-            ea = re.search(r"delta SCC EA \(eV\):\s+(-?\d+\.\d+)", out)
-            if "abnormal termination" in out or not (ip and ea) or "normal termination" not in out:
-                return None
-            return {"ip_eV": float(ip.group(1)), "ea_eV": float(ea.group(1))}
-
-        with tempfile.TemporaryDirectory(prefix="xtb_") as tmp:
-            tmp = Path(tmp)
-            self._write_xyz(tmp, symbols, pts)
-            v = call(tmp)
-            if v is None and self._anneal(tmp, symbols, pts):
-                v = call(tmp)
-                if v is not None:
-                    v["annealed_from_K"] = ANNEAL_ETEMPS[0]
-        if v is None:
+        ip = re.search(r"delta SCC IP \(eV\):\s+(-?\d+\.\d+)", out)
+        if "abnormal termination" in out:
             raise RuntimeError("xtb --vipea failed")
-        return v
+        ea = re.search(r"delta SCC EA \(eV\):\s+(-?\d+\.\d+)", out)
+        if not (ip and ea) or "normal termination" not in out:
+            raise RuntimeError("xtb --vipea failed")
+        return {"ip_eV": float(ip.group(1)), "ea_eV": float(ea.group(1))}
 
 
 def _read_engrad_gradient(text: str, n_atoms: int) -> np.ndarray:
