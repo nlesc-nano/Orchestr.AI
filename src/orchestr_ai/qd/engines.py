@@ -145,10 +145,37 @@ def sync_device(device: str) -> None:
 
 
 def mace_hessian(atoms, calc) -> np.ndarray:
-    """Analytic (autograd) Cartesian Hessian d2E/dx2 in eV/Å², shape (3N, 3N)."""
-    h = np.asarray(calc.get_hessian(atoms=atoms), float)
+    """Analytic (autograd) Cartesian Hessian d2E/dx2 in eV/Å², shape (3N, 3N).
+
+    MACE back-propagates 16 rows at once (vmap); when that does not fit on the GPU
+    (thousands of atoms) the rows are done one at a time on the same force graph."""
     n = len(atoms)
+    try:
+        h = np.asarray(calc.get_hessian(atoms=atoms), float)
+    except Exception as exc:
+        if "out of memory" not in str(exc).lower() and type(exc).__name__ != "OutOfMemoryError":
+            raise
+        h = None                                       # retry outside except: the failed graph is freed
+    if h is None:
+        import torch
+        torch.cuda.empty_cache()
+        h = _hessian_rows(atoms, calc)
     return h.reshape(3 * n, 3 * n)
+
+
+def _hessian_rows(atoms, calc) -> np.ndarray:
+    """Analytic Hessian, one backward pass per row (the low-memory path of mace_hessian)."""
+    import torch
+    batch = calc._atoms_to_batch(atoms)
+    d = calc._clone_batch(batch).to_dict()
+    d["positions"].requires_grad_(True)
+    out = calc.models[0](d, compute_force=True, compute_stress=False, training=True)
+    f = out["forces"].reshape(-1)
+    h = np.empty((f.numel(), f.numel()))
+    for j in range(f.numel()):
+        g, = torch.autograd.grad(-f[j], d["positions"], retain_graph=True)
+        h[j] = g.reshape(-1).detach().cpu().numpy()
+    return h
 
 
 @functools.lru_cache(maxsize=4)
