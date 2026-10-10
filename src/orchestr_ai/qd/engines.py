@@ -50,7 +50,7 @@ XTB_METHODS = {"gfn2": ["--gfn", "2"], "gxtb": ["--gxtb"]}
 XTB_ORDER = {"auto": ("gxtb", "gfn2"), "gxtb": ("gxtb",), "gfn2": ("gfn2",)}
 # A method with a fallback gets one try with a short SCF, so a divergence costs minutes.
 # g-xTB 2.0.1 diverges on larger dots whatever the settings (PbS 507, CdSe 1252, InAs 1946 at the
-# MACE geometries: 1e4-1e5 Eh swings; damping and restart files are ignored, --etemp does not help)
+# MACE geometries: 1e4-1e5 Eh swings in the first cycles; $scc broydamp is ignored, --etemp does not help)
 # and costs ~2 min per SCF cycle at 1946 atoms on 64 cores; "auto" uses GFN2 above this size.
 GXTB_MAX_ATOMS = 500
 
