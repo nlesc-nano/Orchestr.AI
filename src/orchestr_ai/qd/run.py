@@ -79,6 +79,7 @@ class Settings:
     max_steps: int = 2000
     hessian: str = "auto"            # auto | analytic | fd
     analytic_max_atoms: int = 2000   # autograd Hessian up to here (43 min on an A100 at 2000); FD above
+    hessian_max_atoms: int = 2000    # larger dots: relax, structure and single points only (no Hessian or its dependents)
     fd_step: float = 0.01            # Å
     temperatures: List[float] = field(default_factory=lambda: [float(t) for t in range(50, 801, 25)])
     vdos_sigma: float = 5.0          # cm-1, Gaussian broadening
@@ -262,6 +263,12 @@ def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optiona
         for d in DEPS[step]:
             out |= closure(d)
         return out
+    if len(ctx.symbols) > settings.hessian_max_atoms:
+        dropped = [w for w in wanted if "hessian" in closure(w)]
+        wanted = [w for w in wanted if w not in dropped]
+        if dropped:
+            log(f"[qdprops] {len(ctx.symbols)} atoms > hessian_max_atoms = {settings.hessian_max_atoms}: "
+                f"skipping {', '.join(dropped)}")
     todo = [s for s in STEPS if any(s in closure(w) for w in wanted)]
     log(f"[qdprops] {ctx.record.get('id', ctx.record_dir.name)}: {len(ctx.symbols)} atoms; steps {', '.join(todo)}")
     for step in todo:
