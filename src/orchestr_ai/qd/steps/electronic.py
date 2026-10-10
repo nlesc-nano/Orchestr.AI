@@ -1,8 +1,8 @@
 # src/orchestr_ai/qd/steps/electronic.py
 """
 Tight-binding electronic structure at the MACE-MH-1 minimum: g-xTB, or
-GFN2-xTB when the g-xTB SCF fails (`Settings.xtb_method` "auto"; "gxtb" or
-"gfn2" fix one).  The neutral, cation and anion runs always share a method.
+GFN2-xTB when the g-xTB SCF fails or the dot is larger than
+`Settings.gxtb_max_atoms` (`Settings.xtb_method` "auto"; "gxtb" or "gfn2" fix one).  The neutral, cation and anion runs always share a method.
 
 Neutral single point: total energy, frontier orbitals and the orbital
 (HOMO-LUMO) gap, atomic partial charges, dipole moment and, optionally, the
@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..engines import XTB_FAST_FAIL, XTB_ORDER, XtbRunner
+from ..engines import XTB_FAST_FAIL, XtbRunner, xtb_order
 
 
 def run(ctx) -> dict:
     s = ctx.settings
     symbols, pts = ctx.relaxed()
-    order = XTB_ORDER[s.xtb_method]
+    order = xtb_order(s.xtb_method, len(symbols), s.gxtb_max_atoms)
     for i, method in enumerate(order):
         runner = XtbRunner(method)
         # a method with a fallback gets one short try (see engines.XTB_FAST_FAIL)

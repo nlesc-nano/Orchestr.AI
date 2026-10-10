@@ -89,6 +89,7 @@ class Settings:
     vibspec_max_atoms: int = 300
     vibspec_workers: int = 0         # concurrent single-threaded g-xTB runs (0: cpu count - 2, at most 12)
     xtb_method: str = "auto"        # auto (g-xTB, GFN2 if g-xTB fails) | gxtb | gfn2; electronic, solvation, sites
+    gxtb_max_atoms: int = 500       # "auto": GFN2 only above this size (g-xTB 2.0.1 diverges on larger dots)
     solvation_checks: bool = False   # also run ddCOSMO (eps 2.4, 80) and ALPB checks per structure
     xtb_ip_ea: bool = True
     xtb_gradient: bool = True
@@ -148,7 +149,7 @@ class Settings:
                         "vdos_sigma": self.vdos_sigma},
             "vibspec": {**mace, "method": "gxtb", "acc": "0.01", "step": self.vibspec_step,
                         "field": self.vibspec_field, "max_atoms": self.vibspec_max_atoms, "cif": "record"},
-            "electronic": {"method": self.xtb_method, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
+            "electronic": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
             "detachment": {**mace, "fmax": self.fmax, "max_steps": self.detach_max_steps, "relaxer": self.relaxer(),
                            "max_atoms": self.detach_max_atoms,
@@ -157,8 +158,8 @@ class Settings:
                               if self.detach_perturb_A else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
                            "temperatures": self.temperatures},
-            "solvation": {"method": self.xtb_method, "checks": self.solvation_checks},
-            "sites": {**mace, "method": self.xtb_method, "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
+            "solvation": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "checks": self.solvation_checks},
+            "sites": {**mace, "method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
                       "hessian_max_atoms": self.sites_hessian_max_atoms, "solvation": self.sites_solvation},
             "report": {},
             "wigner": {**mace, "temperatures": self.wigner_temperatures, "samples": self.wigner_samples,
