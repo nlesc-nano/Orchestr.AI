@@ -30,6 +30,8 @@ def run(ctx) -> dict:
         "orbital_gap_eV": neutral.gap_eV,
         "dipole_debye": neutral.dipole_debye,
     }
+    if neutral.annealed_from_K:
+        summary["scf_annealed_from_K"] = neutral.annealed_from_K
     charges = np.asarray(neutral.charges, float)
     by_element = {}
     for e in sorted(set(symbols)):
@@ -52,6 +54,8 @@ def run(ctx) -> dict:
             # GFN2 absolute levels are shifted; IPEA-xTB delta-SCC carries the empirical correction.
             v = runner.vipea(symbols, pts)
             ip, ea, how = v["ip_eV"], v["ea_eV"], "IPEA-xTB delta-SCC (xtb --vipea)"
+            if v.get("annealed_from_K"):
+                how += f", annealed from {v['annealed_from_K']:.0f} K"
         else:
             cation = runner.run(symbols, pts, charge=1, uhf=1)
             anion = runner.run(symbols, pts, charge=-1, uhf=1)
