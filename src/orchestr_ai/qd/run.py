@@ -135,7 +135,9 @@ class Settings:
     def for_step(self, step: str) -> dict:
         from .engines import resolve_device
         dev = resolve_device(self.device)
-        mace = {"head": self.head, "model": Path(self.model).name, "device": dev,
+        # The device is provenance, not a cache key: a CPU job reuses the GPU job's MACE steps
+        # (float64 on either; the Apple GPU runs float32, which the dtype records).
+        mace = {"head": self.head, "model": Path(self.model).name,
                 "dtype": "float32" if dev == "mps" else self.dtype}
         return {
             "relax": {**mace, "fmax": self.fmax, "max_steps": self.max_steps,
@@ -249,7 +251,13 @@ def _step_inputs(ctx: Context, step: str) -> dict:
 
 
 def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optional[Settings] = None,
-               cif: Optional[str] = None, force: bool = False, log: Callable[[str], None] = print) -> dict:
+               cif: Optional[str] = None, force: bool = False, log: Callable[[str], None] = print,
+               upstream_cached: bool = False) -> dict:
+    """
+    Run (or load from cache) `steps` and the steps they depend on for one record.
+    With `upstream_cached`, dependencies that were not requested must already be cached:
+    the CPU stage (xTB steps) never redoes the GPU stage's MACE steps.
+    """
     from .steps import (detachment, electronic, ensemble, hessian, relax, report, sites, solvation, stability,
                         structure, vibspec)
     impl = {"wigner": ensemble.run_wigner, "md": ensemble.run_md,
@@ -283,6 +291,8 @@ def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optiona
                 ctx.results[step] = prev
                 log(f"[qdprops]   {step}: cached")
                 continue
+        if upstream_cached and step not in wanted:
+            raise RuntimeError(f"{step} is not cached (its inputs changed or the GPU stage did not finish it)")
         t0 = time.time()
         res = impl[step](ctx)
         res["_hash"] = h

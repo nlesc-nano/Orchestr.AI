@@ -16,6 +16,8 @@ Runs the QD properties pipeline over library records (`<id>/record.json` +
               detachment, solvation, sites, report, wigner, md]   # default: all
                                            # (md only with settings.md_enabled: the MD subset)
       force: false                         # ignore cached step results
+      upstream: run                        # cached: dependencies must already be cached (the CPU
+                                           # stage after the GPU stage; see qd-workflows props)
       cif: null                            # bulk CIF (default: from record.origin.cif)
       settings:                            # any field of orchestr_ai.qd.run.Settings
         device: auto
@@ -81,7 +83,7 @@ def run_props(config: dict) -> int:
         logging.info(f"[PROPS] {rd.name}: {n} atoms, steps {', '.join(steps)}")
         try:
             run_record(rd, steps, settings, cif=props.get("cif"), force=bool(props.get("force", False)),
-                       log=logging.info)
+                       log=logging.info, upstream_cached=props.get("upstream") == "cached")
         except Exception as exc:  # keep the batch going
             failed.append(rd.name)
             logging.error(f"[PROPS] {rd.name}: FAILED {type(exc).__name__}: {exc}")
