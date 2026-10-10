@@ -100,7 +100,8 @@ def run(ctx) -> dict:
     # the structures are independent: run them side by side on the job's cores
     workers, threads = xtb_pool(len(structures))
     runner, series = xtb_series([(st[1], st[2]) for st in structures], flag_sets, workers, threads,
-                                ctx.settings.xtb_method, base=SMEAR, fallbacks=SMEAR_FALLBACKS)
+                                ctx.settings.xtb_method, base=SMEAR, fallbacks=SMEAR_FALLBACKS,
+                                gxtb_max_atoms=ctx.settings.gxtb_max_atoms)
     for (name, sym, pts), (gas, energies, used) in zip(structures, series):
         smearing[name] = " ".join(used) or "none"
         gb[name] = gb_conductor_energy(list(sym), pts, gas.charges)

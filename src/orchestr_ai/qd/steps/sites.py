@@ -177,7 +177,7 @@ def run(ctx) -> dict:
     cache = RelaxCache(ctx)
     frozen = s.sites_solvation == "frozen"
     workers, threads = xtb_pool(1 + (0 if frozen else len(classes)))
-    xkw = dict(base=SMEAR, fallbacks=SMEAR_FALLBACKS)
+    xkw = dict(base=SMEAR, fallbacks=SMEAR_FALLBACKS, gxtb_max_atoms=s.gxtb_max_atoms)
     runner, [(gas0, _e, _u)] = xtb_series([(sym0, pts0)], [], 1, threads, s.xtb_method, **xkw)
     gb0 = gb_conductor_energy(sym0, pts0, gas0.charges)
     g0 = _g_label(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"])
