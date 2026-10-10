@@ -47,7 +47,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..engines import XtbRunner
+from ..engines import XtbRunner, available_cpus
 
 AU_FIELD_V_A = 51.42206747632590     # 1 a.u. of field in V/Å
 BOHR_A = 0.529177210903
@@ -373,7 +373,7 @@ def run(ctx) -> dict:
             os.replace(tmp, cpath)                 # atomic: a kill never leaves a truncated checkpoint
 
     n_cached = sum(1 for k in range(len(freqs)) if str(k) in cache["modes"])
-    workers = s.vibspec_workers or max(1, min(12, (os.cpu_count() or 2) - 2))
+    workers = s.vibspec_workers or max(1, available_cpus() - 2)    # single-threaded g-xTB runs, one per core
     with ThreadPoolExecutor(workers) as pool:
         list(pool.map(one, range(len(freqs))))
     dmu = np.array([cache["modes"][str(k)]["dmu"] for k in range(len(freqs))]) * AU_DEBYE        # D/(amu^1/2 Å)
