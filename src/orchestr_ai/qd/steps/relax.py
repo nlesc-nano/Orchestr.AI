@@ -2,8 +2,11 @@
 """
 MACE-MH-1 relaxation of the builder start geometry.
 
-BFGS to fmax; if it stalls (step limit or a non-finite step), FIRE continues
-from the last geometry.  The relaxed geometry is written to props/relaxed.xyz
+BFGS to fmax (L-BFGS above Settings.relax_bfgs_max_atoms: BFGS diagonalises
+its 3N x 3N Hessian on the CPU every step, which left the GPU idle for most of
+the 8 min relaxation of a 1946-atom dot and over 48 min for a 2009-atom one);
+if it stalls (step limit or a non-finite step), FIRE continues from the last
+geometry.  The relaxed geometry is written to props/relaxed.xyz
 (centred at the centre of mass, like the library start files).
 """
 from __future__ import annotations
@@ -25,7 +28,7 @@ def _kabsch_rmsd(a: np.ndarray, b: np.ndarray) -> float:
 
 def run(ctx) -> dict:
     from ase import Atoms
-    from ase.optimize import BFGS, FIRE
+    from ase.optimize import BFGS, FIRE, LBFGS
 
     s = ctx.settings
     calc = mace_calculator(s.head, s.model, s.device, s.dtype)
@@ -39,17 +42,18 @@ def run(ctx) -> dict:
     def record():
         trace.append(float(atoms.get_potential_energy()))
 
-    opt = BFGS(atoms, logfile=None)
+    first = BFGS if len(atoms) <= s.relax_bfgs_max_atoms else LBFGS
+    opt = first(atoms, logfile=None)
     opt.attach(record, interval=1)
     converged = bool(opt.run(fmax=s.fmax, steps=s.max_steps))
     steps = opt.get_number_of_steps()
-    optimizer = "BFGS"
+    optimizer = first.__name__
     if not converged:
         opt = FIRE(atoms, logfile=None)
         opt.attach(record, interval=1)
         converged = bool(opt.run(fmax=s.fmax, steps=s.max_steps))
         steps += opt.get_number_of_steps()
-        optimizer = "BFGS+FIRE"
+        optimizer += "+FIRE"
 
     e_relax = float(atoms.get_potential_energy())
     f_relax = float(np.linalg.norm(atoms.get_forces(), axis=1).max())

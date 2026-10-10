@@ -368,7 +368,7 @@ def solution_section(ex: dict, sites: dict | None = None) -> tuple[str, str]:
 <div class='note'>The vacuum free energies of the previous section plus an implicit solvent and finite concentrations:
 μ<sub>i</sub> = G°<sub>i</sub>(T) + ΔG<sub>solv,i</sub>(ε) + k<sub>B</sub>T ln(c<sub>i</sub> / 1 M), bulk {ma} as a solid.
 ΔG<sub>solv</sub>(ε) = −½ (1 − 1/ε) Σ<sub>ij</sub> q<sub>i</sub>q<sub>j</sub>/f<sub>GB</sub>(r<sub>ij</sub>): Generalized Born
-electrostatics of the GFN2-xTB charges, one single point at each MACE-MH-1 gas-phase geometry (no re-optimisation in
+electrostatics of the xTB charges (g-xTB, or GFN2-xTB where g-xTB fails), one single point at each MACE-MH-1 gas-phase geometry (no re-optimisation in
 solvent; non-electrostatic terms not included; ALPB offered for the named solvents where it converged for every species).
 Each panel has its own controls, only for the quantities that enter it.</div>
 <div class='grid'>
@@ -489,7 +489,7 @@ h1 {{ font-size: 21px; margin: 0 0 4px; }} h2 {{ font-size: 16px; margin: 24px 0
 <h1>Synthesis thermodynamics: {title}</h1>
 <div class="sub">Dots {species} in equilibrium with {ma} and {mx} monomers in solution, including every ligand-stripped
 state found by the desorption search. Free energies: MACE-MH-1 (harmonic vibrations, rigid-rotor rotation, ideal solutes at
-1 M) plus Generalized Born solvation of the GFN2-xTB charges. For each temperature the coupled equilibria
+1 M) plus Generalized Born solvation of the xTB charges. For each temperature the coupled equilibria
 c<sub>i</sub> = exp(−ΔG°<sub>i</sub>/k<sub>B</sub>T) c<sub>{ma}</sub><sup>n<sub>i</sub></sup> c<sub>{mx}</sub><sup>m<sub>i</sub></sup>,
 with mass balances C<sub>{ma}</sub> = c<sub>{ma}</sub> + Σ n<sub>i</sub> c<sub>i</sub> and
 C<sub>{mx}</sub> = c<sub>{mx}</sub> + Σ m<sub>i</sub> c<sub>i</sub>, are solved for the free monomers (nested bisection in

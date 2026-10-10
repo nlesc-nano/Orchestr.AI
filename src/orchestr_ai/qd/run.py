@@ -77,6 +77,7 @@ class Settings:
     dtype: str = "float64"
     fmax: float = 0.01               # eV/Å, relaxation convergence
     max_steps: int = 2000
+    relax_bfgs_max_atoms: int = 500  # BFGS up to here, L-BFGS above (BFGS is O(N^3) per step on the CPU)
     hessian: str = "auto"            # auto | analytic | fd
     analytic_max_atoms: int = 2000   # autograd Hessian up to here (43 min on an A100 at 2000); FD above
     hessian_max_atoms: int = 2000    # larger dots: relax, structure and single points only (no Hessian or its dependents)
@@ -87,7 +88,7 @@ class Settings:
     vibspec_field: float = 0.02      # V/Å, finite field for the polarisability
     vibspec_max_atoms: int = 300
     vibspec_workers: int = 0         # concurrent single-threaded g-xTB runs (0: cpu count - 2, at most 12)
-    xtb_method: str = "gfn2"        # gfn2 | gxtb
+    xtb_method: str = "auto"        # auto (g-xTB, GFN2 if g-xTB fails) | gxtb | gfn2; electronic, solvation, sites
     solvation_checks: bool = False   # also run ddCOSMO (eps 2.4, 80) and ALPB checks per structure
     xtb_ip_ea: bool = True
     xtb_gradient: bool = True
@@ -137,7 +138,8 @@ class Settings:
         mace = {"head": self.head, "model": Path(self.model).name, "device": dev,
                 "dtype": "float32" if dev == "mps" else self.dtype}
         return {
-            "relax": {**mace, "fmax": self.fmax, "max_steps": self.max_steps},
+            "relax": {**mace, "fmax": self.fmax, "max_steps": self.max_steps,
+                      **({"bfgs_max_atoms": self.relax_bfgs_max_atoms} if self.relax_bfgs_max_atoms != 500 else {})},
             "structure": {},
             "hessian": {**mace, "hessian": self.hessian, "analytic_max_atoms": self.analytic_max_atoms,
                         "fd_step": self.fd_step, "temperatures": self.temperatures,
@@ -153,8 +155,8 @@ class Settings:
                               if self.detach_perturb_A else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
                            "temperatures": self.temperatures},
-            "solvation": {"method": "gfn2", "checks": self.solvation_checks},
-            "sites": {**mace, "method": "gfn2", "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
+            "solvation": {"method": self.xtb_method, "checks": self.solvation_checks},
+            "sites": {**mace, "method": self.xtb_method, "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
                       "hessian_max_atoms": self.sites_hessian_max_atoms, "solvation": self.sites_solvation},
             "report": {},
             "wigner": {**mace, "temperatures": self.wigner_temperatures, "samples": self.wigner_samples,

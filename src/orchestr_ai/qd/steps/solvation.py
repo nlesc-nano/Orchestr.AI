@@ -20,7 +20,9 @@ dots GB gives less (no electronic polarisation).  Non-electrostatic
 (cavity, dispersion) terms are not included.
 
 All geometries are the gas-phase MACE-MH-1 ones; solvation is a correction
-from one gas-phase GFN2-xTB single point per structure, independent of T.
+from one gas-phase xTB single point per structure, independent of T: g-xTB,
+or GFN2-xTB for every structure of the dot when g-xTB fails on any of them
+(Settings.xtb_method; the GB radii were calibrated on GFN2 charges).
 With Settings.solvation_checks (--solvation-checks), ddCOSMO (eps 2.4 and 80)
 and ALPB (named solvents) are also computed for every structure, each
 restarted from the converged gas-phase density; runs that fail are null.
@@ -31,7 +33,7 @@ import numpy as np
 
 from ..records import read_xyz_first_frame
 
-from ..engines import XtbRunner, parallel_map, xtb_pool
+from ..engines import xtb_pool, xtb_series
 from ..references import binary_units, reference_set
 
 RADIUS_SCALE = 1.15
@@ -97,9 +99,8 @@ def run(ctx) -> dict:
     gb, cosmo, alpb, smearing = {}, {}, {s: {} for s in ALPB_SOLVENTS}, {}
     # the structures are independent: run them side by side on the job's cores
     workers, threads = xtb_pool(len(structures))
-    runner = XtbRunner("gfn2", threads=threads)
-    series = parallel_map(lambda st: runner.run_series(list(st[1]), st[2], flag_sets, base=SMEAR,
-                                                       fallbacks=SMEAR_FALLBACKS), structures, workers)
+    runner, series = xtb_series([(st[1], st[2]) for st in structures], flag_sets, workers, threads,
+                                ctx.settings.xtb_method, base=SMEAR, fallbacks=SMEAR_FALLBACKS)
     for (name, sym, pts), (gas, energies, used) in zip(structures, series):
         smearing[name] = " ".join(used) or "none"
         gb[name] = gb_conductor_energy(list(sym), pts, gas.charges)
@@ -111,7 +112,8 @@ def run(ctx) -> dict:
                 alpb[s][name] = v
     return {
         "summary": {
-            "model": f"Generalized Born on GFN2-xTB charges (HCT radii, Bondi x {RADIUS_SCALE})",
+            "model": f"Generalized Born on {runner.provenance()['engine']} charges (HCT radii, Bondi x {RADIUS_SCALE})",
+            "xtb_method": runner.method,
             "dG_solv_dot_eps2.4_eV": (1 - 1 / 2.4) * gb["dot_0"],
             "dG_solv_dot_eps80_eV": (1 - 1 / 80) * gb["dot_0"],
             "cosmo_dot_eps2.4_eV": cosmo["dot_0"]["2.4"] if checks else None,

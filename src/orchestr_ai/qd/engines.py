@@ -42,6 +42,14 @@ DEFAULT_GXTB = os.environ.get("QDPROPS_GXTB") or (
     str(_GXTB_ROOT / "bin/xtb") if (_GXTB_ROOT / "bin/xtb").is_file() else "xtb")
 DEFAULT_XTB = os.environ.get("QDPROPS_XTB") or (str(_MAC_XTB) if _MAC_XTB.is_file() else (shutil.which("xtb") or "xtb"))
 XTB_METHODS = {"gfn2": ["--gfn", "2"], "gxtb": ["--gxtb"]}
+# Settings.xtb_method -> methods tried in turn. Every structure of one step (dot, desorption
+# products, monomers) uses the same method, so their charges and energies can be combined.
+# Pilot: GFN2 has no converged SCF for an InP dot even at the builder geometry (zero gap) nor
+# for relaxed CsPbBr3, where g-xTB converges in 9-14 iterations; g-xTB diverges on PbS, where
+# GFN2 converges.
+XTB_ORDER = {"auto": ("gxtb", "gfn2"), "gxtb": ("gxtb",), "gfn2": ("gfn2",)}
+# A method with a fallback gets one try with a short SCF, so a divergence costs minutes.
+XTB_FAST_FAIL = ["--iterations", "30"]   # converged runs need 9-14; PbS diverged at ~16 s per iteration
 # Last-resort SCF annealing (electronic temperatures, K): converge hot, then cool. Cd14Se13Cl2
 # desorption products failed at every fixed temperature up to 10000 K; 20000 K converges and
 # the ladder below reaches the base temperature.
@@ -103,6 +111,28 @@ def parallel_map(fn, items, workers: int) -> list:
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(fn, items))
+
+
+def xtb_series(structures, flag_sets, workers: int, threads: int, method: str = "auto",
+               base: Sequence[str] = (), fallbacks: Sequence[Sequence[str]] = ()) -> tuple:
+    """
+    XtbRunner.run_series for every (symbols, positions) in `structures`, all with one method:
+    the first of XTB_ORDER[method] under which every structure converges. A method that has a
+    successor gets one short try (XTB_FAST_FAIL, no smearing or annealing); the last one gets
+    `base`, `fallbacks` and the annealing ladder. Returns (runner, [run_series result, ...]).
+    """
+    order = XTB_ORDER[method]
+    last = None
+    for i, m in enumerate(order):
+        runner = XtbRunner(m, threads=threads)
+        kw = (dict(base=base, fallbacks=fallbacks) if i == len(order) - 1
+              else dict(base=XTB_FAST_FAIL, fallbacks=(), tries=1, anneal=False))
+        try:
+            return runner, parallel_map(lambda st: runner.run_series(list(st[0]), st[1], flag_sets, **kw),
+                                        structures, workers)
+        except RuntimeError as exc:
+            last = exc
+    raise last
 
 
 def mace_calculator(head: str = DEFAULT_HEAD, model: str = DEFAULT_MODEL,
@@ -242,7 +272,8 @@ class XtbRunner:
                 "xtb": self.version()}
 
     def run(self, symbols: Sequence[str], pts: np.ndarray, *, charge: int = 0, uhf: int = 0,
-            gradient: bool = False, solvation: Optional[Sequence[str]] = None, attempts: int = 3) -> XtbResult:
+            gradient: bool = False, solvation: Optional[Sequence[str]] = None, attempts: int = 3,
+            extra: Sequence[str] = ()) -> XtbResult:
         """
         Single point; `solvation` adds flags, e.g. ["--cosmo", "9.0"] or ["--alpb", "toluene"].
         The SCC of small-gap structures occasionally fails at random (threaded runs are not
@@ -250,12 +281,13 @@ class XtbRunner:
         """
         for i in range(attempts):
             try:
-                return self._run_once(symbols, pts, charge=charge, uhf=uhf, gradient=gradient, solvation=solvation)
+                return self._run_once(symbols, pts, charge=charge, uhf=uhf, gradient=gradient, solvation=solvation,
+                                      extra=extra)
             except RuntimeError:
                 if i == attempts - 1:
                     raise
 
-    def _run_once(self, symbols, pts, *, charge, uhf, gradient, solvation) -> XtbResult:
+    def _run_once(self, symbols, pts, *, charge, uhf, gradient, solvation, extra=()) -> XtbResult:
         with tempfile.TemporaryDirectory(prefix="xtb_") as tmp:
             tmp = Path(tmp)
             xyz = tmp / "mol.xyz"
@@ -263,7 +295,7 @@ class XtbRunner:
             lines += [f"{s} {x:.10f} {y:.10f} {z:.10f}" for s, (x, y, z) in zip(symbols, np.asarray(pts, float))]
             xyz.write_text("\n".join(lines) + "\n")
             cmd = [self.binary, xyz.name, *XTB_METHODS[self.method], "--chrg", str(int(charge)),
-                   "--uhf", str(int(uhf))]
+                   "--uhf", str(int(uhf)), *extra]
             if gradient:
                 cmd.append("--grad")
             if solvation:
@@ -284,7 +316,8 @@ class XtbRunner:
 
 
     def run_series(self, symbols: Sequence[str], pts: np.ndarray, flag_sets: Sequence[Sequence[str]],
-                   base: Sequence[str] = (), fallbacks: Sequence[Sequence[str]] = ()) -> tuple:
+                   base: Sequence[str] = (), fallbacks: Sequence[Sequence[str]] = (), tries: int = 2,
+                   anneal: bool = True) -> tuple:
         """
         Gas-phase single point, then one run per flag set, each restarted from the
         converged gas-phase density (xtbrestart), in one directory.  Returns
@@ -316,14 +349,14 @@ class XtbRunner:
             out = None
             for option in [list(base), *[list(f) for f in fallbacks]]:
                 used[:] = option
-                for _ in range(2):
+                for _ in range(tries):
                     out = call([])
                     if out:
                         break
                 if out:
                     break
             annealed = None
-            if out is None:
+            if out is None and anneal:
                 (tmp / "xtbrestart").unlink(missing_ok=True)
                 for etemp in ANNEAL_ETEMPS:
                     used[:] = ["--etemp", str(etemp), "--iterations", str(ANNEAL_ITERATIONS)]
