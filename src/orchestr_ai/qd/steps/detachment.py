@@ -561,6 +561,8 @@ def run(ctx) -> dict:
     if u is None or not u["m_MXq"]:
         return {"summary": {"skipped": "no Z-type MX_q units"}}
     s = ctx.settings
+    if len(ctx.symbols) > s.detach_max_atoms:
+        return {"summary": {"skipped": f"{len(ctx.symbols)} atoms > detach_max_atoms = {s.detach_max_atoms}"}}
     refs = reference_set(ctx, u)
     mx = refs["MXq_monomer"]
     q, m = u["q"], u["m_MXq"]

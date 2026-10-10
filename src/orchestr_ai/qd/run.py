@@ -78,7 +78,7 @@ class Settings:
     fmax: float = 0.01               # eV/Å, relaxation convergence
     max_steps: int = 2000
     hessian: str = "auto"            # auto | analytic | fd
-    analytic_max_atoms: int = 300
+    analytic_max_atoms: int = 2000   # autograd Hessian up to here (43 min on an A100 at 2000); FD above
     fd_step: float = 0.01            # Å
     temperatures: List[float] = field(default_factory=lambda: [float(t) for t in range(50, 801, 25)])
     vdos_sigma: float = 5.0          # cm-1, Gaussian broadening
@@ -90,10 +90,11 @@ class Settings:
     solvation_checks: bool = False   # also run ddCOSMO (eps 2.4, 80) and ALPB checks per structure
     xtb_ip_ea: bool = True
     xtb_gradient: bool = True
+    detach_max_atoms: int = 600      # desorption search (and the site map built on it) up to this size
     detach_max_steps: int = 4        # stepwise MX_q removals
     detach_max_candidates: int = 12  # symmetry-unique sites relaxed per step
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
-    detach_perturb_A: float = 0.0       # random displacement (sigma, A) of every candidate's start (search tests)
+    detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
     relax_batch_atoms: int = 4000       # desorption candidates relaxed together, at most this many atoms per
                                         # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS).
@@ -145,6 +146,7 @@ class Settings:
             "electronic": {"method": self.xtb_method, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
             "detachment": {**mace, "fmax": self.fmax, "max_steps": self.detach_max_steps, "relaxer": self.relaxer(),
+                           "max_atoms": self.detach_max_atoms,
                            "max_candidates": self.detach_max_candidates,
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),
