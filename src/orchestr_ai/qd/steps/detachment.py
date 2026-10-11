@@ -191,6 +191,7 @@ class RelaxCache:
         self.tag = (f"v2|{s.head}|{s.model}|{s.device}|{s.dtype}|{TRAIN_FMAX}|{TRAIN_STEPS}" if not s.relax_batch_atoms
                     else f"v3|{s.head}|{s.model}|{s.device}|{s.dtype}|{s.relaxer()}")
         self.data = json.loads(self.path.read_text()) if self.path.is_file() else {}
+        self.perms = None                # rotations of the intact dot (set by run) for configuration_sigma
         self.worker = _Worker() if resolve_device(s.device) == "mps" else None
         self.n_new = 0
         # Optional random displacement of every candidate's starting geometry (reproducibility
@@ -212,6 +213,9 @@ class RelaxCache:
             p = np.asarray(p, float)
             out.append((sy, p + rng.normal(0.0, self.perturb, p.shape)))
         return out
+
+    def sigma(self, remaining_ids):
+        return configuration_sigma(self.perms, remaining_ids) if self.perms is not None else None
 
     def _save(self):
         tmp = self.path.with_suffix(".tmp")
@@ -389,13 +393,54 @@ def _key(state, unit):
     return (state.ids[unit["cation"]], tuple(sorted(state.ids[x] for x in unit["ligands"])))
 
 
-def _add_configuration(ensemble, atoms, k, energy):
+def rotation_permutations(symbols, pts, tol: float = 0.1) -> list:
+    """The proper rotations of a structure as atom permutations (index arrays), identity
+    first: one point-group analysis per dot (pymatgen takes 2-6 s on 300-500 atoms)."""
+    sym, p = list(symbols), np.asarray(pts, float)
+    n = len(sym)
+    ident = np.arange(n)
+    try:
+        from pymatgen.core import Molecule
+        from pymatgen.symmetry.analyzer import PointGroupAnalyzer
+        mol = Molecule(sym, p)
+        ops = PointGroupAnalyzer(mol, tolerance=tol).get_symmetry_operations()
+        x = p - mol.center_of_mass
+    except Exception:
+        return [ident]
+    out = [ident]
+    species = np.array(sym)
+    for op in ops:
+        r = op.rotation_matrix
+        if np.linalg.det(r) < 0 or np.allclose(r, np.eye(3)):
+            continue
+        y = x @ r.T
+        dm = np.linalg.norm(y[:, None] - x[None], axis=-1)
+        dm[species[:, None] != species[None]] = np.inf
+        j = dm.argmin(1)
+        if dm[ident, j].max() < 3 * tol and len(set(j.tolist())) == n:
+            out.append(j)
+    return out
+
+
+def configuration_sigma(perms, remaining_ids) -> int:
+    """Rotational symmetry number of a configuration left by removals from the intact dot:
+    the intact dot's rotations that map its remaining atoms onto themselves."""
+    keep = np.zeros(len(perms[0]), bool)
+    keep[list(remaining_ids)] = True
+    return int(sum(1 for pm in perms if keep[pm[keep]].all()))
+
+
+def _remaining(state, removed_local) -> list:
+    return [state.ids[i] for i in range(len(state.sym)) if i not in removed_local]
+
+
+def _add_configuration(ensemble, atoms, k, energy, sigma=None):
     """Distinct relaxed configurations (keyed by the relaxed fingerprint), with their
     rotational symmetry numbers for the configurational partition function."""
     sym, pts = atoms.get_chemical_symbols(), atoms.get_positions()
     fp = fingerprint(sym, pts)
     if fp not in ensemble or energy < ensemble[fp][1]:
-        ensemble[fp] = (k, energy, rotational_symmetry_number(sym, pts))
+        ensemble[fp] = (k, energy, sigma if sigma is not None else rotational_symmetry_number(sym, pts))
 
 
 def plan(state, units, local_r=LOCAL_R):
@@ -431,7 +476,8 @@ def evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats):
             state.table[key] = {"J": J, "exact": True, "rep": key0, "unit": un, "converged": ok,
                                 "multiplicity": len(members)}
         state.table[key0]["product"] = atoms
-        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J)
+        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J,
+                           cache.sigma(_remaining(state, members[0][1]["atoms"])))
 
 
 def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
@@ -446,7 +492,8 @@ def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
         state = beam[si]
         entry = state.table[key]
         entry.update(J=e - e_full - state.energy, exact=True, rep=key, product=atoms, converged=ok, multiplicity=1)
-        _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"])
+        _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"],
+                           cache.sigma(_remaining(state, entry["unit"]["atoms"])))
 
 
 def polish(beam, todo, cache, settings, e_full, ensemble, stats):
@@ -463,7 +510,8 @@ def polish(beam, todo, cache, settings, e_full, ensemble, stats):
             if entry.get("rep") == key:
                 entry["J"] = J
         state.table[key].update(product=atoms, converged=ok, polished=True)
-        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J)
+        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J,
+                           cache.sigma(_remaining(state, state.table[key]["unit"]["atoms"])))
 
 
 def polish_level(beam, cache, settings, e_full, ensemble, stats):
@@ -662,7 +710,8 @@ def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble
             stats["relaxations"] += len(cands)
         for c, (atoms, e, ok) in zip(cands, res):
             c.update(atoms=atoms, exact=True, converged=ok, dE=e - e_full - c["st"].energy)
-            _add_configuration(ensemble, atoms, c["st"].k + len(c["mv"]), c["st"].energy + c["dE"])
+            _add_configuration(ensemble, atoms, c["st"].k + len(c["mv"]), c["st"].energy + c["dE"],
+                               cache.sigma(_remaining(c["st"], set().union(*(un["atoms"] for un in c["mv"])))))
 
     root = State(ctx.relaxed()[0], ctx.relaxed()[1], range(len(ctx.symbols)), 0.0, [])
     root.table, root.last_removed = {}, None
@@ -749,7 +798,7 @@ def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble
             nxt = State(atoms.get_chemical_symbols(), atoms.get_positions(), [parent.ids[i] for i in keep],
                         e - e_full, parent.path + [_key(parent, un) for un in sub], parent=cur)
             nxt.step = _step_info(parent, sub[-1], nxt.energy - cur.energy, nc, ne, len(mv), True)
-            _add_configuration(ensemble, atoms, nxt.k, nxt.energy)
+            _add_configuration(ensemble, atoms, nxt.k, nxt.energy, cache.sigma(nxt.ids))
             path.append(nxt)
             cur = nxt
         ms.step = _step_info(parent, mv[-1], ms.energy - cur.energy, nc, ne, len(mv), False)
@@ -792,6 +841,7 @@ def run(ctx) -> dict:
     method = s.hessian if s.hessian != "auto" else ("analytic" if len(sym0) <= s.analytic_max_atoms else "fd")
     s_hess = replace(s, hessian=method)          # one Hessian method for the full dot and the whole path
     cache = RelaxCache(ctx)
+    cache.perms = rotation_permutations(sym0, pts0)
     stats = {"relaxations": 0, "lazy": 0}
     ensemble = {}                                    # relaxed fingerprint -> (k, E - E_full, symmetry number)
 
@@ -861,7 +911,7 @@ def run(ctx) -> dict:
     dF_cum = {0: np.zeros(len(T))}          # vibrational change after k removals (best path)
     for st in ladder:
         dF_cum[st["k"]] = dF_cum[st["k"] - 1] + np.asarray(st["dF_vib_eV"])
-    sigma0 = rotational_symmetry_number(sym0, pts0)
+    sigma0 = len(cache.perms)
     confs = [(0, 0.0, sigma0)] + [v for v in ensemble.values()]
     ks = np.array([c[0] for c in confs], float)
     es = np.array([c[1] for c in confs], float)
