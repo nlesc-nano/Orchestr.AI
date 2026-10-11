@@ -560,11 +560,11 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
 # higher. Moves are ranked by energy per removed unit; a child re-relaxes only the moves within
 # SYM_R_LOCAL of a cation it just removed and keeps its parent's dE for the others (re-relaxed
 # when within SYM_REFRESH of the best). Along the final path every move of n units is filled
-# with n - 1 intermediate states, the units removed one after another (each relaxed), so the
+# with n - 1 intermediate states (its first j units removed from the parent at once, relaxed), so the
 # ladder, its Hessians and the dot_k structures exist for every k.
 
 SYM_R_LOCAL = 7.0         # Å
-SYM_REFRESH = 0.3         # eV per removed unit
+SYM_REFRESH = 0.1         # eV per removed unit (0.3 re-relaxed ~2/3 of the estimates of PbS, whose units are within 0.2 eV)
 SYM_POLISH_N = 3          # best moves per expansion re-relaxed to POLISH_FMAX
 
 
@@ -725,7 +725,8 @@ def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble
         beam = children
     final = min(beam, key=lambda x: (-x.k, x.energy))
 
-    # One state per k: fill each move with its units removed one after another.
+    # One state per k: state k + j of a move removes the move's first j units from its parent at
+    # once and relaxes, as the move itself does for all n (equivalent units are independent).
     moves_path, st = [], final
     while st.parent is not None:
         moves_path.append(st)
@@ -735,18 +736,19 @@ def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble
     for ms in moves_path:
         parent, mv = ms.parent, ms.move
         nc, ne = ms.move_stats
+        partial = [mv[:j] for j in range(1, len(mv))]
+        res = cache.relax_many([_product(parent.sym, parent.pts, set().union(*(un["atoms"] for un in sub)))
+                                for sub in partial], s)
+        res = cache.relax_many([(a.get_chemical_symbols(), a.get_positions()) for a, _e, _ok in res], s, polish=True)
+        stats["relaxations"] += len(partial)
+        stats["intermediate"] = stats.get("intermediate", 0) + len(partial)
         cur = parent
-        for un in mv[:-1]:
-            orig = {parent.ids[x] for x in un["atoms"]}
-            loc = {i for i, g in enumerate(cur.ids) if g in orig}
-            (atoms, e, _ok), = cache.relax_many([_product(cur.sym, cur.pts, loc)], s)
-            (atoms, e, _ok), = cache.relax_many([(atoms.get_chemical_symbols(), atoms.get_positions())], s, polish=True)
-            stats["relaxations"] += 1
-            stats["intermediate"] = stats.get("intermediate", 0) + 1
-            keep = [i for i in range(len(cur.sym)) if i not in loc]
-            nxt = State(atoms.get_chemical_symbols(), atoms.get_positions(), [cur.ids[i] for i in keep], e - e_full,
-                        cur.path + [_key(parent, un)], parent=cur)
-            nxt.step = _step_info(parent, un, nxt.energy - cur.energy, nc, ne, len(mv), True)
+        for sub, (atoms, e, _ok) in zip(partial, res):
+            removed = set().union(*(un["atoms"] for un in sub))
+            keep = [i for i in range(len(parent.sym)) if i not in removed]
+            nxt = State(atoms.get_chemical_symbols(), atoms.get_positions(), [parent.ids[i] for i in keep],
+                        e - e_full, parent.path + [_key(parent, un) for un in sub], parent=cur)
+            nxt.step = _step_info(parent, sub[-1], nxt.energy - cur.energy, nc, ne, len(mv), True)
             _add_configuration(ensemble, atoms, nxt.k, nxt.energy)
             path.append(nxt)
             cur = nxt
