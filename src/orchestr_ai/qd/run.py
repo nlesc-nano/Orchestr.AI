@@ -46,17 +46,19 @@ CIF_DIRS = _cif_dirs()
 # Steps whose results a step reads (their hashes enter its cache key).
 DEPS = {
     "relax": [], "structure": ["relax"], "hessian": ["relax", "structure"],
-    "vibspec": ["relax", "structure", "hessian"], "electronic": ["relax", "structure"],
+    "field": ["relax"],
+    "vibspec": ["relax", "structure", "hessian", "field"], "electronic": ["relax", "structure"],
     "stability": ["structure", "hessian"], "detachment": ["structure", "hessian"],
-    "solvation": ["relax", "detachment"],
-    "sites": ["relax", "structure", "hessian", "detachment", "solvation"],
+    "solvation": ["relax", "detachment", "field"],
+    "sites": ["relax", "structure", "hessian", "detachment", "solvation", "field"],
     "report": ["relax", "structure", "hessian", "vibspec", "stability", "detachment", "solvation", "sites"],
     "wigner": ["relax", "structure", "hessian"], "md": ["relax", "hessian", "wigner"],
 }
 # Source files whose content enters a step's cache key (engine versions are in the provenance).
 CODE_DEPS = {
     "relax": ["steps/relax.py"], "structure": ["steps/structure.py"], "hessian": ["steps/hessian.py"],
-    "vibspec": ["steps/vibspec.py", "bulk.py"],
+    "field": ["steps/dft_field.py", "field.py"],
+    "vibspec": ["steps/vibspec.py", "bulk.py", "field.py"],
     "electronic": ["steps/electronic.py"], "stability": ["steps/stability.py", "references.py"],
     "detachment": ["steps/detachment.py", "references.py"], "solvation": ["steps/solvation.py"], "sites": ["steps/sites.py"],
     "report": ["steps/report.py", "steps/vibplots.py", "bulk.py", "solution.py", "dashboards.py"],
@@ -86,7 +88,10 @@ class Settings:
     vdos_sigma: float = 5.0          # cm-1, Gaussian broadening
     vibspec_step: float = 0.1        # amu^1/2 Å, normal-coordinate displacement for the derivatives
     vibspec_field: float = 0.02      # V/Å, finite field for the polarisability
-    vibspec_max_atoms: int = 300
+    vibspec_max_atoms: int = 300     # g-xTB IR/Raman only (vibspec_source gxtb)
+    vibspec_source: str = "dft"      # dft: Born charges + Raman tensors of the field step | gxtb: g-xTB finite differences
+    dft_dir: str = "cp2k"            # the DFT chain's directory, relative to the record (its field/ runs)
+    solvation_charges: str = "dft"   # dft: Hirshfeld charges of the field step | xtb: xTB single points
     vibspec_workers: int = 0         # concurrent single-threaded g-xTB runs (0: cpu count - 2, at most 12)
     xtb_method: str = "auto"        # auto (g-xTB, GFN2 if g-xTB fails) | gxtb | gfn2; electronic, solvation, sites
     gxtb_max_atoms: int = 500       # "auto": GFN2 only above this size (g-xTB 2.0.1 diverges on larger dots)
@@ -146,7 +151,8 @@ class Settings:
             "hessian": {**mace, "hessian": self.hessian, "analytic_max_atoms": self.analytic_max_atoms,
                         "fd_step": self.fd_step, "temperatures": self.temperatures,
                         "vdos_sigma": self.vdos_sigma},
-            "vibspec": {**mace, "method": "gxtb", "acc": "0.01", "step": self.vibspec_step,
+            "field": {"dir": self.dft_dir},
+            "vibspec": {**mace, "source": self.vibspec_source, "method": "gxtb", "acc": "0.01", "step": self.vibspec_step,
                         "field": self.vibspec_field, "max_atoms": self.vibspec_max_atoms, "cif": "record"},
             "electronic": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
@@ -156,8 +162,8 @@ class Settings:
                               if self.detach_perturb_A else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
                            "temperatures": self.temperatures},
-            "solvation": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "checks": self.solvation_checks},
-            "sites": {**mace, "method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
+            "solvation": {"charges": self.solvation_charges, "method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "checks": self.solvation_checks},
+            "sites": {**mace, "charges": self.solvation_charges, "method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "relaxer": self.relaxer(), "thermo_max_atoms": self.detach_thermo_max_atoms,
                       "hessian_max_atoms": self.sites_hessian_max_atoms, "solvation": self.sites_solvation},
             "report": {},
             "wigner": {**mace, "temperatures": self.wigner_temperatures, "samples": self.wigner_samples,
@@ -246,7 +252,18 @@ def _step_inputs(ctx: Context, step: str) -> dict:
         "settings": ctx.settings.for_step(step),
         "start": _geometry_hash(start),
         "upstream": {d: ctx.results.get(d, {}).get("_hash") for d in deps},
+        **({"external": STEP_EXTERNAL[step](ctx)} if step in STEP_EXTERNAL else {}),
     }
+
+
+def _field_digest(ctx: Context):
+    from .field import input_digest
+    from .steps.dft_field import field_dir
+    return input_digest(field_dir(ctx))
+
+
+# Data a step reads from outside the record's props/ (their digest enters its cache key).
+STEP_EXTERNAL = {"field": _field_digest}
 
 
 def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optional[Settings] = None,
@@ -257,10 +274,11 @@ def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optiona
     With `upstream_cached`, dependencies that were not requested must already be cached:
     the CPU stage (xTB steps) never redoes the GPU stage's MACE steps.
     """
-    from .steps import (detachment, electronic, ensemble, hessian, relax, report, sites, solvation, stability,
+    from .steps import (detachment, dft_field, electronic, ensemble, hessian, relax, report, sites, solvation, stability,
                         structure, vibspec)
     impl = {"wigner": ensemble.run_wigner, "md": ensemble.run_md,
             "relax": relax.run, "structure": structure.run, "hessian": hessian.run, "vibspec": vibspec.run,
+            "field": dft_field.run,
             "electronic": electronic.run, "stability": stability.run, "detachment": detachment.run,
             "solvation": solvation.run, "sites": sites.run, "report": report.run}
     settings = settings or Settings()

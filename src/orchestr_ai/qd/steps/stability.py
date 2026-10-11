@@ -31,6 +31,7 @@ def run(ctx) -> dict:
     if u is None:
         return {"summary": {"skipped": "not a charge-balanced binary [MA]_n(MX_q)_m dot"}}
     refs = reference_set(ctx, u)
+    write_monomers(ctx.props / "monomers.xyz", refs)
     T = ctx.settings.temperatures
     n, m = u["n_MA"], u["m_MXq"]
     e = ctx.results["relax"]["summary"]["energy_eV"]
@@ -81,3 +82,15 @@ def run(ctx) -> dict:
                        for k, v in refs.items() if isinstance(v, dict) and k != "key"},
         "provenance": refs.get("provenance"),
     }
+
+
+def write_monomers(path, refs) -> None:
+    """The MA and MX_q monomers (MACE geometries) as xyz frames labelled MA and MX: the DFT chain
+    computes their charges next to the dot's field runs (qd.field prepare --monomers)."""
+    frames = []
+    for label, key in (("MA", "MA_monomer"), ("MX", "MXq_monomer")):
+        if key in refs:
+            sym, pts = refs[key]["symbols"], refs[key]["positions"]
+            frames.append(f"{len(sym)}\n{label}\n" + "".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n"
+                                                           for s, (x, y, z) in zip(sym, pts)))
+    path.write_text("".join(frames))

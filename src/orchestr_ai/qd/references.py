@@ -220,7 +220,9 @@ def reference_set(ctx, units: dict) -> dict:
         raise RuntimeError("no bulk CIF for this record (pass --cif)")
     from .engines import resolve_device
     dev = resolve_device(s.device)
-    key_src = {"head": s.head, "model": Path(s.model).name, "device": dev,
+    # The device is not part of the key (float64 on CUDA or CPU gives the same references), so a CPU
+    # job finds the GPU job's; Apple's float32 is told apart by the dtype.
+    key_src = {"head": s.head, "model": Path(s.model).name,
                "dtype": "float32" if dev == "mps" else s.dtype,
                "cif": hashlib.sha256(Path(ctx.cif).read_bytes()).hexdigest()[:16],
                "units": {k: units[k] for k in ("M", "A", "X", "q")}, "T": s.temperatures, "v": 3}

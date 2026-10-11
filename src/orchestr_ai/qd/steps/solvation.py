@@ -92,6 +92,8 @@ def run(ctx) -> dict:
         structures.append(("MA", refs["MA_monomer"]["symbols"], np.asarray(refs["MA_monomer"]["positions"])))
         if "MXq_monomer" in refs:
             structures.append(("MX", refs["MXq_monomer"]["symbols"], np.asarray(refs["MXq_monomer"]["positions"])))
+    if ctx.settings.solvation_charges == "dft":
+        return _run_dft(ctx, structures)
     # ALPB reference state gsolv: 1 M ideal gas -> 1 M solution, as used throughout
     checks = ctx.settings.solvation_checks
     flag_sets = ([["--cosmo", f"{e:g}"] for e in COSMO_CHECK] + [["--alpb", s, "gsolv"] for s in ALPB_SOLVENTS]
@@ -129,4 +131,56 @@ def run(ctx) -> dict:
         "cosmo_check": cosmo,
         "alpb": {"solvents": ALPB_SOLVENTS if checks else {}, "dG": alpb if checks else {}},
         "provenance": runner.provenance(),
+    }
+
+
+def dft_charges(ctx) -> np.ndarray:
+    """Hirshfeld charges of the intact dot from the field step (CP2K PBE)."""
+    q = ctx.results.get("field", {}).get("charges")
+    if not q:
+        raise RuntimeError("solvation_charges is dft but the field step has no Hirshfeld charges")
+    return np.asarray(q, float)
+
+
+def frozen_charges(q0, keep) -> np.ndarray:
+    """The intact dot's charges on the atoms kept, re-neutralised (no new SCF)."""
+    qk = np.asarray(q0, float)[list(keep)]
+    return qk - qk.sum() / len(qk)
+
+
+def _run_dft(ctx, structures) -> dict:
+    """GB on DFT charges: the intact dot's Hirshfeld charges, the desorption products' frozen from
+    them (atoms left after the path's removals), the monomers' from their own single points."""
+    q0 = dft_charges(ctx)
+    mono = ctx.results["field"].get("monomers", {})
+    removed, keep_k = set(), {}
+    for st in ctx.results.get("detachment", {}).get("steps", []):
+        c, lig = st["unit"]
+        removed |= {c, *lig}
+        keep_k[f"dot_{st['k']}"] = [i for i in range(len(q0)) if i not in removed]
+    gb = {}
+    for name, sym, pts in structures:
+        if name == "dot_0":
+            q = q0
+        elif name in keep_k:
+            q = frozen_charges(q0, keep_k[name])
+        else:
+            if name not in mono or mono[name]["symbols"] != list(sym):
+                raise RuntimeError(f"no DFT charges for the {name} monomer (field step monomers: {sorted(mono)})")
+            q = np.asarray(mono[name]["charges"], float)
+        if len(q) != len(sym):
+            raise RuntimeError(f"{name}: {len(q)} charges for {len(sym)} atoms")
+        gb[name] = gb_conductor_energy(list(sym), pts, q)
+    return {
+        "summary": {
+            "model": f"Generalized Born on CP2K PBE Hirshfeld charges (HCT radii, Bondi x {RADIUS_SCALE}; "
+                     "desorption products: the intact dot's charges, re-neutralised)",
+            "charges": "dft",
+            "dG_solv_dot_eps2.4_eV": (1 - 1 / 2.4) * gb["dot_0"],
+            "dG_solv_dot_eps80_eV": (1 - 1 / 80) * gb["dot_0"],
+            "n_structures": len(structures),
+        },
+        "gb_inf": gb,
+        "radius_scale": RADIUS_SCALE,
+        "provenance": ctx.results["field"].get("provenance", {}),
     }

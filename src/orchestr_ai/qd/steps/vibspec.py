@@ -331,15 +331,9 @@ def mode_class(freq, core, surface, ligand, breathing, ir_rel, raman_rel, omega_
     return "core acoustic-like" if core >= 0.4 else "surface / torsional"
 
 
-def run(ctx) -> dict:
-    s = ctx.settings
-    symbols, pts = ctx.relaxed()
-    pts = np.asarray(pts, float)
-    n = len(symbols)
-    if n > s.vibspec_max_atoms:
-        return {"summary": {"skipped": f"{n} atoms > vibspec_max_atoms = {s.vibspec_max_atoms}"}}
-    m = np.load(ctx.props / "modes.npz")
-    freqs, modes, masses = m["frequencies_cm1"], m["modes_mass_weighted"], m["masses"]
+def _gxtb_derivatives(ctx, s, symbols, pts, freqs, modes, masses):
+    """dmu/dQ (D/(amu^1/2 A)), dalpha/dQ (A^2/amu^1/2), alpha and dipole (a.u.) by g-xTB finite
+    differences along the modes (+-h) in static fields (+-F), checkpointed per mode."""
     h, F = s.vibspec_step, s.vibspec_field
     charge = sum(ctx.charges.get(x, 0) for x in symbols)
     fd = FieldDipoles(symbols, charge)
@@ -378,6 +372,46 @@ def run(ctx) -> dict:
         list(pool.map(one, range(len(freqs))))
     dmu = np.array([cache["modes"][str(k)]["dmu"] for k in range(len(freqs))]) * AU_DEBYE        # D/(amu^1/2 Å)
     dal = np.array([cache["modes"][str(k)]["dalpha"] for k in range(len(freqs))]) * BOHR_A ** 3  # Å²/amu^1/2
+    extra = {"gxtb_gradient_norm_Eh_bohr": getattr(fd, "gradient_norm", None), "step_amu05_A": h, "field_V_A": F,
+             "n_gxtb_runs": 12 * (len(freqs) - n_cached) + 7, "n_modes_from_checkpoint": n_cached,
+             "seconds_gxtb": round(time.time() - t0, 1)}
+    return dmu, dal, a0, mu0, extra, {**fd.runner.provenance(), "frequencies": "MACE-MH-1 (hessian step)"}
+
+
+def _dft_derivatives(ctx, n, modes, masses):
+    """The same from the field step's DFT Born charges and Raman tensors (props/field.npz), or None."""
+    from ..field import mode_derivatives
+    path = ctx.props / "field.npz"
+    if not path.is_file() or "skipped" in ctx.results.get("field", {}).get("summary", {}):
+        return None
+    f = np.load(path)
+    dmu, dal = mode_derivatives({"n_atoms": n, "born": f["born"], "raman_tensor": f["raman_tensor"]}, modes, masses)
+    a0 = f["alpha"] if "alpha" in f.files else np.full((3, 3), np.nan)
+    mu0 = f["dipole"] if "dipole" in f.files else np.full(3, np.nan)
+    fs = ctx.results["field"]["summary"]
+    extra = {"source": fs.get("source"), "field_au": fs.get("field_au"),
+             "sum_rule_born_e": fs.get("sum_rule_born_e"), "sum_rule_raman_relative": fs.get("sum_rule_raman_relative")}
+    return dmu, dal, a0, mu0, extra, {**ctx.results["field"].get("provenance", {}),
+                                      "derivatives": "DFT finite field (Born charges, Raman tensors)",
+                                      "frequencies": "MACE-MH-1 (hessian step)"}
+
+
+def run(ctx) -> dict:
+    s = ctx.settings
+    symbols, pts = ctx.relaxed()
+    pts = np.asarray(pts, float)
+    n = len(symbols)
+    m = np.load(ctx.props / "modes.npz")
+    freqs, modes, masses = m["frequencies_cm1"], m["modes_mass_weighted"], m["masses"]
+    if s.vibspec_source == "dft":
+        der = _dft_derivatives(ctx, n, modes, masses)
+        if der is None:
+            return {"summary": {"skipped": "no DFT field tensors (field step); vibspec_source is dft"}}
+    else:
+        if n > s.vibspec_max_atoms:
+            return {"summary": {"skipped": f"{n} atoms > vibspec_max_atoms = {s.vibspec_max_atoms}"}}
+        der = _gxtb_derivatives(ctx, s, symbols, pts, freqs, modes, masses)
+    dmu, dal, a0, mu0, extra, provenance = der
     sym = symmetry(symbols, pts, masses, modes, freqs)
     U = sym["U"]
     modes = modes @ U                               # symmetry-adapted modes; derivatives rotate with them
@@ -434,12 +468,9 @@ def run(ctx) -> dict:
             "n_totally_symmetric": int(sym["totally_symmetric"].sum()),
             "alpha_iso_A3": float(np.trace(alpha_A3) / 3), "dipole_D": float(np.linalg.norm(mu0) * AU_DEBYE),
             "top_ir": top(ir), "top_raman": top(S),
-            "bulk_gamma_optical_cm1": gamma, "gxtb_gradient_norm_Eh_bohr": getattr(fd, "gradient_norm", None),
-            "step_amu05_A": h, "field_V_A": F, "n_gxtb_runs": 12 * (len(freqs) - n_cached) + 7,
-            "n_modes_from_checkpoint": n_cached,
-            "seconds_gxtb": round(time.time() - t0, 1),
+            "bulk_gamma_optical_cm1": gamma, **extra,
         },
         "alpha_A3": alpha_A3.tolist(),
         "modes": modes_out,
-        "provenance": {**fd.runner.provenance(), "frequencies": "MACE-MH-1 (hessian step)"},
+        "provenance": provenance,
     }

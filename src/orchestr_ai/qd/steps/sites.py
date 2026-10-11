@@ -44,7 +44,7 @@ from ..engines import xtb_pool, xtb_series
 from ..references import binary_units, ideal_gas_g, reference_set
 from ..solution import EXPORT_T
 from .detachment import RelaxCache, _product
-from .solvation import SMEAR, SMEAR_FALLBACKS, gb_conductor_energy
+from .solvation import SMEAR, SMEAR_FALLBACKS, dft_charges, frozen_charges, gb_conductor_energy
 
 
 def _g_label(symbols, pts, energy, freqs):
@@ -175,11 +175,17 @@ def run(ctx) -> dict:
         g1 = _g_label(s1, p1, e1, steps[0]["frequencies_cm1"]) - e1          # thermal part only
     thermo_ok = exact or g1 is not None
     cache = RelaxCache(ctx)
-    frozen = s.sites_solvation == "frozen"
-    workers, threads = xtb_pool(1 + (0 if frozen else len(classes)))
-    xkw = dict(base=SMEAR, fallbacks=SMEAR_FALLBACKS, gxtb_max_atoms=s.gxtb_max_atoms)
-    runner, [(gas0, _e, _u)] = xtb_series([(sym0, pts0)], [], 1, threads, s.xtb_method, **xkw)
-    gb0 = gb_conductor_energy(sym0, pts0, gas0.charges)
+    dft = s.solvation_charges == "dft"
+    frozen = dft or s.sites_solvation == "frozen"
+    if dft:                                       # the intact dot's DFT charges, frozen on every product
+        q0, engine, method = dft_charges(ctx), "CP2K PBE Hirshfeld", "dft"
+        workers = threads = 0
+    else:
+        workers, threads = xtb_pool(1 + (0 if frozen else len(classes)))
+        xkw = dict(base=SMEAR, fallbacks=SMEAR_FALLBACKS, gxtb_max_atoms=s.gxtb_max_atoms)
+        runner, [(gas0, _e, _u)] = xtb_series([(sym0, pts0)], [], 1, threads, s.xtb_method, **xkw)
+        q0, engine, method = np.asarray(gas0.charges, float), runner.provenance()["engine"], runner.method
+    gb0 = gb_conductor_energy(sym0, pts0, q0)
     g0 = _g_label(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"])
     out, products = [], []
     try:
@@ -198,8 +204,7 @@ def run(ctx) -> dict:
             if frozen:
                 # the intact dot's charges on the remaining atoms, re-neutralised (no new SCF)
                 keep = [i for i in range(len(sym0)) if i not in set(r)]
-                qk = np.asarray(gas0.charges)[keep]
-                row["solv_inf_eV"] = gb_conductor_energy(list(psym), pos, qk - qk.sum() / len(qk))
+                row["solv_inf_eV"] = gb_conductor_energy(list(psym), pos, frozen_charges(q0, keep))
             out.append(row)
             products.append((list(psym), pos))
     finally:
@@ -210,7 +215,8 @@ def run(ctx) -> dict:
         runner, series = xtb_series([(sym0, pts0)] + products, [], workers, threads,
                                     "gfn2" if runner.method == "gfn2" else s.xtb_method, **xkw)
         (gas0, _e, _u), series = series[0], series[1:]
-        gb0 = gb_conductor_energy(sym0, pts0, gas0.charges)
+        q0, engine, method = np.asarray(gas0.charges, float), runner.provenance()["engine"], runner.method
+        gb0 = gb_conductor_energy(sym0, pts0, q0)
         for row, (psym, pos), (gas, _e, used) in zip(out, products, series):
             row["solv_inf_eV"] = gb_conductor_energy(psym, pos, gas.charges)
             row["smearing"] = " ".join(used) or "none"
@@ -224,14 +230,14 @@ def run(ctx) -> dict:
     return {
         "summary": {"n_classes": len(out), "thermo": thermo_ok,
                     "thermal": "per-site Hessians" if exact else ("first path step" if g1 is not None else "none"),
-                    "solvation": f"GB on per-site {runner.provenance()['engine']} charges" if s.sites_solvation != "frozen"
-                    else f"GB on the intact dot's {runner.provenance()['engine']} charges (frozen)",
-                    "xtb_method": runner.method,
+                    "solvation": f"GB on per-site {engine} charges" if not frozen
+                    else f"GB on the intact dot's {engine} charges (frozen)",
+                    "xtb_method": method,
                     "hessian_method": method,
                     "n_atoms_coloured": len({a for r in out for o in r["orbit"] for a in o}),
                     "dE_eV_range": [min(r["dE_eV"] for r in out), max(r["dE_eV"] for r in out)],
                     "n_new_relaxations": cache.n_new,
-                    "xtb_parallel": f"{workers} x {threads} threads"},
+                    "xtb_parallel": f"{workers} x {threads} threads" if workers else None},
         "T": EXPORT_T,
         "dot": {"symbols": sym0, "positions": (pts0 - centre).round(4).tolist(), "role": role,
                 "G_label_eV": g0.round(6).tolist(), "solv_inf_eV": gb0},
