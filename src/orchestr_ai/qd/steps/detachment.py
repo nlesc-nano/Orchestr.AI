@@ -545,6 +545,217 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
 
 
 # --------------------------------------------------------------------------
+# Symmetric moves (default search)
+# --------------------------------------------------------------------------
+#
+# Every move removes a set of symmetry-equivalent units at once (one per equivalent facet),
+# then relaxes: relax -> remove the set -> relax -> ...  The equivalent sets are the orbits of
+# the units' cations under the 2-fold rotations about the cube axes of the builder core (D2 in
+# a Td or Oh core: one site on each of the four {111} facets). The builder's ligand shell need
+# not have the core's symmetry, so a move takes, per unit, the largest such set whose cations
+# all carry a unit of the same ligand topology (D2 orbit, else a C2 pair, else the unit alone).
+# Equivalent units on opposite facets do not interact (Cd68: four removed at once 33.97 eV,
+# the four singly 34.10 eV), and the moves cut the relaxations six- to elevenfold against the
+# one-unit beam search (Cd68 82 vs 482, InP 316 645 vs ~7,000) for a path ~0.1 eV per unit
+# higher. Moves are ranked by energy per removed unit; a child re-relaxes only the moves within
+# SYM_R_LOCAL of a cation it just removed and keeps its parent's dE for the others (re-relaxed
+# when within SYM_REFRESH of the best). Along the final path every move of n units is filled
+# with n - 1 intermediate states, the units removed one after another (each relaxed), so the
+# ladder, its Hessians and the dot_k structures exist for every k.
+
+SYM_R_LOCAL = 7.0         # Å
+SYM_REFRESH = 0.3         # eV per removed unit
+SYM_POLISH_N = 3          # best moves per expansion re-relaxed to POLISH_FMAX
+
+
+def core_c2_permutations(symbols, start_pts, native) -> list:
+    """Atom permutations ({atom: image}) of the identity and the 2-fold rotations about the
+    cube axes that map the builder core onto itself; [identity] if there are none."""
+    p0 = np.asarray(start_pts, float)
+    core = [i for i, x in enumerate(symbols) if x in set(native)]
+    ident = {i: i for i in core}
+    try:
+        from pymatgen.core import Molecule
+        from pymatgen.symmetry.analyzer import PointGroupAnalyzer
+        mol = Molecule([symbols[i] for i in core], p0[core])
+        ops = PointGroupAnalyzer(mol, tolerance=0.05).get_symmetry_operations()
+        x = p0[core] - mol.center_of_mass
+    except Exception:          # no symmetry analysis: single removals only
+        return [ident]
+    perms = []
+    for op in ops:
+        r = np.round(op.rotation_matrix, 6)
+        if not (np.allclose(r, np.diag(np.diag(r))) and np.isclose(np.linalg.det(r), 1.0)):
+            continue
+        dm = np.linalg.norm((x @ r.T)[:, None] - x[None], axis=-1)
+        j = dm.argmin(1)
+        if dm[np.arange(len(core)), j].max() < 0.15 and len(set(j)) == len(core):
+            perms.append({core[a]: core[j[a]] for a in range(len(core))})
+    return perms if any(any(k != v for k, v in pm.items()) for pm in perms) else [ident]
+
+
+def _topology(un):
+    return (un["molecular"], un["cation_ligands"], tuple(sorted(un["ligand_mu"])))
+
+
+def symmetric_moves(state, units, perms) -> list:
+    """Candidate moves of a state: lists of units, one per cation of the largest equivalent set."""
+    ident = [pm for pm in perms if all(k == v for k, v in pm.items())] or [{}]
+    others = [pm for pm in perms if pm not in ident]
+    groups = [perms] + [ident + [pm] for pm in others] + [ident]
+    by_cat = {}
+    for un in units:
+        by_cat.setdefault(state.ids[un["cation"]], []).append(un)
+    out, seen = [], set()
+    for un in units:
+        c = state.ids[un["cation"]]
+        for g in groups:
+            orbit = sorted({pm.get(c, c) for pm in g})
+            if any(o not in by_cat for o in orbit):
+                continue
+            chosen, taken = [], set()
+            for o in [c] + [o for o in orbit if o != c]:
+                opts = [un] if o == c else [u for u in by_cat[o] if _topology(u) == _topology(un)]
+                opts = [u for u in opts if not set(u["ligands"]) & taken]
+                if not opts:
+                    break
+                chosen.append(opts[0])
+                taken |= set(opts[0]["ligands"])
+            else:
+                key = (tuple(orbit), _topology(un))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(chosen)
+                break
+    return out
+
+
+def _move_key(state, mv):
+    return tuple(sorted(_key(state, un) for un in mv))
+
+
+def _step_info(state, un, J, n_candidates, n_exact, move_units, intermediate):
+    return {"J_eV": J, "unit": _key(state, un), "molecular": un["molecular"],
+            "cation_native_cn": un["cation_native_cn"], "cation_ligands": un["cation_ligands"],
+            "ligand_mu": un["ligand_mu"], "M_X_A": un["M_X_A"], "n_candidates": n_candidates,
+            "n_exact": n_exact, "move_units": move_units, "intermediate": intermediate}
+
+
+def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble, stats):
+    """(path with one state per k, beam states per move, first-step table of single units)."""
+    s = settings
+
+    def units_of(st):
+        return enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q)
+
+    def relax(cands, polish=False):
+        if not cands:
+            return
+        if polish:
+            res = cache.relax_many([(c["atoms"].get_chemical_symbols(), c["atoms"].get_positions()) for c in cands],
+                                   s, polish=True)
+            stats["polished"] = stats.get("polished", 0) + len(cands)
+        else:
+            for c in cands:
+                c["product"] = _product(c["st"].sym, c["st"].pts, set().union(*(un["atoms"] for un in c["mv"])))
+            res = cache.relax_many([c["product"] for c in cands], s)
+            stats["relaxations"] += len(cands)
+        for c, (atoms, e, ok) in zip(cands, res):
+            c.update(atoms=atoms, exact=True, converged=ok, dE=e - e_full - c["st"].energy)
+            _add_configuration(ensemble, atoms, c["st"].k + len(c["mv"]), c["st"].energy + c["dE"])
+
+    root = State(ctx.relaxed()[0], ctx.relaxed()[1], range(len(ctx.symbols)), 0.0, [])
+    root.table, root.last_removed = {}, None
+    # Site classes: one single unit per equivalent set of the intact dot.
+    root_moves = symmetric_moves(root, units_of(root), perms)
+    singles = [{"st": root, "mv": [mv[0]], "n": len(mv)} for mv in root_moves]
+    relax(singles)
+    first_table = {}
+    for c in singles:
+        un = c["mv"][0]
+        key = _key(root, un)
+        first_table[key] = {"J": c["dE"], "exact": True, "rep": key, "unit": un, "multiplicity": c["n"],
+                            "converged": c["converged"], "product": c["atoms"]}
+
+    beam, levels = [root], []
+    while True:
+        cands = []
+        for st in beam:
+            for mv in symmetric_moves(st, units_of(st), perms):
+                key = _move_key(st, mv)
+                near = st.last_removed is None or any(
+                    float(np.linalg.norm(st.pts[un["cation"]] - c)) <= SYM_R_LOCAL for un in mv for c in st.last_removed)
+                cands.append({"st": st, "mv": mv, "key": key, "exact": False,
+                              "dE": None if near or key not in st.table else st.table[key]})
+        if not cands:
+            break
+        relax([c for c in cands if c["dE"] is None])
+        exact = [c for c in cands if c["exact"]]
+        best = min(c["dE"] / len(c["mv"]) for c in (exact or cands))
+        relax([c for c in cands if not c["exact"] and c["dE"] / len(c["mv"]) <= best + SYM_REFRESH])
+        stats["lazy"] += sum(1 for c in cands if not c["exact"])
+        exact = sorted((c for c in cands if c["exact"]), key=lambda c: c["dE"] / len(c["mv"]))
+        relax(exact[:SYM_POLISH_N], polish=True)
+        exact.sort(key=lambda c: c["dE"] / len(c["mv"]))
+        n_per = {}
+        for c in cands:
+            n_per.setdefault(id(c["st"]), [0, 0])
+            n_per[id(c["st"])][0] += 1
+            n_per[id(c["st"])][1] += int(c["exact"])
+        children, seen = [], set()
+        for c in exact:
+            st, mv, atoms = c["st"], c["mv"], c["atoms"]
+            removed = set().union(*(un["atoms"] for un in mv))
+            keep = [i for i in range(len(st.sym)) if i not in removed]
+            child = State(atoms.get_chemical_symbols(), atoms.get_positions(), [st.ids[i] for i in keep],
+                          st.energy + c["dE"], st.path + [_key(st, un) for un in mv], parent=st)
+            if child.fp in seen:
+                continue
+            seen.add(child.fp)
+            gone = {st.ids[i] for i in removed}
+            child.table = {cc["key"]: cc["dE"] for cc in cands if cc["st"] is st and cc["dE"] is not None
+                           and not {x for k_ in cc["key"] for x in (k_[0], *k_[1])} & gone}
+            child.last_removed = [st.pts[un["cation"]].copy() for un in mv]
+            child.move = mv
+            child.move_stats = tuple(n_per[id(st)])
+            children.append(child)
+            if len(children) == BEAM:
+                break
+        levels.append(children)
+        beam = children
+    final = min(beam, key=lambda x: (-x.k, x.energy))
+
+    # One state per k: fill each move with its units removed one after another.
+    moves_path, st = [], final
+    while st.parent is not None:
+        moves_path.append(st)
+        st = st.parent
+    moves_path.reverse()
+    path = []
+    for ms in moves_path:
+        parent, mv = ms.parent, ms.move
+        nc, ne = ms.move_stats
+        cur = parent
+        for un in mv[:-1]:
+            orig = {parent.ids[x] for x in un["atoms"]}
+            loc = {i for i, g in enumerate(cur.ids) if g in orig}
+            (atoms, e, _ok), = cache.relax_many([_product(cur.sym, cur.pts, loc)], s)
+            (atoms, e, _ok), = cache.relax_many([(atoms.get_chemical_symbols(), atoms.get_positions())], s, polish=True)
+            stats["relaxations"] += 1
+            stats["intermediate"] = stats.get("intermediate", 0) + 1
+            keep = [i for i in range(len(cur.sym)) if i not in loc]
+            nxt = State(atoms.get_chemical_symbols(), atoms.get_positions(), [cur.ids[i] for i in keep], e - e_full,
+                        cur.path + [_key(parent, un)], parent=cur)
+            nxt.step = _step_info(parent, un, nxt.energy - cur.energy, nc, ne, len(mv), True)
+            _add_configuration(ensemble, atoms, nxt.k, nxt.energy)
+            path.append(nxt)
+            cur = nxt
+        ms.step = _step_info(parent, mv[-1], ms.energy - cur.energy, nc, ne, len(mv), False)
+        path.append(ms)
+    return path, levels, first_table
+
+
+# --------------------------------------------------------------------------
 # Step
 # --------------------------------------------------------------------------
 
@@ -584,26 +795,36 @@ def run(ctx) -> dict:
 
     nat_pts = np.asarray(pts0, float)[[i for i, x in enumerate(sym0) if x in set(ctx.native)]]
     span = float(np.sqrt(((nat_pts[:, None] - nat_pts[None]) ** 2).sum(-1).max()))
-    local_r = max(LOCAL_R, LOCAL_FRAC * span)
-    root = State(sym0, pts0, range(len(sym0)), 0.0, [])
-    levels = [[root]]
-    first_table = None
-    while levels[-1] and levels[-1][0].k < m:
-        children = expand(levels[-1], cache, s, e_full, ensemble, stats, ctx, bulk_bond, q, local_r)
-        if first_table is None:
-            first_table = root.table
-        if not children:
-            break
-        levels.append(children)
-
-    # Best path: the lowest structure of the last level and its ancestors.
-    best = min(levels[-1], key=lambda st: st.energy)
-    path = []
-    st = best
-    while st.parent is not None:
-        path.append(st)
-        st = st.parent
-    path.reverse()
+    n_ops = 1
+    if s.detach_search == "symmetric":
+        perms = core_c2_permutations(ctx.symbols, ctx.start_pts, ctx.native)
+        n_ops = len(perms)
+        local_r = SYM_R_LOCAL
+        path, levels_out, first_table = symmetric_search(ctx, s, cache, e_full, bulk_bond, q, perms, ensemble, stats)
+    else:
+        local_r = max(LOCAL_R, LOCAL_FRAC * span)
+        root = State(sym0, pts0, range(len(sym0)), 0.0, [])
+        levels = [[root]]
+        first_table = None
+        while levels[-1] and levels[-1][0].k < m:
+            children = expand(levels[-1], cache, s, e_full, ensemble, stats, ctx, bulk_bond, q, local_r)
+            if first_table is None:
+                first_table = root.table
+            if not children:
+                break
+            levels.append(children)
+        levels_out = levels[1:]
+        # Best path: the lowest structure of the last level and its ancestors.
+        best = min(levels[-1], key=lambda st: st.energy)
+        path = []
+        st = best
+        while st.parent is not None:
+            path.append(st)
+            st = st.parent
+        path.reverse()
+    best_at = {}
+    for k_, e_, _sg in ensemble.values():
+        best_at[k_] = min(best_at.get(k_, e_), e_)
 
     # Harmonic free energies along the best path.
     f_prev = f_full
@@ -627,7 +848,7 @@ def run(ctx) -> dict:
                        "n_imaginary": n_imag, **st.step,
                        "frequencies_cm1": fr.round(3).tolist() if fr is not None else None,
                        "symbols": st.sym,
-                       "best_at_level_eV": min(x.energy for x in levels[st.k])})
+                       "best_at_level_eV": min(best_at.get(st.k, st.energy), st.energy)})
         _write_xyz(ctx.props / f"detach_{st.k}.xyz", st.sym, st.pts,
                    f"best path, {st.k} {unit} removed, E - E_full = {st.energy:.6f} eV")
         prev_e, f_prev = st.energy, f_st
@@ -671,8 +892,11 @@ def run(ctx) -> dict:
 
     return {
         "summary": {
-            "method": f"beam search (width {BEAM}) with local updates", "unit": unit, "n_units": m,
-            "n_steps": len(ladder), "beam": BEAM, "local_radius_A": local_r,
+            "method": (f"symmetric moves (width {BEAM}) with local updates" if s.detach_search == "symmetric"
+                       else f"beam search (width {BEAM}) with local updates"),
+            "search": s.detach_search, "core_c2_operations": n_ops, "unit": unit, "n_units": m,
+            "n_steps": len(ladder), "n_moves": len(levels_out), "beam": BEAM, "local_radius_A": local_r,
+            "n_intermediate": stats.get("intermediate", 0),
             "n_relaxations": stats["relaxations"], "n_lazy_checks": stats["lazy"],
             "n_polished": stats.get("polished", 0), "polish_fmax_eV_A": POLISH_FMAX,
             "polish_window_eV": POLISH_WINDOW,
@@ -690,7 +914,7 @@ def run(ctx) -> dict:
         "sigma_full": sigma0,
         "hessian_method": method,
         "levels": [[{"E_eV": x.energy, "path": [list(map(lambda v: v if isinstance(v, int) else list(v), p_))
-                                               for p_ in x.path]} for x in lv] for lv in levels[1:]],
+                                               for p_ in x.path]} for x in lv] for lv in levels_out],
         "map": {"T": T, "dmu_eV": mu.tolist(), "k_mean": kmean.tolist(), "ensemble": "evaluated configurations"},
         "reference": {"MXq_energy_eV": mx["energy_eV"], "MXq_G_1M_eV": mx["G_1M_eV"]},
     }

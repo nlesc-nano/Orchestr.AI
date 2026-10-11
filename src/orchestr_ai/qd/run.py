@@ -94,8 +94,7 @@ class Settings:
     xtb_ip_ea: bool = True
     xtb_gradient: bool = True
     detach_max_atoms: int = 600      # desorption search (and the site map built on it) up to this size
-    detach_max_steps: int = 4        # stepwise MX_q removals
-    detach_max_candidates: int = 12  # symmetry-unique sites relaxed per step
+    detach_search: str = "symmetric"  # symmetric: moves of symmetry-equivalent units (builder core) | beam: one unit per step
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
     detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
@@ -151,9 +150,8 @@ class Settings:
                         "field": self.vibspec_field, "max_atoms": self.vibspec_max_atoms, "cif": "record"},
             "electronic": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
-            "detachment": {**mace, "fmax": self.fmax, "max_steps": self.detach_max_steps, "relaxer": self.relaxer(),
+            "detachment": {**mace, "fmax": self.fmax, "search": self.detach_search, "relaxer": self.relaxer(),
                            "max_atoms": self.detach_max_atoms,
-                           "max_candidates": self.detach_max_candidates,
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
