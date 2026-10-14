@@ -8,7 +8,8 @@ Species i (dot after k removals, MA and MX_q monomers) are ideal solutes at a
 1 M standard state with harmonic vibrations and rigid-rotor rotation:
 
     G_i^sol(T, eps) = G_i°(T) + dG_solv,i(eps),  dG_solv,i = (1 - 1/eps) G_GB,i
-                      (Generalized Born on the GFN2-xTB charges, see steps/solvation.py)
+                      (Generalized Born on the GFN2-xTB charges, see steps/solvation.py;
+                      with the DFT chain: COSMO on the DFT potential + (alpha + gamma)(eps) S)
     mu_i = G_i^sol + kT ln(c_i / 1 M)
 
 and bulk MA is a solid (no solvation, no concentration term).  Then
@@ -57,7 +58,7 @@ def export(ctx) -> dict | None:
     sym0, pts0 = ctx.relaxed()
     dots = [{"k": 0, "n": u["n_MA"], "m": u["m_MXq"], "sigma": rotational_symmetry_number(sym0, pts0),
              "G": _gas_g(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"]).tolist(),
-             "solv_inf": sol["gb_inf"]["dot_0"], "alpb": {s: v["dot_0"] for s, v in sol["alpb"]["dG"].items()}}]
+             "solv_inf": sol["gb_inf"]["dot_0"], "cav_S": sol.get("cav_S", {}).get("dot_0"), "alpb": {s: v["dot_0"] for s, v in sol["alpb"]["dG"].items()}}]
     det = ctx.results.get("detachment", {})
     for st in det.get("steps", []):
         if st.get("frequencies_cm1") is None:
@@ -67,7 +68,7 @@ def export(ctx) -> dict | None:
         dots.append({"k": st["k"], "n": u["n_MA"], "m": u["m_MXq"] - st["k"],
                      "sigma": rotational_symmetry_number(sym, pts),
                      "G": _gas_g(sym, pts, e_full + st["E_mace_eV"], st["frequencies_cm1"]).tolist(),
-                     "solv_inf": sol["gb_inf"][name], "alpb": {s: v[name] for s, v in sol["alpb"]["dG"].items()}})
+                     "solv_inf": sol["gb_inf"][name], "cav_S": sol.get("cav_S", {}).get(name), "alpb": {s: v[name] for s, v in sol["alpb"]["dG"].items()}})
     ma, mx = refs["MA_monomer"], refs["MXq_monomer"]
     # The evaluated configurations, as offsets from the ladder state of the same k (gas phase).
     ladder_e = {0: 0.0, **{st["k"]: st["E_mace_eV"] for st in det.get("steps", [])}}
@@ -86,9 +87,9 @@ def export(ctx) -> dict | None:
                           if all(v is not None for v in sol["alpb"]["dG"][s].values())},
         "dots": dots,
         "MA": {"G": _gas_g(ma["symbols"], ma["positions"], ma["energy_eV"], ma["frequencies_cm1"]).tolist(),
-               "solv_inf": sol["gb_inf"]["MA"], "alpb": {s: v["MA"] for s, v in sol["alpb"]["dG"].items()}},
+               "solv_inf": sol["gb_inf"]["MA"], "cav_S": sol.get("cav_S", {}).get("MA"), "alpb": {s: v["MA"] for s, v in sol["alpb"]["dG"].items()}},
         "MX": {"G": _gas_g(mx["symbols"], mx["positions"], mx["energy_eV"], mx["frequencies_cm1"]).tolist(),
-               "solv_inf": sol["gb_inf"]["MX"], "alpb": {s: v["MX"] for s, v in sol["alpb"]["dG"].items()}},
+               "solv_inf": sol["gb_inf"]["MX"], "cav_S": sol.get("cav_S", {}).get("MX"), "alpb": {s: v["MX"] for s, v in sol["alpb"]["dG"].items()}},
         "bulk": bulk_free_energy(refs["bulk_MA"], EXPORT_T).tolist(),
         "ensemble": ens,                 # [k, E - E(ladder_k), rotational symmetry number], gas phase
         "warnings": ([] if len(dots) == len(det.get("steps", [])) + 1 else
@@ -104,14 +105,15 @@ KB_EV = 8.617333262e-5
 
 
 def solv_at(species: dict, eps_grid, solvent):
-    """dG_solv of a species: solvent = float eps (Generalized Born, (1 - 1/eps) G_GB),
-    a named ALPB solvent, or None (gas).  eps_grid is unused (kept for the call signature)."""
+    """dG_solv of a species: solvent = float eps ((1 - 1/eps) G_inf, plus (alpha + gamma)(eps) S when
+    the species has a cavity area), a named ALPB solvent, or None (gas).  eps_grid is unused."""
     if solvent is None:
         return 0.0
     if isinstance(solvent, str):
         v = species["alpb"].get(solvent)
         return float("nan") if v is None else v
-    return (1.0 - 1.0 / float(solvent)) * species["solv_inf"]
+    from .steps.solvation import cavity_energy
+    return (1.0 - 1.0 / float(solvent)) * species["solv_inf"] + cavity_energy(float(solvent), species.get("cav_S"))
 
 
 def g_sol(species: dict, eps_grid, solvent, prec_shift=0.0) -> np.ndarray:

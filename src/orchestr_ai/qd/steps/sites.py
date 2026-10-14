@@ -44,7 +44,7 @@ from ..engines import xtb_pool, xtb_series
 from ..references import binary_units, ideal_gas_g, reference_set
 from ..solution import EXPORT_T
 from .detachment import RelaxCache, _product
-from .solvation import SMEAR, SMEAR_FALLBACKS, dft_charges, frozen_charges, gb_conductor_energy
+from .solvation import SMEAR, SMEAR_FALLBACKS, cosmo_at_k, cosmo_data, dft_charges, frozen_charges, gb_conductor_energy
 
 
 def _g_label(symbols, pts, energy, freqs):
@@ -177,7 +177,12 @@ def run(ctx) -> dict:
     cache = RelaxCache(ctx)
     dft = s.solvation_charges == "dft"
     frozen = dft or s.sites_solvation == "frozen"
-    if dft:                                       # the intact dot's DFT charges, frozen on every product
+    cosmo = cosmo_data(ctx) if dft else None
+    if cosmo:                                     # COSMO on the DFT potential: k = 0 and the k = 1 value for every site
+        (e0, a0, _), (e1, a1, _) = cosmo_at_k(cosmo, 0), cosmo_at_k(cosmo, 1)
+        q0, engine, method = None, "CP2K PBE potential (COSMO)", "dft"
+        workers = threads = 0
+    elif dft:                                     # the intact dot's DFT charges, frozen on every product
         q0, engine, method = dft_charges(ctx), "CP2K PBE Hirshfeld", "dft"
         workers = threads = 0
     else:
@@ -185,7 +190,7 @@ def run(ctx) -> dict:
         xkw = dict(base=SMEAR, fallbacks=SMEAR_FALLBACKS, gxtb_max_atoms=s.gxtb_max_atoms)
         runner, [(gas0, _e, _u)] = xtb_series([(sym0, pts0)], [], 1, threads, s.xtb_method, **xkw)
         q0, engine, method = np.asarray(gas0.charges, float), runner.provenance()["engine"], runner.method
-    gb0 = gb_conductor_energy(sym0, pts0, q0)
+    gb0 = e0 if cosmo else gb_conductor_energy(sym0, pts0, q0)
     g0 = _g_label(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"])
     out, products = [], []
     try:
@@ -201,7 +206,9 @@ def run(ctx) -> dict:
                 row["n_imaginary"] = int((fr < -10.0).sum())
             elif g1 is not None:
                 row["G_prod_eV"] = (g1 + e_prod).round(6).tolist()
-            if frozen:
+            if cosmo:
+                row["solv_inf_eV"], row["cav_S_A2"] = e1, a1
+            elif frozen:
                 # the intact dot's charges on the remaining atoms, re-neutralised (no new SCF)
                 keep = [i for i in range(len(sym0)) if i not in set(r)]
                 row["solv_inf_eV"] = gb_conductor_energy(list(psym), pos, frozen_charges(q0, keep))
@@ -230,8 +237,9 @@ def run(ctx) -> dict:
     return {
         "summary": {"n_classes": len(out), "thermo": thermo_ok,
                     "thermal": "per-site Hessians" if exact else ("first path step" if g1 is not None else "none"),
-                    "solvation": f"GB on per-site {engine} charges" if not frozen
-                    else f"GB on the intact dot's {engine} charges (frozen)",
+                    "solvation": ("COSMO on the DFT potential + cavity (the k = 1 value of the path for every site)" if cosmo
+                                  else f"GB on per-site {engine} charges" if not frozen
+                                  else f"GB on the intact dot's {engine} charges (frozen)"),
                     "xtb_method": method,
                     "hessian_method": method,
                     "n_atoms_coloured": len({a for r in out for o in r["orbit"] for a in o}),
@@ -240,7 +248,7 @@ def run(ctx) -> dict:
                     "xtb_parallel": f"{workers} x {threads} threads" if workers else None},
         "T": EXPORT_T,
         "dot": {"symbols": sym0, "positions": (pts0 - centre).round(4).tolist(), "role": role,
-                "G_label_eV": g0.round(6).tolist(), "solv_inf_eV": gb0},
+                "G_label_eV": g0.round(6).tolist(), "solv_inf_eV": gb0, "cav_S_A2": a0 if cosmo else None},
         "MX_energy_eV": refs["MXq_monomer"]["energy_eV"],
         "classes": out,
         "faces": faces,

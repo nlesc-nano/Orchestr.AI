@@ -739,7 +739,9 @@ def _solution_captions(d) -> dict:
     ma, mx = ex["units"]["MA"], ex["units"]["MX"]
     mat, mxt = formula_tex(ma), formula_tex(mx)
     n, m = ex["units"]["n"], ex["units"]["m"]
-    gb = "Generalized Born solvation of the xTB charges, $(1 - 1/\\varepsilon)\\,G_\\mathrm{GB}$"
+    gb = ("COSMO on the DFT potential with the cavity term, $(1 - 1/\\varepsilon)\\,E_\\infty + (\\alpha+\\gamma)(\\varepsilon)\\,S$"
+          if ex.get("solvation_model", "").startswith("COSMO")
+          else "Generalized Born solvation of the atomic charges, $(1 - 1/\\varepsilon)\\,G_\\mathrm{GB}$")
     return {
         "sol_dec": ("", "Decomposition in solution",
                     "", f"$\\Delta G_\\mathrm{{dec}}$ = [$G^\\mathrm{{sol}}$(dot) − {n} G({mat}, bulk) − {m} μ({mxt})] / {n} "

@@ -22,16 +22,25 @@ import json
 import re
 
 from .solution import KB_EV
+from .steps.solvation import BETA0_MN_M, MN_M_EV_A2, NONEL_MIN_EPS
 
 SITE = ["#2a78d6", "#eb6834", "#1baf7a"]
 INK, INK2, INK3, GRID = "#0b0b0b", "#52514e", "#8a8984", "#e6e5e0"
 
 JS_LIB = r"""
 const KB = %(kb)r;
-function solvAt(sp, epsGrid, solvent) {      // Generalized Born: (1 - 1/eps) G_GB; or ALPB; or gas
+const BETA0 = %(beta0)s, NONEL_MIN_EPS = %(min_eps)r, MN_EV_A2 = %(mn)r;
+function cavE(eps, S) {           // (alpha + gamma)(eps) S (Hille 2019, beta = 0); fades to 0 below eps 1.8
+  if (S === null || S === undefined || eps === null || eps <= 1) return 0;
+  const e = Math.max(eps, NONEL_MIN_EPS);
+  let v = (BETA0[0] * Math.log(e) + BETA0[1]) * MN_EV_A2 * S;
+  if (eps < NONEL_MIN_EPS) v *= (1 - 1 / eps) / (1 - 1 / NONEL_MIN_EPS);
+  return v;
+}
+function solvAt(sp, epsGrid, solvent) {      // (1 - 1/eps) G_inf (+ cavity on the DFT isosurface); or ALPB; or gas
   if (solvent === null) return 0;
   if (typeof solvent === "string") return sp.alpb[solvent] === null ? NaN : sp.alpb[solvent];
-  return (1 - 1 / solvent) * sp.solv_inf;
+  return (1 - 1 / solvent) * sp.solv_inf + cavE(solvent, sp.cav_S);
 }
 const gSol = (sp, eps, solvent, shift = 0) => { const s = solvAt(sp, eps, solvent) + shift; return sp.G.map(g => g + s); };
 function lse(a) { let m = -Infinity; for (const v of a) if (v > m) m = v; let s = 0; for (const v of a) s += Math.exp(v - m); return m + Math.log(s); }
@@ -139,7 +148,7 @@ function makeControls(host, keys, specs, alpb, onchange) {
   return st;
 }
 const setDisabled = (st, keys, off) => keys.forEach(k => st._root.querySelectorAll(`[data-k="${k}"]`).forEach(e => { e.disabled = off; }));
-""" % {"kb": KB_EV}
+""" % {"kb": KB_EV, "beta0": list(BETA0_MN_M), "min_eps": NONEL_MIN_EPS, "mn": MN_M_EV_A2}
 
 
 def _fh(f):
@@ -210,8 +219,8 @@ function classValues(st) {
   const ti = TI(st.T), kT = KBT(st.T), f = st.solv === null ? 0 : 1 - 1 / st.solv;
   return SD.classes.map(c => {
     if (st.colour === "dE" || !hasG) return c.dE_eV;
-    const muMX = EX.MX.G[ti] + f * EX.MX.solv_inf + kT * Math.log(st.cmx);
-    return (c.G_prod_eV[ti] + f * c.solv_inf_eV) - (SD.dot.G_label_eV[ti] + f * SD.dot.solv_inf_eV) + muMX;
+    const muMX = EX.MX.G[ti] + f * EX.MX.solv_inf + cavE(st.solv, EX.MX.cav_S) + kT * Math.log(st.cmx);
+    return (c.G_prod_eV[ti] + f * c.solv_inf_eV + cavE(st.solv, c.cav_S_A2)) - (SD.dot.G_label_eV[ti] + f * SD.dot.solv_inf_eV + cavE(st.solv, SD.dot.cav_S_A2)) + muMX;
   });
 }
 function atomValues(cv) {
@@ -339,6 +348,24 @@ makeControls("s_sites_ctl", ["view", "colour", "solv", "cmx", "T"], SPECS, [], s
 """
 
 
+COSMO_NOTE = ("ΔG<sub>solv</sub>(ε) = (1 − 1/ε) E<sub>∞</sub> + (α+γ)(ε) S: conductor-like screening (COSMO) of the CP2K PBE "
+              "electrostatic potential on the electron-density isosurface ρ<sub>0</sub> = 5×10<sup>−4</sup> e/bohr³, and the "
+              "cavity + dispersion term (α+γ)(ε) = 2.16 ln ε − 14.79 mN/m (Hille et al. 2019, β = 0 fit) on the area S of "
+              "the same isosurface. Computed for the intact dot, the fully stripped dot and the monomers at their MACE-MH-1 "
+              "geometries; the stripped states in between are linear in the number of units removed. Below ε = 1.8 the "
+              "cavity term goes to zero with (1 − 1/ε).")
+GB_NOTE = ("ΔG<sub>solv</sub>(ε) = −½ (1 − 1/ε) Σ<sub>ij</sub> q<sub>i</sub>q<sub>j</sub>/f<sub>GB</sub>(r<sub>ij</sub>): Generalized Born "
+           "electrostatics of the atomic charges ({src}), one single point at each MACE-MH-1 gas-phase geometry (no "
+           "re-optimisation in solvent; non-electrostatic terms not included; ALPB offered for the named solvents where "
+           "it converged for every species).")
+
+
+def solv_note(model: str) -> str:
+    if model.startswith("COSMO"):
+        return COSMO_NOTE
+    return GB_NOTE.format(src="CP2K PBE Hirshfeld" if "Hirshfeld" in model else "g-xTB, or GFN2-xTB where g-xTB fails")
+
+
 def solution_section(ex: dict, sites: dict | None = None) -> tuple[str, str]:
     """(HTML, JS) of the per-dot 'Stability & ligands in solution' section, with controls per panel."""
     ma, mx = _fh(ex["units"]["MA"]), _fh(ex["units"]["MX"])
@@ -367,9 +394,7 @@ def solution_section(ex: dict, sites: dict | None = None) -> tuple[str, str]:
 <h2>Stability &amp; ligands in solution</h2>
 <div class='note'>The vacuum free energies of the previous section plus an implicit solvent and finite concentrations:
 μ<sub>i</sub> = G°<sub>i</sub>(T) + ΔG<sub>solv,i</sub>(ε) + k<sub>B</sub>T ln(c<sub>i</sub> / 1 M), bulk {ma} as a solid.
-ΔG<sub>solv</sub>(ε) = −½ (1 − 1/ε) Σ<sub>ij</sub> q<sub>i</sub>q<sub>j</sub>/f<sub>GB</sub>(r<sub>ij</sub>): Generalized Born
-electrostatics of the xTB charges (g-xTB, or GFN2-xTB where g-xTB fails), one single point at each MACE-MH-1 gas-phase geometry (no re-optimisation in
-solvent; non-electrostatic terms not included; ALPB offered for the named solvents where it converged for every species).
+{solv_note(ex.get("solvation_model", ""))}
 Each panel has its own controls, only for the quantities that enter it.</div>
 <div class='grid'>
 {panel("s_dec", "Decomposition free energy in solution",

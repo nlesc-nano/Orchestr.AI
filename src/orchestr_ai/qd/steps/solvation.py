@@ -19,6 +19,19 @@ from one eps to the next); RADIUS_SCALE = 1.15 reproduces ddCOSMO within
 dots GB gives less (no electronic polarisation).  Non-electrostatic
 (cavity, dispersion) terms are not included.
 
+With the DFT chain's solvation.json (qd-workflows `qdw cp2k esp`, the model of qdw reaction) and
+solvation_charges "dft", the model is instead
+
+    dG_solv(eps) = (1 - 1/eps) E_inf + (alpha + gamma)(eps) S
+    E_inf  COSMO (conductor) energy of the DFT electrostatic potential on the electron-density
+           isosurface rho_0 = 5e-4 e/bohr^3 (CP2K PBE cubes, no atomic charges)
+    S      the area of that isosurface; (alpha + gamma)(eps) = 2.16 ln eps - 14.79 mN/m (Hille et
+           al., J. Chem. Phys. 150, 041710 (2019), beta = 0 fit over 67 non-aqueous solvents)
+
+for the intact dot (k = 0), the fully stripped dot (k = K, the last ladder state) and the MA and
+MX_q monomers; the states in between are linear in k between k = 0 and K (E_inf and S). Below
+eps = 1.8, where the fit has no data, the cavity term goes to zero with (1 - 1/eps).
+
 All geometries are the gas-phase MACE-MH-1 ones; solvation is a correction
 from one gas-phase xTB single point per structure, independent of T: g-xTB,
 or GFN2-xTB for every structure of the dot when g-xTB fails on any of them
@@ -47,6 +60,51 @@ ALPB_SOLVENTS = {"hexane": 1.88, "toluene": 2.38, "chcl3": 4.71, "thf": 7.43, "a
 # Gas-phase single point: plain first; Fermi smearing only if the SCC does not converge.
 SMEAR = []
 SMEAR_FALLBACKS = [["--etemp", "1500", "--iterations", "500"], ["--etemp", "3000", "--iterations", "500"]]
+
+
+BETA0_MN_M = (2.16, -14.79)      # (alpha + gamma)(eps) = a ln eps + b, mN/m (Hille et al. 2019, beta = 0)
+NONEL_MIN_EPS = 1.8
+MN_M_EV_A2 = 1e-3 / 1.602176634e-19 * 1e-20
+
+
+def cavity_energy(eps, area_A2) -> float:
+    """(alpha + gamma)(eps) S in eV; 0 in the gas phase or without an area."""
+    if area_A2 is None or eps is None or eps <= 1.0:
+        return 0.0
+    e = max(float(eps), NONEL_MIN_EPS)
+    v = (BETA0_MN_M[0] * np.log(e) + BETA0_MN_M[1]) * MN_M_EV_A2 * float(area_A2)
+    if eps < NONEL_MIN_EPS:                       # no data below: fade to the gas phase
+        v *= (1 - 1 / eps) / (1 - 1 / NONEL_MIN_EPS)
+    return float(v)
+
+
+def cosmo_file(ctx):
+    """The DFT chain's solvation.json (qdw cp2k esp collect)."""
+    from pathlib import Path
+    d = Path(ctx.settings.dft_dir)
+    return (d if d.is_absolute() else ctx.record_dir / d) / "solvation.json"
+
+
+def cosmo_data(ctx):
+    import json
+    f = cosmo_file(ctx)
+    return json.loads(f.read_text()) if f.is_file() else None
+
+
+def cosmo_at_k(data: dict, k: int) -> tuple:
+    """(E_inf, S, how) of the dot after k removals: computed at k = 0 and the last state K, linear
+    in k in between."""
+    sp = data["species"]
+    if f"dot_{k}" in sp:
+        return sp[f"dot_{k}"]["E_inf_eV"], sp[f"dot_{k}"]["S_A2"], "DFT"
+    ks = sorted(v["k"] for n, v in sp.items() if n.startswith("dot_") and v.get("k", 0) > 0)
+    a = sp["dot_0"]
+    if not ks or k > ks[-1]:
+        return a["E_inf_eV"], a["S_A2"], "intact dot's value (no stripped state computed)"
+    b, K = sp[f"dot_{ks[-1]}"], ks[-1]
+    w = k / K
+    return ((1 - w) * a["E_inf_eV"] + w * b["E_inf_eV"], (1 - w) * a["S_A2"] + w * b["S_A2"],
+            f"linear in k between 0 and {K}")
 
 
 def hct_born_radii(symbols, pts, scale=RADIUS_SCALE, offset=0.09, sfac=0.8) -> np.ndarray:
@@ -93,7 +151,8 @@ def run(ctx) -> dict:
         if "MXq_monomer" in refs:
             structures.append(("MX", refs["MXq_monomer"]["symbols"], np.asarray(refs["MXq_monomer"]["positions"])))
     if ctx.settings.solvation_charges == "dft":
-        return _run_dft(ctx, structures)
+        data = cosmo_data(ctx)
+        return _run_cosmo(ctx, structures, data) if data else _run_dft(ctx, structures)
     # ALPB reference state gsolv: 1 M ideal gas -> 1 M solution, as used throughout
     checks = ctx.settings.solvation_checks
     flag_sets = ([["--cosmo", f"{e:g}"] for e in COSMO_CHECK] + [["--alpb", s, "gsolv"] for s in ALPB_SOLVENTS]
@@ -182,5 +241,43 @@ def _run_dft(ctx, structures) -> dict:
         },
         "gb_inf": gb,
         "radius_scale": RADIUS_SCALE,
+        "alpb": {"solvents": {}, "dG": {}},
         "provenance": ctx.results["field"].get("provenance", {}),
+    }
+
+
+def _run_cosmo(ctx, structures, data: dict) -> dict:
+    """COSMO on the DFT potential + the cavity/dispersion term on the isosurface area (solvation.json)."""
+    sp = data["species"]
+    e_inf, area, how = {}, {}, {}
+    for name, sym, _pts in structures:
+        if name.startswith("dot_"):
+            e_inf[name], area[name], how[name] = cosmo_at_k(data, int(name.split("_")[1]))
+        else:
+            if name not in sp:
+                raise RuntimeError(f"solvation.json has no {name} monomer (has {sorted(sp)})")
+            if sp[name]["n_atoms"] != len(sym):
+                raise RuntimeError(f"solvation.json {name}: {sp[name]['n_atoms']} atoms, the reference {len(sym)}")
+            e_inf[name], area[name], how[name] = sp[name]["E_inf_eV"], sp[name]["S_A2"], "DFT"
+    d0 = e_inf["dot_0"], area["dot_0"]
+    return {
+        "summary": {
+            "model": "COSMO on the CP2K PBE electrostatic potential at the density isosurface "
+                     f"({data['rho0_e_bohr3']:.1e} e/bohr^3) + cavity/dispersion (alpha+gamma)(eps) S (Hille 2019, beta = 0); "
+                     "stripped states linear in k between the intact and the fully stripped dot",
+            "charges": "dft",
+            "dG_solv_dot_eps2.4_eV": (1 - 1 / 2.4) * d0[0] + cavity_energy(2.4, d0[1]),
+            "dG_solv_dot_eps80_eV": (1 - 1 / 80) * d0[0] + cavity_energy(80, d0[1]),
+            "dG_el_dot_eps2.4_eV": (1 - 1 / 2.4) * d0[0],
+            "S_dot_A2": d0[1],
+            "computed": sorted(sp),
+            "n_structures": len(structures),
+        },
+        "gb_inf": e_inf,                 # conductor energy E_inf (the key name kept for the exports)
+        "cav_S": area,
+        "source": how,
+        "beta0_alpha_gamma_mN_m": list(BETA0_MN_M),
+        "alpb": {"solvents": {}, "dG": {}},
+        "provenance": {"engine": "CP2K PBE cubes + qd-workflows COSMO", "file": str(cosmo_file(ctx)),
+                       **ctx.results.get("field", {}).get("provenance", {})},
     }

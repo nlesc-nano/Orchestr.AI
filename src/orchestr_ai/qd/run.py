@@ -262,8 +262,13 @@ def _field_digest(ctx: Context):
     return input_digest(field_dir(ctx))
 
 
+def _solvation_digest(ctx: Context):
+    from .steps.solvation import cosmo_file
+    return _geometry_hash(cosmo_file(ctx))
+
+
 # Data a step reads from outside the record's props/ (their digest enters its cache key).
-STEP_EXTERNAL = {"field": _field_digest}
+STEP_EXTERNAL = {"field": _field_digest, "solvation": _solvation_digest}
 
 
 def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optional[Settings] = None,
