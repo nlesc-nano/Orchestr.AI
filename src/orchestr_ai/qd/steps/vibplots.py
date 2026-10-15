@@ -135,19 +135,32 @@ def captions(v):
             if to else "")
     grad = sm.get("gxtb_gradient_norm_Eh_bohr")
     g_h = f" The g-xTB gradient norm at the MACE minimum is {grad:.3f} E<sub>h</sub>/bohr." if grad else ""
+    # the intensities' source: the CP2K chain's finite-field tensors, or g-xTB finite differences
+    if "step_amu05_A" in sm:
+        ir_h = ("the g-xTB dipole differentiated along each normal coordinate (central difference, "
+                f"±{sm['step_amu05_A']} amu<sup>½</sup> Å)")
+        ir_t = "g-xTB dipole differentiated along each normal coordinate"
+        ra_h = f"the g-xTB polarisability derivative ∂α/∂Q<sub>k</sub> (finite field ±{sm['field_V_A']} V/Å along x, y, z)"
+        ra_t = f"the g-xTB $\\partial\\alpha/\\partial Q_k$ (finite field ±{sm['field_V_A']} V/Å)"
+    else:
+        fa = sm.get("field_au")
+        fld = f" ±{fa} a.u." if fa else ""
+        ir_h = ("the CP2K PBE Born charges, ∂μ/∂Q<sub>k</sub> = Σ<sub>i</sub> Z*<sub>i</sub> L<sub>ik</sub>/√m<sub>i</sub> "
+                f"(13 finite-field single points{fld})")
+        ir_t = "CP2K PBE Born charges projected on each normal mode (finite field)"
+        ra_h = f"the CP2K PBE Raman tensors ∂α/∂R projected on each mode (finite field{fld})"
+        ra_t = "the CP2K PBE Raman tensors projected on each mode (finite field)"
     return {
         "ir": ("IR spectrum", "IR spectrum",
                "Peak positions: MACE-MH-1 harmonic modes. Intensities: A<sub>k</sub> = (N<sub>A</sub>π/3c) "
-               "|∂μ/∂Q<sub>k</sub>|² (km/mol), with the g-xTB dipole differentiated along each normal coordinate "
-               f"(central difference, ±{sm['step_amu05_A']} amu<sup>½</sup> Å). Sticks: degenerate partners summed, "
+               f"|∂μ/∂Q<sub>k</sub>|² (km/mol), from {ir_h}. Sticks: degenerate partners summed, "
                f"coloured by the site carrying most of the amplitude; line: Lorentzians of {FWHM:.0f} cm<sup>−1</sup> "
                f"FWHM.{sel}{to_h}",
                "Peak positions: MACE-MH-1 modes. Intensities: $A_k = (N_A\\pi/3c)\\,|\\partial\\mu/\\partial Q_k|^2$ "
-               "(km/mol), g-xTB dipole differentiated along each normal coordinate. Sticks coloured by the site "
+               f"(km/mol), {ir_t}. Sticks coloured by the site "
                f"carrying most of the amplitude; line: {FWHM:.0f} cm$^{{-1}}$ Lorentzians.{sel}{to_t}"),
         "raman": ("Raman spectrum (non-resonant)", "Raman spectrum (non-resonant)",
-                  "Activity S<sub>k</sub> = 45a′² + 7γ′² from the g-xTB polarisability derivative ∂α/∂Q<sub>k</sub> "
-                  f"(finite field ±{sm['field_V_A']} V/Å along x, y, z), with a′ its isotropic part and γ′ its "
+                  f"Activity S<sub>k</sub> = 45a′² + 7γ′² from {ra_h}, with a′ its isotropic part and γ′ its "
                   "anisotropy. Intensity I<sub>k</sub> ∝ (ν<sub>0</sub> − ν<sub>k</sub>)<sup>4</sup>/ν<sub>k</sub> · "
                   f"S<sub>k</sub> / (1 − e<sup>−hcν<sub>k</sub>/k<sub>B</sub>T</sup>), {LASER_NM:.0f} nm, "
                   f"{T_RAMAN:.0f} K, normalised to its maximum; the axis is scaled to the strongest feature above "
@@ -155,8 +168,7 @@ def captions(v):
                   "ρ = 3γ′²/(45a′² + 4γ′²); totally symmetric modes are polarised (ρ < ¾) and nearly vanish in it. "
                   "Measured QD spectra are usually resonant (LO-enhanced): compare positions and symmetries, not "
                   f"relative intensities.{g_h}",
-                  "Activity $S_k = 45a'^2 + 7\\gamma'^2$ from the g-xTB $\\partial\\alpha/\\partial Q_k$ (finite field "
-                  f"±{sm['field_V_A']} V/Å). $I_k \\propto (\\nu_0-\\nu_k)^4/\\nu_k \\cdot S_k/(1-e^{{-hc\\nu_k/k_BT}})$, "
+                  f"Activity $S_k = 45a'^2 + 7\\gamma'^2$ from {ra_t}. $I_k \\propto (\\nu_0-\\nu_k)^4/\\nu_k \\cdot S_k/(1-e^{{-hc\\nu_k/k_BT}})$, "
                   f"{LASER_NM:.0f} nm, {T_RAMAN:.0f} K. Dotted: depolarised part $\\rho/(1+\\rho)\\,I$, "
                   "$\\rho = 3\\gamma'^2/(45a'^2+4\\gamma'^2)$; totally symmetric modes nearly vanish in it. "
                   "Non-resonant: measured QD spectra are LO-enhanced."),
@@ -177,10 +189,11 @@ def captions(v):
 def key_rows(v):
     """Rows (label_html, label_tex, value_html, value_tex, definition_html, definition_tex)."""
     sm = v["summary"]
+    src = "g-xTB" if "step_amu05_A" in sm else "CP2K PBE"
     rows = [("Point group", "Point group", sm["point_group"], sm["point_group"], "symmetry of the relaxed dot",
              "symmetry of the relaxed dot"),
             ("Polarisability α<sub>iso</sub>", "Polarisability $\\alpha_\\mathrm{iso}$", f"{sm['alpha_iso_A3']:.0f} Å³",
-             f"{sm['alpha_iso_A3']:.0f} Å³", "⅓ tr α, g-xTB, finite field", "g-xTB, finite field")]
+             f"{sm['alpha_iso_A3']:.0f} Å³", f"⅓ tr α, {src}, finite field", f"{src}, finite field")]
     if sm.get("top_ir"):
         nu, irr, a = sm["top_ir"][0]
         rows.append(("Strongest IR peak", "Strongest IR peak", f"{nu:.0f} cm<sup>−1</sup> ({_irrep_html(irr)})",
