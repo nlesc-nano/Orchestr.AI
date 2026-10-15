@@ -42,7 +42,7 @@ from ..records import read_xyz_first_frame
 
 from ..engines import xtb_pool, xtb_series
 from ..references import binary_units, ideal_gas_g, reference_set
-from ..solution import EXPORT_T
+from ..solution import EXPORT_T, ladder_fvib
 from .detachment import RelaxCache, _product
 from .solvation import SMEAR, SMEAR_FALLBACKS, cosmo_at_k, cosmo_data, dft_charges, frozen_charges, gb_conductor_energy
 
@@ -169,10 +169,14 @@ def run(ctx) -> dict:
     # default: the thermal part of the first path step, shifted by each site's energy
     steps = det.get("steps") or []
     g1 = None
-    if not exact and steps and steps[0].get("frequencies_cm1") is not None:
+    interp = ladder_fvib(ctx.results["hessian"]["frequencies_cm1"], steps) if steps else {}
+    if not exact and steps and (steps[0].get("frequencies_cm1") is not None or 1 in interp):
         s1, p1 = read_xyz_first_frame(str(ctx.props / "detach_1.xyz"))
         e1 = e_full + steps[0]["E_mace_eV"]
-        g1 = _g_label(s1, p1, e1, steps[0]["frequencies_cm1"]) - e1          # thermal part only
+        if steps[0].get("frequencies_cm1") is not None:
+            g1 = _g_label(s1, p1, e1, steps[0]["frequencies_cm1"]) - e1      # thermal part only
+        else:                                         # quick mode: F_vib of k = 1 interpolated
+            g1 = _g_label(s1, p1, e1, []) - e1 + interp[1]
     thermo_ok = exact or g1 is not None
     cache = RelaxCache(ctx)
     dft = s.solvation_charges == "dft"

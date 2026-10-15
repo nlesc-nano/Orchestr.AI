@@ -99,7 +99,10 @@ class Settings:
     xtb_ip_ea: bool = True
     xtb_gradient: bool = True
     detach_max_atoms: int = 600      # desorption search (and the site map built on it) up to this size
-    detach_search: str = "symmetric"  # symmetric: moves of symmetry-equivalent units (builder core) | beam: one unit per step
+    detach_search: str = "greedy"    # greedy: one unit per step, capped (qualitative, bounded cost) | symmetric:
+                                     # moves of symmetry-equivalent units | beam: width-2 beam, every unit
+    detach_max_levels: int = 12      # greedy search: at most this many removals (0: all units)
+    detach_quick: bool = True        # qualitative ladder: candidates to 0.05 eV/Å, no polishing, one Hessian per path
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
     detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
@@ -131,9 +134,12 @@ class Settings:
     def relaxer(self) -> str:
         """How desorption products are relaxed (enters the step hashes and the relaxation cache)."""
         if not self.relax_batch_atoms:
-            return "serial-bfgs-0.02"
+            return "serial-bfgs-0.05-quick" if self.detach_quick else "serial-bfgs-0.02"
         from . import batch_relax as b
         from .steps import detachment as d
+        if self.detach_quick:
+            return (f"batched-lbfgs-{d.QUICK_FMAX}-plateau-{b.PLATEAU_FMAX}-{b.PLATEAU_WINDOW}-{b.PLATEAU_DE_ATOM}"
+                    f"-stall-{b.STALL_WINDOWS}-{b.MAX_STEPS}-quick")
         return (f"batched-lbfgs-{b.FMAX}-plateau-{b.PLATEAU_FMAX}-{b.PLATEAU_WINDOW}-{b.PLATEAU_DE_ATOM}"
                 f"-stall-{b.STALL_WINDOWS}-{b.MAX_STEPS}-polish-{d.POLISH_FMAX}-{d.POLISH_WINDOW}")
 
@@ -156,7 +162,8 @@ class Settings:
                         "field": self.vibspec_field, "max_atoms": self.vibspec_max_atoms, "cif": "record"},
             "electronic": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
-            "detachment": {**mace, "fmax": self.fmax, "search": self.detach_search, "relaxer": self.relaxer(),
+            "detachment": {**mace, "fmax": self.fmax, "search": self.detach_search,
+                           **({"max_levels": self.detach_max_levels} if self.detach_search == "greedy" else {}), "relaxer": self.relaxer(),
                            "max_atoms": self.detach_max_atoms,
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),

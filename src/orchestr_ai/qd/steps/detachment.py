@@ -58,9 +58,21 @@ from .hessian import _fd_hessian, thermo, vibrations
 from .structure import _bonds, _cutoffs
 
 TRAIN_FMAX = 0.02        # eV/Å, relaxations of candidate products
+# Quick mode (settings.detach_quick, the default): a qualitative ladder at a fraction of the cost.
+# Candidates relaxed to QUICK_FMAX, no polishing, and one Hessian per path (the last state): the
+# vibrational free energy of the states in between is linear in k from the intact dot. A MACE-MH-1
+# force call costs ~80 ms whatever the size (A100, 149-1946 atoms: per-call overhead), so the
+# number of optimiser steps sets the cost.
+QUICK_FMAX = 0.05        # eV/Å
 TRAIN_STEPS = 1000
 TIE_TOL = 0.05           # Å, completing ligands this close to the closest one are equivalent choices
-BEAM = 2                 # structures kept per level
+BEAM = 2                 # structures kept per level (beam search)
+# Greedy search (the default): the beam search with one structure per level, candidates re-relaxed
+# only near the last removal, and a cap on the number of removals. A qualitative ladder at a
+# bounded cost: the symmetric moves follow symmetric paths up to 2.2 eV higher (Cd68), the full
+# beam search costs ~7,000 relaxations at 316 atoms.
+GREEDY_R_LOCAL = 7.0     # Å, units re-relaxed after a removal (the rest keep their previous dE)
+GREEDY_REFRESH = 0.3     # eV, estimated units this close to the best relaxed one are relaxed too
 LOCAL_R = 7.0            # Å, minimum radius around the last removal within which units are re-evaluated ...
 LOCAL_FRAC = 0.6         # ... or this fraction of the dot's largest native-atom distance, if larger
                          # (in small dots a removal relaxes the whole cluster)
@@ -91,6 +103,10 @@ def _relax(symbols, pts, settings, fmax=TRAIN_FMAX, steps=TRAIN_STEPS):
     return atoms, e, ok
 
 
+def _candidate_fmax(settings) -> float:
+    return QUICK_FMAX if getattr(settings, "detach_quick", False) else TRAIN_FMAX
+
+
 def _relax_task(args):
     symbols, pts, settings = args
     atoms, e, ok = _relax(symbols, pts, settings)
@@ -101,7 +117,8 @@ def _relax_batch(structures, settings, polish=False):
     """[(positions, energy, converged), ...]: all structures relaxed together (batch_relax)."""
     from ..batch_relax import BatchMACE, relax_many
     calc = mace_calculator(settings.head, settings.model, settings.device, settings.dtype)
-    kw = {"fmax": POLISH_FMAX, "plateau_fmax": 0.05, "max_steps": POLISH_STEPS} if polish else {}
+    kw = ({"fmax": POLISH_FMAX, "plateau_fmax": 0.05, "max_steps": POLISH_STEPS} if polish
+          else {"fmax": QUICK_FMAX} if getattr(settings, "detach_quick", False) else {})
     res = relax_many(structures, BatchMACE(calc, settings.relax_batch_atoms), **kw)
     return [(r.positions, r.energy, r.converged) for r in res]
 
@@ -252,7 +269,7 @@ class RelaxCache:
                         res.append(self.worker.relax(sy, p, settings))
                     else:
                         atoms, e, ok = (_relax(sy, p, settings, fmax=POLISH_FMAX, steps=POLISH_STEPS) if polish
-                                        else _relax(sy, p, settings))
+                                        else _relax(sy, p, settings, fmax=_candidate_fmax(settings)))
                         res.append((atoms.get_positions(), e, ok))
             for k, (pos, e, ok) in zip(todo, res):
                 self.data[k] = {"energy": float(e), "converged": bool(ok),
@@ -497,8 +514,13 @@ def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
 
 
 def polish(beam, todo, cache, settings, e_full, ensemble, stats):
-    """Re-relax relaxed candidates [(state index, representative key), ...] to POLISH_FMAX (one batch)."""
+    """Re-relax relaxed candidates [(state index, representative key), ...] to POLISH_FMAX (one batch).
+    Quick mode: no re-relaxation, the candidates are only marked as final."""
     if not todo:
+        return
+    if getattr(settings, "detach_quick", False):
+        for si, key in todo:
+            beam[si].table[key]["polished"] = True
         return
     res = cache.relax_many([(beam[si].table[key]["product"].get_chemical_symbols(),
                              beam[si].table[key]["product"].get_positions()) for si, key in todo], settings, polish=True)
@@ -530,8 +552,9 @@ def relax_estimate(state, key, cache, settings, e_full, ensemble, stats):
     relax_estimates([state], [(0, key)], cache, settings, e_full, ensemble, stats)
 
 
-def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, local_r=LOCAL_R):
-    """Next level: the BEAM best children of the current beam (lazy, deduplicated)."""
+def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, local_r=LOCAL_R, width=BEAM,
+           refresh=REFRESH_WINDOW):
+    """Next level: the `width` best children of the current beam (lazy, deduplicated)."""
     import heapq
     heap = []
     # Every candidate of the level (all beam states) is relaxed in one batch.
@@ -546,7 +569,7 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
             continue
         best = min(exact)
         todo += [(si, key) for key, entry in st.table.items()
-                 if not entry["exact"] and entry["J"] <= best + REFRESH_WINDOW]
+                 if not entry["exact"] and entry["J"] <= best + refresh]
     relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
     # Polish the candidates that can enter the beam, then rank.
     polish_level(beam, cache, settings, e_full, ensemble, stats)
@@ -554,7 +577,7 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
         for key, entry in st.table.items():
             heapq.heappush(heap, (st.energy + entry["J"], si, key))
     children, seen = [], set()
-    while heap and len(children) < BEAM:
+    while heap and len(children) < width:
         e_child, si, key = heapq.heappop(heap)
         st = beam[si]
         entry = st.table[key]
@@ -854,12 +877,16 @@ def run(ctx) -> dict:
         local_r = SYM_R_LOCAL
         path, levels_out, first_table = symmetric_search(ctx, s, cache, e_full, bulk_bond, q, perms, ensemble, stats)
     else:
-        local_r = max(LOCAL_R, LOCAL_FRAC * span)
+        greedy = s.detach_search == "greedy"
+        width = 1 if greedy else BEAM
+        local_r = GREEDY_R_LOCAL if greedy else max(LOCAL_R, LOCAL_FRAC * span)
+        refresh = GREEDY_REFRESH if greedy else REFRESH_WINDOW
+        k_max = min(m, s.detach_max_levels) if greedy and s.detach_max_levels else m
         root = State(sym0, pts0, range(len(sym0)), 0.0, [])
         levels = [[root]]
         first_table = None
-        while levels[-1] and levels[-1][0].k < m:
-            children = expand(levels[-1], cache, s, e_full, ensemble, stats, ctx, bulk_bond, q, local_r)
+        while levels[-1] and levels[-1][0].k < k_max:
+            children = expand(levels[-1], cache, s, e_full, ensemble, stats, ctx, bulk_bond, q, local_r, width, refresh)
             if first_table is None:
                 first_table = root.table
             if not children:
@@ -882,9 +909,18 @@ def run(ctx) -> dict:
     f_prev = f_full
     ladder = []
     prev_e = 0.0
+    quick = bool(getattr(s, "detach_quick", False)) and thermo_ok and len(path) > 1
+    if quick:                                        # one Hessian: the last state; F_vib linear in k
+        fr_last = np.asarray(cache.frequencies(path[-1].sym, path[-1].pts, s_hess))
+        f_last = np.asarray(thermo(fr_last, T)["F_vib_eV"])
+        k_last = path[-1].k
     for st in path:
         fr = None
-        if thermo_ok:
+        if quick:
+            fr = fr_last if st is path[-1] else None
+            f_st = f_last if st is path[-1] else f_full + (f_last - f_full) * st.k / k_last
+            n_imag = int((fr < -10.0).sum()) if fr is not None else None
+        elif thermo_ok:
             fr = np.asarray(cache.frequencies(st.sym, st.pts, s_hess))
             f_st = np.asarray(thermo(fr, T)["F_vib_eV"])
             n_imag = int((fr < -10.0).sum())
@@ -899,6 +935,8 @@ def run(ctx) -> dict:
                        "dF_vib_eV": dF.tolist(),
                        "n_imaginary": n_imag, **st.step,
                        "frequencies_cm1": fr.round(3).tolist() if fr is not None else None,
+                       "F_vib_source": ("Hessian" if fr is not None else
+                                        "linear in k (quick mode)" if quick else "not computed"),
                        "symbols": st.sym,
                        "best_at_level_eV": min(best_at.get(st.k, st.energy), st.energy)})
         _write_xyz(ctx.props / f"detach_{st.k}.xyz", st.sym, st.pts,
@@ -944,20 +982,27 @@ def run(ctx) -> dict:
 
     return {
         "summary": {
-            "method": (f"symmetric moves (width {BEAM}) with local updates" if s.detach_search == "symmetric"
-                       else f"beam search (width {BEAM}) with local updates"),
+            "method": ({"symmetric": f"symmetric moves (width {BEAM}) with local updates",
+                        "greedy": f"greedy search (one unit per step, re-relaxed within {GREEDY_R_LOCAL:g} Å, "
+                                  f"at most {s.detach_max_levels or m} removals)"}
+                       .get(s.detach_search, f"beam search (width {BEAM}) with local updates")),
             "search": s.detach_search, "core_c2_operations": n_ops, "unit": unit, "n_units": m,
-            "n_steps": len(ladder), "n_moves": len(levels_out), "beam": BEAM, "local_radius_A": local_r,
+            "n_steps": len(ladder), "n_moves": len(levels_out), "beam": 1 if s.detach_search == "greedy" else BEAM,
+            "local_radius_A": local_r,
             "n_intermediate": stats.get("intermediate", 0),
             "n_relaxations": stats["relaxations"], "n_lazy_checks": stats["lazy"],
             "n_polished": stats.get("polished", 0), "polish_fmax_eV_A": POLISH_FMAX,
+            "quick": bool(getattr(s, "detach_quick", False)),
+            "candidate_fmax_eV_A": _candidate_fmax(s),
             "polish_window_eV": POLISH_WINDOW,
             "n_relaxations_new": cache.n_new, "n_configurations": len(confs),
             "ensemble": "every relaxed configuration evaluated by the search",
             "dE_eV": [st["dE_eV"] for st in ladder],
             "dG_300K_eV": [st["dG_300K_eV"] for st in ladder],
             "cumulative_dE_eV": [st["E_mace_eV"] + st["k"] * mx["energy_eV"] for st in ladder],
-            "stopped": None if len(ladder) == m else "no unit left",
+            "stopped": (None if len(ladder) == m else
+                        f"after {len(ladder)} of {m} units (detach_max_levels)" if s.detach_search == "greedy"
+                        and s.detach_max_levels and len(ladder) >= s.detach_max_levels else "no unit left"),
             "thermo": bool(thermo_ok),
         },
         "site_classes": sites,

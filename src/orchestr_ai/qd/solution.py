@@ -40,6 +40,23 @@ from .references import binary_units, bulk_free_energy, ideal_gas_g, reference_s
 EXPORT_T = [float(t) for t in range(50, 1501, 10)]
 
 
+def _fvib(freqs) -> np.ndarray:
+    """Vibrational free energy on EXPORT_T (harmonic U, quasi-RRHO S), as ideal_gas_g uses it."""
+    from .steps.hessian import thermo, thermo_modes
+    return np.asarray(thermo(thermo_modes(np.asarray(freqs, float)), EXPORT_T)["F_vib_eV"])
+
+
+def ladder_fvib(dot_freqs, steps) -> dict:
+    """{k: F_vib(EXPORT_T)} for the ladder states without their own Hessian (quick mode): linear in k
+    between the intact dot (k = 0) and the last state with frequencies."""
+    last = next((st for st in reversed(steps) if st.get("frequencies_cm1") is not None), None)
+    if last is None or last["k"] == 0:
+        return {}
+    f0, fk = _fvib(dot_freqs), _fvib(last["frequencies_cm1"])
+    return {st["k"]: f0 + (fk - f0) * st["k"] / last["k"] for st in steps
+            if st.get("frequencies_cm1") is None and st["k"] < last["k"]}
+
+
 def _gas_g(symbols, pts, energy, freqs):
     from ase import Atoms
     atoms = Atoms(list(symbols), positions=np.asarray(pts, float))
@@ -60,14 +77,19 @@ def export(ctx) -> dict | None:
              "G": _gas_g(sym0, pts0, e_full, ctx.results["hessian"]["frequencies_cm1"]).tolist(),
              "solv_inf": sol["gb_inf"]["dot_0"], "cav_S": sol.get("cav_S", {}).get("dot_0"), "alpb": {s: v["dot_0"] for s, v in sol["alpb"]["dG"].items()}}]
     det = ctx.results.get("detachment", {})
+    interp = ladder_fvib(ctx.results["hessian"]["frequencies_cm1"], det.get("steps", []))
     for st in det.get("steps", []):
-        if st.get("frequencies_cm1") is None:
+        if st.get("frequencies_cm1") is None and st["k"] not in interp:
             break
         sym, pts = read_xyz_first_frame(str(ctx.props / f"detach_{st['k']}.xyz"))
         name = f"dot_{st['k']}"
+        if st.get("frequencies_cm1") is not None:
+            g = _gas_g(sym, pts, e_full + st["E_mace_eV"], st["frequencies_cm1"])
+        else:                    # quick mode: translation + rotation, F_vib linear in k
+            g = _gas_g(sym, pts, e_full + st["E_mace_eV"], []) + interp[st["k"]]
         dots.append({"k": st["k"], "n": u["n_MA"], "m": u["m_MXq"] - st["k"],
                      "sigma": rotational_symmetry_number(sym, pts),
-                     "G": _gas_g(sym, pts, e_full + st["E_mace_eV"], st["frequencies_cm1"]).tolist(),
+                     "G": g.tolist(),
                      "solv_inf": sol["gb_inf"][name], "cav_S": sol.get("cav_S", {}).get(name), "alpb": {s: v[name] for s, v in sol["alpb"]["dG"].items()}})
     ma, mx = refs["MA_monomer"], refs["MXq_monomer"]
     # The evaluated configurations, as offsets from the ladder state of the same k (gas phase).

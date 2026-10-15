@@ -162,11 +162,13 @@ def use_cueq(device: str) -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=8)
 def mace_calculator(head: str = DEFAULT_HEAD, model: str = DEFAULT_MODEL,
                     device: str = "cpu", dtype: str = "float64", cueq: Optional[bool] = None):
     """
-    ASE calculator for one MACE-MH-1 head (cached per settings). cueq: cuEquivariance kernels
-    (None: use_cueq(device)).
+    ASE calculator for one MACE-MH-1 head, cached per arguments: loading the model and converting
+    it to cuEquivariance takes seconds, and the desorption search alone asked for it ~50 times per
+    dot (Cd68: 51 conversions in a 561 s search). cueq: cuEquivariance kernels (None: use_cueq(device)).
 
     device="mps" runs on the Apple GPU in float32: the float64 checkpoint is
     loaded on the CPU, converted with .float() and handed to the calculator.
