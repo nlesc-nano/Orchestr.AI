@@ -545,8 +545,74 @@ def evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats):
                            cache.sigma(_remaining(state, members[0][1]["atoms"])))
 
 
+def screen(beam, groups, settings, e_full, stats):
+    """
+    Screening of a level with many candidates (settings.detach_screen): every group's product is
+    evaluated as removed, without relaxing it (one batched single point each), and only the
+    detach_screen_keep lowest groups and those within detach_screen_window of the lowest are kept
+    for relaxation. Returns the kept groups and the screened-out ones [(state index, members,
+    J_rigid)], whose estimates are set by estimate_screened once the kept ones are relaxed.
+    """
+    if not getattr(settings, "detach_screen", False):
+        return groups, [], {}
+    from ..batch_relax import BatchMACE
+    kept_all, deferred, rigid = [], [], {}
+    ev = None
+    for si, g in enumerate(groups):
+        if len(g) <= settings.detach_screen_min:
+            kept_all.append(g)
+            continue
+        if ev is None:
+            ev = BatchMACE(mace_calculator(settings.head, settings.model, settings.device, settings.dtype),
+                           settings.relax_batch_atoms)
+        st = beam[si]
+        fps = list(g)
+        res = ev([_product(st.sym, st.pts, g[fp][0][1]["atoms"]) for fp in fps])
+        stats["screen_single_points"] = stats.get("screen_single_points", 0) + len(fps)
+        J = {fp: e - e_full - st.energy for fp, (e, _f) in zip(fps, res)}
+        order = sorted(fps, key=J.get)
+        keep = set(order[:settings.detach_screen_keep]) | {fp for fp in fps if J[fp] <= J[order[0]] + settings.detach_screen_window}
+        kept_all.append({fp: g[fp] for fp in fps if fp in keep})
+        for fp in fps:
+            rigid[(si, g[fp][0][0])] = J[fp]
+            if fp not in keep:
+                deferred.append((si, g[fp], J[fp]))
+        stats["screened_out"] = stats.get("screened_out", 0) + len(fps) - len(keep)
+    return kept_all, deferred, rigid
+
+
+def estimate_screened(beam, deferred, rigid, settings):
+    """
+    Estimates of the screened-out groups: their unrelaxed J minus a high quantile
+    (detach_screen_quantile) of the relaxation energies of the state's relaxed candidates, an
+    optimistic value, so the refresh and the lazy check relax every one that might compete.
+    """
+    for si in {d[0] for d in deferred}:
+        st = beam[si]
+        relax_e = [rigid[(si, key)] - st.table[key]["J"] for (s_, key) in rigid if s_ == si
+                   and key in st.table and st.table[key].get("exact")]
+        shift = float(np.quantile(relax_e, settings.detach_screen_quantile)) if relax_e else 0.0
+        for s_, members, j_rigid in deferred:
+            if s_ != si:
+                continue
+            group = [key for key, _un in members]
+            for key, un in members:
+                st.table[key] = {"J": j_rigid - shift, "exact": False, "unit": un, "screened": True,
+                                 "J_rigid": j_rigid, "group": group}
+
+
 def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
-    """Relax estimated entries [(state index, key), ...] in one batch."""
+    """Relax estimated entries [(state index, key), ...] in one batch; a screened group's members
+    (symmetry-equivalent units) share the relaxed value of the one relaxed."""
+    # one relaxation per screened group
+    seen, uniq = set(), []
+    for si, key in todo:
+        grp = beam[si].table[key].get("group")
+        gid = (si, tuple(grp)) if grp else (si, key)
+        if gid not in seen:
+            seen.add(gid)
+            uniq.append((si, key))
+    todo = uniq
     if not todo:
         return
     res = cache.relax_many([_product(beam[si].sym, beam[si].pts, beam[si].table[key]["unit"]["atoms"])
@@ -556,7 +622,11 @@ def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
     for (si, key), (atoms, e, ok) in zip(todo, res):
         state = beam[si]
         entry = state.table[key]
-        entry.update(J=e - e_full - state.energy, exact=True, rep=key, product=atoms, converged=ok, multiplicity=1)
+        group = entry.get("group") or [key]
+        J = e - e_full - state.energy
+        for k2 in group:
+            state.table[k2].update(J=J, exact=True, rep=key, converged=ok, multiplicity=len(group))
+        entry["product"] = atoms
         _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"],
                            cache.sigma(_remaining(state, entry["unit"]["atoms"])))
 
@@ -608,7 +678,9 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
     # Every candidate of the level (all beam states) is relaxed in one batch.
     groups = [plan(st, enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q), local_r)
               for st in beam]
+    groups, deferred, rigid = screen(beam, groups, settings, e_full, stats)
     evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats)
+    estimate_screened(beam, deferred, rigid, settings)
     # Refresh: relax estimated candidates close to the best relaxed one, per beam state (one batch).
     todo = []
     for si, st in enumerate(beam):
@@ -616,8 +688,13 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
         if not exact:
             continue
         best = min(exact)
-        todo += [(si, key) for key, entry in st.table.items()
-                 if not entry["exact"] and entry["J"] <= best + refresh]
+        cand = sorted(((entry["J"], key) for key, entry in st.table.items()
+                       if not entry["exact"] and entry["J"] <= best + refresh), key=lambda x: x[0])
+        cap = getattr(settings, "detach_refresh_max", 0)
+        if cap and len(cand) > cap:                # near-degenerate units: the lowest estimates only
+            stats["refresh_capped"] = stats.get("refresh_capped", 0) + len(cand) - cap
+            cand = cand[:cap]
+        todo += [(si, key) for _j, key in cand]
     relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
     # Polish the candidates that can enter the beam, then rank.
     polish_level(beam, cache, settings, e_full, ensemble, stats)
@@ -1089,6 +1166,11 @@ def run(ctx) -> dict:
             "candidate_fmax_eV_A": _candidate_fmax(s),
             "polish_window_eV": POLISH_WINDOW,
             "n_relaxations_new": cache.n_new, "n_configurations": len(confs),
+            "refresh_max": s.detach_refresh_max, "refresh_capped": stats.get("refresh_capped", 0),
+            "screen": ({"single_points": stats.get("screen_single_points", 0), "screened_out": stats.get("screened_out", 0),
+                        "min_groups": s.detach_screen_min, "keep": s.detach_screen_keep,
+                        "window_eV": s.detach_screen_window, "quantile": s.detach_screen_quantile}
+                       if getattr(s, "detach_screen", False) else None),
             "ensemble": "every relaxed configuration evaluated by the search",
             "dE_eV": [st["dE_eV"] for st in ladder],
             "dG_300K_eV": [st["dG_300K_eV"] for st in ladder],

@@ -111,6 +111,13 @@ class Settings:
     detach_max_levels: int = 12      # greedy search: at most this many removals (0: all units)
     detach_quick: bool = True        # qualitative ladder: candidates to 0.05 eV/Å, no polishing, one Hessian per path
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
+    detach_refresh_max: int = 24        # greedy: estimated units re-relaxed after a removal, lowest first (0: no cap; the
+                                        # lazy check still relaxes any estimate before it is chosen)
+    detach_screen: bool = True          # levels with many candidates: unrelaxed single points first, relax the best only
+    detach_screen_min: int = 16         # ... when a level has more symmetry-distinct candidates than this
+    detach_screen_keep: int = 12        # ... relax the lowest this many by unrelaxed energy
+    detach_screen_window: float = 0.5   # eV ... and all within this of the lowest
+    detach_screen_quantile: float = 0.9  # the others: unrelaxed J minus this quantile of the relaxation energies (optimistic)
     detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
     # training frames from the desorption search and its ladder (ML set)
@@ -190,10 +197,13 @@ class Settings:
             "electronic": {"method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "ip_ea": self.xtb_ip_ea, "gradient": self.xtb_gradient},
             "stability": {**mace, "temperatures": self.temperatures, "cif": "record"},
             "detachment": {**mace, "fmax": self.fmax, "search": self.detach_search,
-                           **({"max_levels": self.detach_max_levels} if self.detach_search == "greedy" else {}), "relaxer": self.relaxer(),
+                           **({"max_levels": self.detach_max_levels, "refresh_max": self.detach_refresh_max}
+                              if self.detach_search == "greedy" else {}), "relaxer": self.relaxer(),
                            "max_atoms": self.detach_max_atoms,
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),
+                           **({"screen": [self.detach_screen_min, self.detach_screen_keep, self.detach_screen_window,
+                                          self.detach_screen_quantile]} if self.detach_screen else {}),
                            **({"frames": [self.detach_frames_fractions, self.detach_frames_max_other]}
                               if self.detach_frames else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
