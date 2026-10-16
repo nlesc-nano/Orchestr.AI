@@ -55,6 +55,7 @@ DEPS = {
     "wigner": ["relax", "structure", "hessian"], "md": ["relax", "hessian", "wigner"],
     "detach_ensemble": ["detachment"], "monomer_ensemble": ["stability"],
 }
+LATENT = "data/latent_pca64_macemh1_omat_pbe.npz"
 # Source files whose content enters a step's cache key (engine versions are in the provenance).
 CODE_DEPS = {
     "relax": ["steps/relax.py"], "structure": ["steps/structure.py"], "hessian": ["steps/hessian.py"],
@@ -63,8 +64,9 @@ CODE_DEPS = {
     "electronic": ["steps/electronic.py"], "stability": ["steps/stability.py", "references.py"],
     "detachment": ["steps/detachment.py", "references.py"], "solvation": ["steps/solvation.py"], "sites": ["steps/sites.py"],
     "report": ["steps/report.py", "steps/vibplots.py", "bulk.py", "solution.py", "dashboards.py"],
-    "wigner": ["steps/ensemble.py"], "md": ["steps/ensemble.py"], "detach_ensemble": ["steps/ensemble.py"],
-    "monomer_ensemble": ["steps/ensemble.py"],
+    # the frozen latent basis enters the hash of every step that writes latent features
+    "wigner": ["steps/ensemble.py", LATENT], "md": ["steps/ensemble.py", LATENT],
+    "detach_ensemble": ["steps/ensemble.py", LATENT], "monomer_ensemble": ["steps/ensemble.py", LATENT],
 }
 FORMAL_CHARGES = {
     "Cd": 2, "Zn": 2, "Pb": 2, "Hg": 2, "In": 3, "Ga": 3, "Al": 3, "Cs": 1, "Rb": 1,

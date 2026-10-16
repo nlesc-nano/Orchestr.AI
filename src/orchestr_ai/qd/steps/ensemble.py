@@ -28,6 +28,14 @@ detach_ensemble  Short MD (the same integrator) from states of the desorption la
         The search itself leaves frames off the minimum (detach_relax.extxyz, see
         detachment.training_frames).
 
+Latent features.  Next to every extxyz file, <name>.latent.npz holds the per-atom MACE-MH-1
+latent features of its frames (the invariant channels of every interaction layer) projected on
+frozen 64-component PCA bases, one per element (data/latent_pca64_macemh1_omat_pbe.npz, fitted on
+all library materials), in float16: `features` (all atoms of all frames, in order), `symbols` and
+`offsets` (frame f is features[offsets[f]:offsets[f+1]]). The same bases for the whole library,
+so the atoms of every record can be compared and selected (farthest-point sampling, clustering,
+entropy) element by element in one space.
+
 Every frame stores its positions, the MACE-MH-1 energy (eV, also per atom), forces (eV/A)
 and velocities where it has them (extxyz: info energy, energy_per_atom, label; arrays forces,
 vel_A_fs), so the files are a training set as written and DFT labels can be added beside them.
@@ -38,8 +46,11 @@ embeddings.npz and manifest.json.
 """
 from __future__ import annotations
 
+import functools
 import json
 import time
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -105,6 +116,53 @@ def _write_extxyz(path, symbols, frames, label="MACE-MH-1"):
     write(str(path), out, format="extxyz")
 
 
+LATENT_BASIS = Path(__file__).resolve().parents[1] / "data" / "latent_pca64_macemh1_omat_pbe.npz"
+
+
+@functools.lru_cache(maxsize=4)
+def _latent_basis(model: str, head: str):
+    """{element: (mean, components)} of the frozen per-element PCA bases and their provenance, or None."""
+    if not LATENT_BASIS.is_file():
+        return None
+    from ..engines import file_sha256
+    b = np.load(LATENT_BASIS)
+    sha = file_sha256(model)[:16] if Path(model).is_file() else "?"
+    bases = {str(e): (b[f"mean_{e}"].astype(np.float32), b[f"components_{e}"].astype(np.float32)) for e in b["elements"]}
+    prov = {"basis": LATENT_BASIS.name, "kind": str(b["kind"]), "basis_model_sha256_16": str(b["model_sha256_16"]),
+            "basis_head": str(b["head"]), "model_sha256_16": sha, "head": head,
+            "consistent": sha == str(b["model_sha256_16"]) and head == str(b["head"])}
+    return bases, prov
+
+
+def write_latent(path, descriptors, symbols, s) -> Optional[dict]:
+    """
+    <path stem>.latent.npz: per-atom latent features (float16) of the frames written to `path`:
+    `descriptors` the per-atom invariant features of each frame and `symbols` its atoms, in the
+    file's order. Every atom is projected on its element's PCA basis (an element without a
+    basis gets NaN), so atoms are compared with atoms of the same element.
+    """
+    basis = _latent_basis(str(s.model), s.head)
+    if basis is None or not len(descriptors):
+        return None
+    bases, prov = basis
+    n_comp = next(iter(bases.values()))[1].shape[0]
+    feats = []
+    for d, sym in zip(descriptors, symbols):
+        d, sym = np.asarray(d, np.float32), np.asarray(sym)
+        f = np.full((len(sym), n_comp), np.nan, np.float32)
+        for e in set(sym.tolist()):
+            if e in bases:
+                m, c = bases[e]
+                f[sym == e] = (d[sym == e] - m) @ c.T
+        feats.append(f.astype(np.float16))
+    offsets = np.cumsum([0] + [len(f) for f in feats])
+    path = Path(path)
+    np.savez_compressed(path.with_name(path.name.split(".")[0] + ".latent.npz"), features=np.concatenate(feats),
+                        offsets=offsets, symbols=np.concatenate([np.asarray(x) for x in symbols]),
+                        **{k: str(v) for k, v in prov.items()})
+    return prov
+
+
 def _evaluator(s, descriptors=False):
     from ..batch_relax import BatchMACE
     calc = mace_calculator(s.head, s.model, s.device, s.dtype)
@@ -129,6 +187,7 @@ def run_wigner(ctx) -> dict:
     t0 = time.time()
     (e0, f0, d0), = _label(ev, symbols, [pos0])
     _write_extxyz(out_dir / "optimised.xyz", symbols, [{"positions": pos0, "forces": f0, "energy": e0}], label)
+    latent = write_latent(out_dir / "optimised.xyz", [d0], [symbols], s)
     emb = {"optimised_per_atom": d0.astype(np.float16)}
     rng = np.random.default_rng(s.wigner_seed)
     per_T = {}
@@ -139,6 +198,7 @@ def run_wigner(ctx) -> dict:
         frames = [{"positions": P[k], "velocities": V[k], "forces": f, "energy": e,
                    "info": {"T_K": float(T), "sample": k, "source": "wigner"}} for k, (e, f, _d) in enumerate(lab)]
         _write_extxyz(out_dir / f"wigner_{int(T)}K.extxyz", symbols, frames, label)
+        write_latent(out_dir / f"wigner_{int(T)}K.extxyz", [d for _e, _f, d in lab], [symbols] * len(lab), s)
         els, _ = _element_means(symbols, lab[0][2])
         emb[f"wigner_{int(T)}K"] = np.stack([_element_means(symbols, d)[1] for _e, _f, d in lab])
         dE = np.array([e for e, _f, _d in lab]) - e0
@@ -156,6 +216,7 @@ def run_wigner(ctx) -> dict:
                            "seed": s.wigner_seed, "cutoff_cm": s.wigner_cutoff_cm, "soft_cm": s.wigner_soft_cm,
                            "modes_used": n_used, "soft_modes": n_soft,
                            "imaginary_modes": int(np.sum(freqs < 0))},
+                "latent": latent,
                 "model": mace_provenance(s.head, s.model, s.device, s.dtype)}
     _update_manifest(out_dir, manifest)
     return {"summary": {"n_samples": int(sum(v["n"] for v in per_T.values())), "modes_used": n_used,
@@ -318,6 +379,7 @@ def run_md(ctx) -> dict:
             _write_extxyz(out_dir / f"md_{name}.extxyz", symbols, frames[r], f"MACE-MH-1 {s.head}")
             lab = _label(evd, symbols, [fr["positions"] for fr in frames[r]])
             emb[f"md_{name}"] = np.stack([_element_means(symbols, d)[1] for _e, _f, d in lab])
+            write_latent(out_dir / f"md_{name}.extxyz", [d for _e, _f, d in lab], [symbols] * len(lab), s)
         rmsd = [float(np.sqrt(((fr["positions"] - pos0) ** 2).sum(axis=1).mean())) for fr in frames[r]]
         per[name] = {**summ[r], "rmsd_max_A": max(rmsd) if rmsd else None}
     emb.setdefault("elements", np.array(sorted(set(symbols))))
@@ -400,6 +462,7 @@ def run_detach_ensemble(ctx) -> dict:
         if structs:
             labels = evd(structs)
             emb[key] = np.stack([_element_means_fixed(sy, d, els) for (sy, _p), (_e, _f, d) in zip(structs, labels)])
+            write_latent(out_dir / f"{key}.extxyz", [d for _e, _f, d in labels], [sy for sy, _p in structs], s)
     emb.setdefault("elements", np.array(els))
     np.savez_compressed(out_dir / "embeddings.npz", **emb)
     _update_manifest(out_dir, {"detach_ensemble": {"levels": levels, "temperatures_K": list(map(float, s.detach_ensemble_temperatures)),
@@ -512,6 +575,9 @@ def run_monomer_ensemble(ctx) -> dict:
         counts[formula] = len(mine)
         frames += mine
     _write_extxyz(out_dir / "monomers.extxyz", None, frames, f"MACE-MH-1 {s.head}")
+    if frames:
+        labels = _evaluator(s, descriptors=True)([(fr["symbols"], fr["positions"]) for fr in frames])
+        write_latent(out_dir / "monomers.extxyz", [d for _e, _f, d in labels], [fr["symbols"] for fr in frames], s)
     _update_manifest(out_dir, {"monomers": {"scan": list(s.monomer_scan), "rattle_sigmas_A": list(s.monomer_rattle_sigmas),
                                             "rattle_n": s.monomer_rattle_n,
                                             "md_temperatures_K": list(map(float, s.monomer_md_temperatures))}})
