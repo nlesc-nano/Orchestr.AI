@@ -83,6 +83,8 @@ POLISH_WINDOW = 0.3      # eV above the level's best. A product can pass 0.02 eV
 POLISH_STEPS = 1000      # (soft surface / Cl motion) 0.1 eV above its minimum (Cd68, level 5), and
                          # then the beam follows another branch; polishing makes the ranking robust.
 TASKS_PER_WORKER = 15    # GPU tasks per worker process before it is replaced
+CHECKPOINT_CALLS = 4     # candidates relaxed together, in model calls' worth of atoms (relax_batch_atoms each),
+                         # then checkpointed: 8 candidates of 2,000 atoms, ~50 of 300
 KB_EV = 8.617333262e-5
 
 
@@ -250,7 +252,7 @@ class RelaxCache:
     def relax_many(self, structures, settings, polish=False):
         """
         [(atoms, energy, converged), ...] for every (symbols, positions): cached ones
-        are reused, the others relaxed together in one batch (settings.relax_batch_atoms > 0)
+        are reused, the others relaxed together in checkpointed batches (settings.relax_batch_atoms > 0)
         or one at a time (ASE BFGS), and checkpointed. polish: to POLISH_FMAX.
         """
         from ase import Atoms
@@ -262,11 +264,26 @@ class RelaxCache:
         for k, (sy, p) in zip(keys, structures):
             if k not in self.data and k not in todo:
                 todo[k] = (list(sy), np.asarray(p, float))
+        if todo and settings.relax_batch_atoms and self.worker is None:
+            # Batches of at most CHECKPOINT_CALLS model calls' worth of atoms, each checkpointed: the first
+            # level of a large dot is hundreds of candidates (2 per call at 2,000 atoms), longer than a
+            # short-QoS job piece, and an unsaved batch would start over in every piece.
+            limit = CHECKPOINT_CALLS * settings.relax_batch_atoms
+            keys_left = list(todo)
+            while keys_left:
+                group, n = [], 0
+                while keys_left and (not group or n + len(todo[keys_left[0]][0]) <= limit):
+                    k = keys_left.pop(0)
+                    group.append(k)
+                    n += len(todo[k][0])
+                res = _relax_batch([todo[k] for k in group], settings, polish, () if polish else self.snapshots)
+                self._store({k: todo[k] for k in group}, res)
+            _free_device_memory(settings)
+            todo = {}
         if todo:
             new = list(todo.values())
             if settings.relax_batch_atoms:
-                res = (self.worker.relax_many(new, settings, polish) if self.worker is not None
-                       else _relax_batch(new, settings, polish, () if polish else self.snapshots))
+                res = self.worker.relax_many(new, settings, polish)
             else:
                 res = []
                 for sy, p in new:
@@ -276,19 +293,7 @@ class RelaxCache:
                         atoms, e, ok = (_relax(sy, p, settings, fmax=POLISH_FMAX, steps=POLISH_STEPS) if polish
                                         else _relax(sy, p, settings, fmax=_candidate_fmax(settings)))
                         res.append((atoms.get_positions(), e, ok))
-            spooled = []
-            for k, r in zip(todo, res):
-                pos, e, ok = r[:3]
-                self.data[k] = {"energy": float(e), "converged": bool(ok),
-                                "positions": np.asarray(pos).round(6).tolist()}
-                if len(r) > 3 and r[3]:
-                    sy = todo[k][0]
-                    final = geometry_key(sy, np.asarray(pos).round(6))
-                    spooled += [(sy, fr, k, final) for fr in r[3]]
-            if spooled:
-                self._spool(spooled)
-            self._save()
-            self.n_new += len(todo)
+            self._store(todo, res)
             _free_device_memory(settings)
         out = []
         for k, (sy, _p) in zip(keys, structures):
@@ -296,6 +301,23 @@ class RelaxCache:
             out.append((Atoms(list(sy), positions=np.asarray(hit["positions"], float)),
                         float(hit["energy"]), bool(hit["converged"])))
         return out
+
+    def _store(self, todo, res):
+        """Cache (and checkpoint) the relaxations `res` of the inputs `todo` (key -> (symbols, positions));
+        their snapshots go to the spool."""
+        spooled = []
+        for k, r in zip(todo, res):
+            pos, e, ok = r[:3]
+            self.data[k] = {"energy": float(e), "converged": bool(ok),
+                            "positions": np.asarray(pos).round(6).tolist()}
+            if len(r) > 3 and r[3]:
+                sy = todo[k][0]
+                final = geometry_key(sy, np.asarray(pos).round(6))
+                spooled += [(sy, fr, k, final) for fr in r[3]]
+        if spooled:
+            self._spool(spooled)
+        self._save()
+        self.n_new += len(todo)
 
     def _spool(self, frames):
         from ase import Atoms
