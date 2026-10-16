@@ -10,7 +10,11 @@ wigner  For each temperature, `wigner_samples` structures drawn from the quantum
         with the width of a wigner_soft_cm mode, because a straight-line displacement
         along a rotation-like mode at its own (huge) amplitude stretches bonds.
 
-md      Short Langevin MD (BAOAB) with MACE-MH-1. Every replica follows its own
+md      Short MD with MACE-MH-1 in the canonical ensemble: velocity Verlet with the CSVR
+        thermostat (Bussi, Donadio, Parrinello, J. Chem. Phys. 126, 014101 (2007): the
+        kinetic energy is resampled from its canonical distribution with coupling time
+        md_tau_fs, half a step before and after each Verlet step), or Langevin BAOAB
+        (md_thermostat: langevin). Every replica follows its own
         temperature schedule, constant ([T]) or a linear ramp ([T0, T1]); all replicas
         share one batched model call per step, so six replicas cost little more than
         one. Replicas start from Wigner samples at their first temperature and are
@@ -18,6 +22,9 @@ md      Short Langevin MD (BAOAB) with MACE-MH-1. Every replica follows its own
         than 10 A outside the starting structure). Frames every md_stride_fs after
         md_skip_ps carry their exact MACE energy and forces.
 
+Every frame stores its positions, the MACE-MH-1 energy (eV, also per atom), forces (eV/A)
+and velocities where it has them (extxyz: info energy, energy_per_atom, label; arrays forces,
+vel_A_fs), so the files are a training set as written and DFT labels can be added beside them.
 Every structure gets energy, forces and MACE invariant descriptors (per element
 averaged; per atom for the optimised structure), labelled in batched calls. Files go
 to props/ensemble/: optimised.xyz, wigner_<T>K.extxyz, md_<name>.extxyz,
@@ -76,8 +83,8 @@ def harmonic_potential_energy(freqs_cm, T, cutoff_cm, soft_cm):
     return float(np.sum(HBAR * w / 4 / np.tanh(x)) / 1.602176634e-19)
 
 
-def _write_extxyz(path, symbols, frames):
-    """frames: dicts with positions, forces, energy (+ velocities, info)."""
+def _write_extxyz(path, symbols, frames, label="MACE-MH-1"):
+    """frames: dicts with positions, forces, energy (+ velocities, info); label: the method of energy and forces."""
     from ase import Atoms
     from ase.io import write
     out = []
@@ -86,7 +93,8 @@ def _write_extxyz(path, symbols, frames):
         a.arrays["forces"] = np.asarray(fr["forces"], float)
         if fr.get("velocities") is not None:
             a.arrays["vel_A_fs"] = np.asarray(fr["velocities"], float)
-        a.info.update({"energy": float(fr["energy"]), **fr.get("info", {})})
+        a.info.update({"energy": float(fr["energy"]), "energy_per_atom": float(fr["energy"]) / len(symbols),
+                       "label": label, **fr.get("info", {})})
         out.append(a)
     write(str(path), out, format="extxyz")
 
@@ -111,9 +119,10 @@ def run_wigner(ctx) -> dict:
     freqs, modes = np.asarray(m["frequencies_cm1"], float), np.asarray(m["modes_mass_weighted"], float)
     masses = _masses(symbols)
     ev = _evaluator(s, descriptors=True)
+    label = f"MACE-MH-1 {s.head}"
     t0 = time.time()
     (e0, f0, d0), = _label(ev, symbols, [pos0])
-    _write_extxyz(out_dir / "optimised.xyz", symbols, [{"positions": pos0, "forces": f0, "energy": e0}])
+    _write_extxyz(out_dir / "optimised.xyz", symbols, [{"positions": pos0, "forces": f0, "energy": e0}], label)
     emb = {"optimised_per_atom": d0.astype(np.float16)}
     rng = np.random.default_rng(s.wigner_seed)
     per_T = {}
@@ -123,7 +132,7 @@ def run_wigner(ctx) -> dict:
         lab = _label(ev, symbols, P)
         frames = [{"positions": P[k], "velocities": V[k], "forces": f, "energy": e,
                    "info": {"T_K": float(T), "sample": k, "source": "wigner"}} for k, (e, f, _d) in enumerate(lab)]
-        _write_extxyz(out_dir / f"wigner_{int(T)}K.extxyz", symbols, frames)
+        _write_extxyz(out_dir / f"wigner_{int(T)}K.extxyz", symbols, frames, label)
         els, _ = _element_means(symbols, lab[0][2])
         emb[f"wigner_{int(T)}K"] = np.stack([_element_means(symbols, d)[1] for _e, _f, d in lab])
         dE = np.array([e for e, _f, _d in lab]) - e0
@@ -158,6 +167,21 @@ def _update_manifest(out_dir, new):
     tmp.replace(path)
 
 
+def csvr_scale(v, masses, kT, dt, tau, n_dof, rng):
+    """Velocity factor of one CSVR step of length dt (Bussi et al. 2007, eq. A7): the kinetic energy K
+    relaxes to n_dof kT/2 with time constant tau, with the noise that keeps the ensemble canonical."""
+    K = 0.5 * float((masses[:, None] * v ** 2).sum()) / ACC          # eV
+    if K <= 0.0:
+        return 1.0
+    K_target = 0.5 * n_dof * kT
+    c = np.exp(-dt / tau)
+    r1 = rng.standard_normal()
+    s = rng.chisquare(n_dof - 1) if n_dof > 1 else 0.0
+    K_new = (K + (1 - c) * (K_target / n_dof * (r1 ** 2 + s) - K)
+             + 2 * r1 * np.sqrt(c * (1 - c) * K_target / n_dof * K))
+    return float(np.sqrt(max(K_new, 0.0) / K))
+
+
 def _schedule_T(sched, t_frac):
     return float(sched[0]) if len(sched) == 1 else float(sched[0] + (sched[1] - sched[0]) * t_frac)
 
@@ -190,8 +214,12 @@ def run_md(ctx) -> dict:
         X[r], V[r] = P[0], Vw[0]
     ev = _evaluator(s)
     inv_m = (ACC / masses)[None, :, None]
+    csvr = s.md_thermostat == "csvr"
+    if s.md_thermostat not in ("csvr", "langevin"):
+        raise ValueError(f"md_thermostat {s.md_thermostat!r}: csvr or langevin")
     c1 = np.exp(-s.md_friction_fs * dt)
     c2 = np.sqrt(1 - c1 ** 2)
+    n_dof = 3 * n_at - 3                       # centre-of-mass momentum is removed
     active = np.ones(R, bool)
     stop_reason = [None] * R
     frames = [[] for _ in range(R)]
@@ -210,16 +238,24 @@ def run_md(ctx) -> dict:
         if not idx:
             break
         if step > 0:
-            for r in idx:                      # B A O A
-                V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
-                X[r] += 0.5 * dt * V[r]
+            for r in idx:
                 kT = KB_EV * _schedule_T(scheds[r], step / n_steps)
-                sig = np.sqrt(kT * ACC / masses)[:, None]
-                V[r] = c1 * V[r] + c2 * sig * rng.standard_normal((n_at, 3))
-                X[r] += 0.5 * dt * V[r]
+                if csvr:                       # O(dt/2) B A
+                    V[r] *= csvr_scale(V[r], masses, kT, 0.5 * dt, s.md_tau_fs, n_dof, rng)
+                    V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
+                    X[r] += dt * V[r]
+                else:                          # B A O A
+                    V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
+                    X[r] += 0.5 * dt * V[r]
+                    sig = np.sqrt(kT * ACC / masses)[:, None]
+                    V[r] = c1 * V[r] + c2 * sig * rng.standard_normal((n_at, 3))
+                    X[r] += 0.5 * dt * V[r]
             cur.update(forces(idx))
-            for r in idx:                      # B
+            for r in idx:                      # B (O(dt/2) for CSVR)
                 V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
+                if csvr:
+                    kT = KB_EV * _schedule_T(scheds[r], step / n_steps)
+                    V[r] *= csvr_scale(V[r], masses, kT, 0.5 * dt, s.md_tau_fs, n_dof, rng)
                 p = (masses[:, None] * V[r]).sum(axis=0) / masses.sum()
                 V[r] -= p                      # no centre-of-mass drift from the noise
         for r in idx:
@@ -246,7 +282,7 @@ def run_md(ctx) -> dict:
     per = {}
     for r, name in enumerate(names):
         if frames[r]:
-            _write_extxyz(out_dir / f"md_{name}.extxyz", symbols, frames[r])
+            _write_extxyz(out_dir / f"md_{name}.extxyz", symbols, frames[r], f"MACE-MH-1 {s.head}")
             lab = _label(evd, symbols, [fr["positions"] for fr in frames[r]])
             emb[f"md_{name}"] = np.stack([_element_means(symbols, d)[1] for _e, _f, d in lab])
         rmsd = [float(np.sqrt(((fr["positions"] - pos0) ** 2).sum(axis=1).mean())) for fr in frames[r]]
@@ -256,8 +292,10 @@ def run_md(ctx) -> dict:
     emb.setdefault("elements", np.array(sorted(set(symbols))))
     np.savez_compressed(out_dir / "embeddings.npz", **emb)
     _update_manifest(out_dir, {"md": {"schedule_K": scheds, "names": names, "ps": s.md_ps, "timestep_fs": dt,
-                                      "friction_fs": s.md_friction_fs, "stride_fs": s.md_stride_fs,
-                                      "skip_ps": s.md_skip_ps, "seed": s.md_seed, "thermostat": "Langevin BAOAB"}})
+                                      "friction_fs": s.md_friction_fs, "tau_fs": s.md_tau_fs, "stride_fs": s.md_stride_fs,
+                                      "skip_ps": s.md_skip_ps, "seed": s.md_seed,
+                                      "thermostat": ("CSVR (Bussi-Donadio-Parrinello), velocity Verlet" if csvr
+                                                     else "Langevin BAOAB")}})
     return {"summary": {"replicas": R, "frames": int(sum(len(f) for f in frames)), "steps": n_steps,
                         "timestep_fs": dt, "seconds_md": round(seconds_md, 1),
                         "ms_per_step": round(1e3 * seconds_md / max(n_steps, 1), 2),

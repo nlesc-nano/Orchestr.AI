@@ -128,6 +128,8 @@ class Settings:
                                                        [300.0, 1000.0], [300.0, 1000.0]])  # [T] or ramp [T0, T1]
     md_ps: float = 5.0                  # length of every replica
     md_timestep_fs: float = 2.0         # fs; the library's dots are heavy elements only
+    md_thermostat: str = "csvr"        # csvr (Bussi-Donadio-Parrinello velocity rescaling, canonical) | langevin (BAOAB)
+    md_tau_fs: float = 100.0            # CSVR coupling time
     md_friction_fs: float = 0.01        # Langevin friction (1/fs; 100 fs relaxation time)
     md_stride_fs: float = 100.0         # one stored frame every stride
     md_skip_ps: float = 0.5             # not stored at the start
@@ -179,7 +181,8 @@ class Settings:
             "wigner": {**mace, "temperatures": self.wigner_temperatures, "samples": self.wigner_samples,
                        "cutoff_cm": self.wigner_cutoff_cm, "soft_cm": self.wigner_soft_cm, "seed": self.wigner_seed},
             "md": {**mace, "enabled": self.md_enabled, "schedule": self.md_schedule, "ps": self.md_ps,
-                   "timestep_fs": self.md_timestep_fs, "friction_fs": self.md_friction_fs,
+                   "timestep_fs": self.md_timestep_fs, "thermostat": self.md_thermostat,
+                   "tau_fs": self.md_tau_fs, "friction_fs": self.md_friction_fs,
                    "stride_fs": self.md_stride_fs, "skip_ps": self.md_skip_ps, "max_force": self.md_max_force,
                    "seed": self.md_seed},
         }[step]
