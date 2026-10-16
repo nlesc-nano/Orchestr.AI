@@ -113,14 +113,15 @@ def _relax_task(args):
     return atoms.get_positions(), e, ok
 
 
-def _relax_batch(structures, settings, polish=False):
-    """[(positions, energy, converged), ...]: all structures relaxed together (batch_relax)."""
+def _relax_batch(structures, settings, polish=False, snapshots=()):
+    """[(positions, energy, converged, frames), ...]: all structures relaxed together (batch_relax);
+    frames: snapshots along each relaxation (batch_relax.relax_many(snapshots=...))."""
     from ..batch_relax import BatchMACE, relax_many
     calc = mace_calculator(settings.head, settings.model, settings.device, settings.dtype)
     kw = ({"fmax": POLISH_FMAX, "plateau_fmax": 0.05, "max_steps": POLISH_STEPS} if polish
           else {"fmax": QUICK_FMAX} if getattr(settings, "detach_quick", False) else {})
-    res = relax_many(structures, BatchMACE(calc, settings.relax_batch_atoms), **kw)
-    return [(r.positions, r.energy, r.converged) for r in res]
+    res = relax_many(structures, BatchMACE(calc, settings.relax_batch_atoms), snapshots=snapshots, **kw)
+    return [(r.positions, r.energy, r.converged, r.frames) for r in res]
 
 
 def _relax_batch_task(args):
@@ -214,6 +215,10 @@ class RelaxCache:
         # Optional random displacement of every candidate's starting geometry (reproducibility
         # tests of the search): seeded by detach_seed and the record directory, so copies of a
         # record in one job take different perturbations.
+        # Training frames off the minimum: snapshots along every candidate relaxation, spooled to
+        # disk as they come (an interrupted run keeps them) and selected by training_frames().
+        self.snapshots = tuple(s.detach_frames_fractions) if getattr(s, "detach_frames", False) else ()
+        self.spool = ctx.props / "ensemble" / "detach_spool.extxyz"
         self.perturb = float(getattr(s, "detach_perturb_A", 0.0) or 0.0)
         self.perturb_seed = f"{getattr(s, 'detach_seed', 0)}|{ctx.record_dir.name}"
         if self.perturb:
@@ -261,7 +266,7 @@ class RelaxCache:
             new = list(todo.values())
             if settings.relax_batch_atoms:
                 res = (self.worker.relax_many(new, settings, polish) if self.worker is not None
-                       else _relax_batch(new, settings, polish))
+                       else _relax_batch(new, settings, polish, () if polish else self.snapshots))
             else:
                 res = []
                 for sy, p in new:
@@ -271,9 +276,17 @@ class RelaxCache:
                         atoms, e, ok = (_relax(sy, p, settings, fmax=POLISH_FMAX, steps=POLISH_STEPS) if polish
                                         else _relax(sy, p, settings, fmax=_candidate_fmax(settings)))
                         res.append((atoms.get_positions(), e, ok))
-            for k, (pos, e, ok) in zip(todo, res):
+            spooled = []
+            for k, r in zip(todo, res):
+                pos, e, ok = r[:3]
                 self.data[k] = {"energy": float(e), "converged": bool(ok),
                                 "positions": np.asarray(pos).round(6).tolist()}
+                if len(r) > 3 and r[3]:
+                    sy = todo[k][0]
+                    final = geometry_key(sy, np.asarray(pos).round(6))
+                    spooled += [(sy, fr, k, final) for fr in r[3]]
+            if spooled:
+                self._spool(spooled)
             self._save()
             self.n_new += len(todo)
             _free_device_memory(settings)
@@ -283,6 +296,19 @@ class RelaxCache:
             out.append((Atoms(list(sy), positions=np.asarray(hit["positions"], float)),
                         float(hit["energy"]), bool(hit["converged"])))
         return out
+
+    def _spool(self, frames):
+        from ase import Atoms
+        from ase.io import write
+        self.spool.parent.mkdir(exist_ok=True)
+        out = []
+        for sy, fr, start, final in frames:
+            a = Atoms(list(sy), positions=np.asarray(fr["positions"], float))
+            a.arrays["forces"] = np.asarray(fr["forces"], float)
+            a.info.update({"energy": float(fr["energy"]), "fraction": fr["fraction"], "relax_step": fr["step"],
+                           "start_key": start.rsplit("|", 1)[-1], "final_key": final})
+            out.append(a)
+        write(str(self.spool), out, format="extxyz", append=True)
 
     def frequencies(self, symbols, pts, settings):
         key = f"freq|{self.tag}|{settings.hessian}|{geometry_key(symbols, pts)}"
@@ -833,6 +859,50 @@ def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble
 # Step
 # --------------------------------------------------------------------------
 
+def training_frames(ctx, settings, path, q, unit) -> dict:
+    """
+    props/ensemble/detach_relax.extxyz: frames off the minimum from the search, for the ML set.
+    Every candidate relaxation left snapshots in the spool (its start, right after the removal,
+    and the first steps that release detach_frames_fractions of its energy drop); kept are all
+    frames of the relaxations that made the best path and a seeded random subset of the others
+    (at most detach_frames_max_other). Energies and forces are exact MACE-MH-1 labels.
+    """
+    from ase.io import read
+    from .ensemble import _write_extxyz
+    spool = ctx.props / "ensemble" / "detach_spool.extxyz"
+    out = ctx.props / "ensemble" / "detach_relax.extxyz"
+    if not spool.is_file():
+        return {"frames": 0, "note": "no new candidate relaxations (all cached)" if not out.is_file()
+                else "kept the existing detach_relax.extxyz (all relaxations cached)"}
+    n0 = len(ctx.symbols)
+    on_path = {geometry_key(st.sym, st.pts): st.k for st in path}
+    frames, seen = [], set()
+    for a in read(str(spool), index=":"):
+        key = (a.info["start_key"], a.info["relax_step"])
+        if key in seen:                              # re-relaxed after an interruption
+            continue
+        seen.add(key)
+        frames.append({"symbols": a.get_chemical_symbols(), "positions": a.get_positions(),
+                       "forces": a.get_forces(), "energy": a.get_potential_energy(),
+                       "info": {"source": "detach_relax", "k": int(round((n0 - len(a)) / (q + 1))),
+                                "fraction": float(a.info["fraction"]), "relax_step": int(a.info["relax_step"]),
+                                "on_path": a.info["final_key"] in on_path}})
+    path_frames = [f for f in frames if f["info"]["on_path"]]
+    others = [f for f in frames if not f["info"]["on_path"]]
+    import hashlib
+    seed = hashlib.sha256(f"{settings.detach_seed}|{ctx.record_dir.name}".encode()).digest()
+    rng = np.random.default_rng(int.from_bytes(seed[:8], "little"))
+    if len(others) > settings.detach_frames_max_other:
+        pick = rng.choice(len(others), settings.detach_frames_max_other, replace=False)
+        others = [others[i] for i in sorted(pick)]
+    kept = sorted(path_frames + others, key=lambda f: (f["info"]["k"], not f["info"]["on_path"]))
+    _write_extxyz(out, None, kept, f"MACE-MH-1 {settings.head}")
+    spool.unlink()
+    return {"frames": len(kept), "on_path": len(path_frames), "other": len(others),
+            "candidates_spooled": len(frames), "fractions": list(settings.detach_frames_fractions),
+            "file": "ensemble/detach_relax.extxyz", "unit": unit}
+
+
 def _write_xyz(path, atoms_sym, atoms_pts, comment):
     p = np.asarray(atoms_pts, float)
     p = p - p.mean(axis=0)
@@ -943,6 +1013,7 @@ def run(ctx) -> dict:
                    f"best path, {st.k} {unit} removed, E - E_full = {st.energy:.6f} eV")
         prev_e, f_prev = st.energy, f_st
     cache.close()
+    frames = training_frames(ctx, s, path, q, unit) if getattr(s, "detach_frames", False) else None
 
     # Equilibrium <k>(T, dmu) over every evaluated configuration.
     mu = np.asarray(s.mu_grid, float)
@@ -1004,6 +1075,7 @@ def run(ctx) -> dict:
                         f"after {len(ladder)} of {m} units (detach_max_levels)" if s.detach_search == "greedy"
                         and s.detach_max_levels and len(ladder) >= s.detach_max_levels else "no unit left"),
             "thermo": bool(thermo_ok),
+            "training_frames": frames,
         },
         "site_classes": sites,
         "steps": ladder,

@@ -30,7 +30,7 @@ or when it stops without converging:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Sequence, Tuple
 
 import numpy as np
@@ -53,6 +53,7 @@ class RelaxResult:
     fmax: float
     steps: int
     reason: str           # fmax | plateau | stalled | max_steps
+    frames: list = field(default_factory=list)   # snapshots off the minimum (relax_many(snapshots=...))
 
     @property
     def converged(self) -> bool:
@@ -212,11 +213,13 @@ class _LBFGS:
 def relax_many(structures: Sequence[Tuple[Sequence[str], np.ndarray]], evaluator, *,
                fmax: float = FMAX, plateau_fmax: float = PLATEAU_FMAX, plateau_window: int = PLATEAU_WINDOW,
                plateau_de_atom: float = PLATEAU_DE_ATOM, stall_windows: int = STALL_WINDOWS,
-               max_steps: int = MAX_STEPS) -> List[RelaxResult]:
+               max_steps: int = MAX_STEPS, snapshots: Sequence[float] = ()) -> List[RelaxResult]:
     """
     Relax all `structures` together; each leaves the batch as soon as it converges
     (fmax or plateau) or stops (stalled, max_steps). `evaluator` maps a list of
     (symbols, positions) to [(energy, forces), ...], e.g. a BatchMACE.
+    snapshots: fractions of the energy each relaxation releases (0: its start) at which
+    positions, energy and forces are kept in RelaxResult.frames (training frames off the minimum).
     """
     n = len(structures)
     syms = [list(s) for s, _ in structures]
@@ -226,12 +229,15 @@ def relax_many(structures: Sequence[Tuple[Sequence[str], np.ndarray]], evaluator
     stalls = [0] * n
     done: List[RelaxResult] = [None] * n
     active = list(range(n))
+    traj = [[] for _ in range(n)] if snapshots else None
     step = 0
     while active:
         results = evaluator([(syms[i], pos[i]) for i in active])
         still = []
         for i, (e, f) in zip(active, results):
             fm = float(np.sqrt((f ** 2).sum(axis=1)).max())
+            if traj is not None:
+                traj[i].append((float(e), pos[i].astype(np.float32), np.asarray(f, np.float32)))
             h = hist[i]
             h.append(e)
             reason = None
@@ -249,13 +255,36 @@ def relax_many(structures: Sequence[Tuple[Sequence[str], np.ndarray]], evaluator
             if reason is None and step >= max_steps:
                 reason = "max_steps"
             if reason:
-                done[i] = RelaxResult(pos[i].copy(), e, fm, step, reason)
+                done[i] = RelaxResult(pos[i].copy(), e, fm, step, reason,
+                                      _snapshots(traj[i], snapshots) if traj is not None else [])
+                if traj is not None:
+                    traj[i] = None
                 continue
             pos[i] = pos[i] + opt[i].step(pos[i], f)
             still.append(i)
         active = still
         step += 1
     return done
+
+
+SNAPSHOT_MIN_DROP = 0.05   # eV: relaxations releasing less keep only their start
+
+
+def _snapshots(traj, fractions):
+    """Frames of one relaxation at the first step that releases each fraction of its energy drop."""
+    e0, e_end = traj[0][0], traj[-1][0]
+    drop = e0 - e_end
+    out, seen = [], set()
+    for frac in sorted(fractions):
+        if frac > 0 and drop < SNAPSHOT_MIN_DROP:
+            break
+        j = 0 if frac <= 0 else next(k for k, (e, _p, _f) in enumerate(traj) if e0 - e >= frac * drop)
+        if j in seen:
+            continue
+        seen.add(j)
+        e, p, f = traj[j]
+        out.append({"fraction": float(frac), "step": j, "energy": e, "positions": p, "forces": f})
+    return out
 
 
 def fd_hessian(symbols: Sequence[str], pts: np.ndarray, evaluator, delta: float = 0.01,

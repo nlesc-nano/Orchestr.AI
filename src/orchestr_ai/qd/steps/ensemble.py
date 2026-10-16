@@ -22,6 +22,12 @@ md      Short MD with MACE-MH-1 in the canonical ensemble: velocity Verlet with 
         than 10 A outside the starting structure). Frames every md_stride_fs after
         md_skip_ps carry their exact MACE energy and forces.
 
+detach_ensemble  Short MD (the same integrator) from states of the desorption ladder,
+        props/detach_<k>.xyz, with Maxwell-Boltzmann start velocities: the newly exposed,
+        reconstructed surfaces at finite temperature (props/ensemble/detach_md.extxyz).
+        The search itself leaves frames off the minimum (detach_relax.extxyz, see
+        detachment.training_frames).
+
 Every frame stores its positions, the MACE-MH-1 energy (eV, also per atom), forces (eV/A)
 and velocities where it has them (extxyz: info energy, energy_per_atom, label; arrays forces,
 vel_A_fs), so the files are a training set as written and DFT labels can be added beside them.
@@ -89,11 +95,11 @@ def _write_extxyz(path, symbols, frames, label="MACE-MH-1"):
     from ase.io import write
     out = []
     for fr in frames:
-        a = Atoms(symbols, positions=fr["positions"])
+        a = Atoms(fr.get("symbols", symbols), positions=fr["positions"])
         a.arrays["forces"] = np.asarray(fr["forces"], float)
         if fr.get("velocities") is not None:
             a.arrays["vel_A_fs"] = np.asarray(fr["velocities"], float)
-        a.info.update({"energy": float(fr["energy"]), "energy_per_atom": float(fr["energy"]) / len(symbols),
+        a.info.update({"energy": float(fr["energy"]), "energy_per_atom": float(fr["energy"]) / len(a),
                        "label": label, **fr.get("info", {})})
         out.append(a)
     write(str(path), out, format="extxyz")
@@ -186,6 +192,96 @@ def _schedule_T(sched, t_frac):
     return float(sched[0]) if len(sched) == 1 else float(sched[0] + (sched[1] - sched[0]) * t_frac)
 
 
+def maxwell_velocities(masses, T, rng):
+    """Velocities (A/fs) from the Maxwell-Boltzmann distribution at T, without centre-of-mass motion."""
+    v = rng.standard_normal((len(masses), 3)) * np.sqrt(KB_EV * T * ACC / masses)[:, None]
+    return v - (masses[:, None] * v).sum(axis=0) / masses.sum()
+
+
+def md_replicas(ev, systems, velocities, scheds, names, s, n_steps, skip, stride, rng, info=None):
+    """
+    Independent MD replicas in one batched model call per step, each with its own structure
+    (symbols, positions), start velocities and temperature schedule ([T] or [T0, T1]).
+    Velocity Verlet with CSVR (s.md_thermostat "csvr") or Langevin BAOAB ("langevin").
+    A replica stops when its forces exceed s.md_max_force or an atom leaves its start by more
+    than 10 A. Returns per replica the frames (every `stride` steps from step `skip`: positions,
+    velocities, exact energy and forces, info) and a summary.
+    """
+    if s.md_thermostat not in ("csvr", "langevin"):
+        raise ValueError(f"md_thermostat {s.md_thermostat!r}: csvr or langevin")
+    csvr = s.md_thermostat == "csvr"
+    dt = float(s.md_timestep_fs)
+    R = len(systems)
+    syms = [list(sy) for sy, _p in systems]
+    X = [np.asarray(p, float).copy() for _sy, p in systems]
+    V = [np.asarray(v, float).copy() for v in velocities]
+    M = [_masses(sy) for sy in syms]
+    inv_m = [(ACC / m)[:, None] for m in M]
+    n_dof = [3 * len(sy) - 3 for sy in syms]          # centre-of-mass momentum is removed
+    c1 = np.exp(-s.md_friction_fs * dt)
+    c2 = np.sqrt(1 - c1 ** 2)
+    centre0 = [x.mean(axis=0) for x in X]
+    radius0 = [float(np.linalg.norm(x - c, axis=1).max()) for x, c in zip(X, centre0)]
+    active = np.ones(R, bool)
+    stop_reason = [None] * R
+    frames = [[] for _ in range(R)]
+    T_sum, T_n = np.zeros(R), np.zeros(R)
+
+    def forces(idx):
+        return dict(zip(idx, ev([(syms[r], X[r]) for r in idx])))
+
+    cur = forces(list(range(R)))
+    for step in range(n_steps + 1):
+        idx = [r for r in range(R) if active[r]]
+        if not idx:
+            break
+        if step > 0:
+            for r in idx:
+                kT = KB_EV * _schedule_T(scheds[r], step / n_steps)
+                if csvr:                       # O(dt/2) B A
+                    V[r] *= csvr_scale(V[r], M[r], kT, 0.5 * dt, s.md_tau_fs, n_dof[r], rng)
+                    V[r] += 0.5 * dt * cur[r][1] * inv_m[r]
+                    X[r] += dt * V[r]
+                else:                          # B A O A
+                    V[r] += 0.5 * dt * cur[r][1] * inv_m[r]
+                    X[r] += 0.5 * dt * V[r]
+                    sig = np.sqrt(kT * ACC / M[r])[:, None]
+                    V[r] = c1 * V[r] + c2 * sig * rng.standard_normal(V[r].shape)
+                    X[r] += 0.5 * dt * V[r]
+            cur.update(forces(idx))
+            for r in idx:                      # B (O(dt/2) for CSVR)
+                V[r] += 0.5 * dt * cur[r][1] * inv_m[r]
+                if csvr:
+                    kT = KB_EV * _schedule_T(scheds[r], step / n_steps)
+                    V[r] *= csvr_scale(V[r], M[r], kT, 0.5 * dt, s.md_tau_fs, n_dof[r], rng)
+                V[r] -= (M[r][:, None] * V[r]).sum(axis=0) / M[r].sum()   # no centre-of-mass drift
+        for r in idx:
+            e, f = cur[r]
+            fmax = float(np.sqrt((f ** 2).sum(axis=1)).max())
+            far = float(np.linalg.norm(X[r] - centre0[r], axis=1).max())
+            if not np.isfinite(e) or fmax > s.md_max_force or far > radius0[r] + 10.0:
+                active[r] = False
+                stop_reason[r] = (f"step {step}: max |F| {fmax:.1f} eV/A" if fmax > s.md_max_force
+                                  else f"step {step}: atom {far - radius0[r]:.1f} A outside the start")
+                continue
+            T_inst = float((M[r][:, None] * V[r] ** 2).sum() / ACC / n_dof[r] / KB_EV)
+            if step >= skip:
+                T_sum[r] += T_inst
+                T_n[r] += 1
+                if (step - skip) % stride == 0:
+                    frames[r].append({"symbols": syms[r], "positions": X[r].copy(), "velocities": V[r].copy(),
+                                      "forces": f.copy(), "energy": e,
+                                      "info": {"time_fs": step * dt, "T_target_K": _schedule_T(scheds[r], step / n_steps),
+                                               "T_inst_K": T_inst, "replica": names[r], **((info or [{}] * R)[r])}})
+    summary = [{"schedule_K": scheds[r], "frames": len(frames[r]), "T_inst_mean_K": float(T_sum[r] / max(T_n[r], 1)),
+                "stopped": stop_reason[r]} for r in range(R)]
+    return frames, summary
+
+
+def _thermostat_name(s):
+    return "CSVR (Bussi-Donadio-Parrinello), velocity Verlet" if s.md_thermostat == "csvr" else "Langevin BAOAB"
+
+
 def run_md(ctx) -> dict:
     s = ctx.settings
     if not s.md_enabled:
@@ -194,7 +290,6 @@ def run_md(ctx) -> dict:
     out_dir.mkdir(exist_ok=True)
     symbols, pos0 = ctx.relaxed()
     symbols, pos0 = list(symbols), np.asarray(pos0, float)
-    n_at = len(symbols)
     masses = _masses(symbols)
     m = np.load(ctx.props / "modes.npz")
     freqs, modes = np.asarray(m["frequencies_cm1"], float), np.asarray(m["modes_mass_weighted"], float)
@@ -206,76 +301,14 @@ def run_md(ctx) -> dict:
     names = [f"{int(sc[0])}K" if len(sc) == 1 else f"ramp_{int(sc[0])}-{int(sc[1])}K" for sc in scheds]
     names = [n if names.count(n) == 1 else f"{n}_{k}" for k, n in enumerate(names)]
     rng = np.random.default_rng(s.md_seed)
-    R = len(scheds)
-    X = np.empty((R, n_at, 3))
-    V = np.empty((R, n_at, 3))
-    for r, sc in enumerate(scheds):
+    systems, vels = [], []
+    for sc in scheds:                          # replicas start from Wigner samples at their first temperature
         P, Vw = wigner_samples(pos0, masses, freqs, modes, sc[0], 1, rng, s.wigner_cutoff_cm, s.wigner_soft_cm)
-        X[r], V[r] = P[0], Vw[0]
-    ev = _evaluator(s)
-    inv_m = (ACC / masses)[None, :, None]
-    csvr = s.md_thermostat == "csvr"
-    if s.md_thermostat not in ("csvr", "langevin"):
-        raise ValueError(f"md_thermostat {s.md_thermostat!r}: csvr or langevin")
-    c1 = np.exp(-s.md_friction_fs * dt)
-    c2 = np.sqrt(1 - c1 ** 2)
-    n_dof = 3 * n_at - 3                       # centre-of-mass momentum is removed
-    active = np.ones(R, bool)
-    stop_reason = [None] * R
-    frames = [[] for _ in range(R)]
-    centre0, radius0 = pos0.mean(axis=0), np.linalg.norm(pos0 - pos0.mean(axis=0), axis=1).max()
-
-    def forces(idx):
-        res = ev([(symbols, X[r]) for r in idx])
-        return {r: (e, f) for r, (e, f) in zip(idx, res)}
-
+        systems.append((symbols, P[0]))
+        vels.append(Vw[0])
     t0 = time.time()
-    cur = forces(list(range(R)))
-    T_inst_sum = np.zeros(R)
-    n_inst = np.zeros(R)
-    for step in range(n_steps + 1):
-        idx = [r for r in range(R) if active[r]]
-        if not idx:
-            break
-        if step > 0:
-            for r in idx:
-                kT = KB_EV * _schedule_T(scheds[r], step / n_steps)
-                if csvr:                       # O(dt/2) B A
-                    V[r] *= csvr_scale(V[r], masses, kT, 0.5 * dt, s.md_tau_fs, n_dof, rng)
-                    V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
-                    X[r] += dt * V[r]
-                else:                          # B A O A
-                    V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
-                    X[r] += 0.5 * dt * V[r]
-                    sig = np.sqrt(kT * ACC / masses)[:, None]
-                    V[r] = c1 * V[r] + c2 * sig * rng.standard_normal((n_at, 3))
-                    X[r] += 0.5 * dt * V[r]
-            cur.update(forces(idx))
-            for r in idx:                      # B (O(dt/2) for CSVR)
-                V[r] += 0.5 * dt * cur[r][1] * inv_m[0]
-                if csvr:
-                    kT = KB_EV * _schedule_T(scheds[r], step / n_steps)
-                    V[r] *= csvr_scale(V[r], masses, kT, 0.5 * dt, s.md_tau_fs, n_dof, rng)
-                p = (masses[:, None] * V[r]).sum(axis=0) / masses.sum()
-                V[r] -= p                      # no centre-of-mass drift from the noise
-        for r in idx:
-            e, f = cur[r]
-            fmax = float(np.sqrt((f ** 2).sum(axis=1)).max())
-            far = float(np.linalg.norm(X[r] - centre0, axis=1).max())
-            if not np.isfinite(e) or fmax > s.md_max_force or far > radius0 + 10.0:
-                active[r] = False
-                stop_reason[r] = (f"step {step}: max |F| {fmax:.1f} eV/A" if fmax > s.md_max_force
-                                  else f"step {step}: atom {far - radius0:.1f} A outside the start")
-                continue
-            T_inst = float((masses[:, None] * V[r] ** 2).sum() / ACC / (3 * n_at - 3) / KB_EV)
-            if step >= skip:
-                T_inst_sum[r] += T_inst
-                n_inst[r] += 1
-            if step >= skip and (step - skip) % stride == 0:
-                frames[r].append({"positions": X[r].copy(), "velocities": V[r].copy(), "forces": f.copy(),
-                                  "energy": e, "info": {"time_fs": step * dt, "T_target_K":
-                                                        _schedule_T(scheds[r], step / n_steps),
-                                                        "T_inst_K": T_inst, "source": "md", "replica": names[r]}})
+    frames, summ = md_replicas(_evaluator(s), systems, vels, scheds, names, s, n_steps, skip, stride, rng,
+                               info=[{"source": "md"}] * len(scheds))
     seconds_md = time.time() - t0
     evd = _evaluator(s, descriptors=True)
     emb = dict(np.load(out_dir / "embeddings.npz")) if (out_dir / "embeddings.npz").is_file() else {}
@@ -286,18 +319,212 @@ def run_md(ctx) -> dict:
             lab = _label(evd, symbols, [fr["positions"] for fr in frames[r]])
             emb[f"md_{name}"] = np.stack([_element_means(symbols, d)[1] for _e, _f, d in lab])
         rmsd = [float(np.sqrt(((fr["positions"] - pos0) ** 2).sum(axis=1).mean())) for fr in frames[r]]
-        per[name] = {"schedule_K": scheds[r], "frames": len(frames[r]),
-                     "T_inst_mean_K": float(T_inst_sum[r] / max(n_inst[r], 1)),
-                     "rmsd_max_A": max(rmsd) if rmsd else None, "stopped": stop_reason[r]}
+        per[name] = {**summ[r], "rmsd_max_A": max(rmsd) if rmsd else None}
     emb.setdefault("elements", np.array(sorted(set(symbols))))
     np.savez_compressed(out_dir / "embeddings.npz", **emb)
     _update_manifest(out_dir, {"md": {"schedule_K": scheds, "names": names, "ps": s.md_ps, "timestep_fs": dt,
                                       "friction_fs": s.md_friction_fs, "tau_fs": s.md_tau_fs, "stride_fs": s.md_stride_fs,
-                                      "skip_ps": s.md_skip_ps, "seed": s.md_seed,
-                                      "thermostat": ("CSVR (Bussi-Donadio-Parrinello), velocity Verlet" if csvr
-                                                     else "Langevin BAOAB")}})
-    return {"summary": {"replicas": R, "frames": int(sum(len(f) for f in frames)), "steps": n_steps,
+                                      "skip_ps": s.md_skip_ps, "seed": s.md_seed, "thermostat": _thermostat_name(s)}})
+    return {"summary": {"replicas": len(scheds), "frames": int(sum(len(f) for f in frames)), "steps": n_steps,
                         "timestep_fs": dt, "seconds_md": round(seconds_md, 1),
                         "ms_per_step": round(1e3 * seconds_md / max(n_steps, 1), 2),
-                        "stopped": int(sum(x is not None for x in stop_reason))},
+                        "stopped": int(sum(x["stopped"] is not None for x in summ))},
             "replicas": per}
+
+
+def run_detach_ensemble(ctx) -> dict:
+    """
+    Training frames from the desorption ladder: short MD (md_replicas, CSVR) from the states
+    props/detach_<k>.xyz for k in detach_ensemble_levels (those the search reached; the last
+    state is always included), at each of detach_ensemble_temperatures, starting from
+    Maxwell-Boltzmann velocities at 2T (the ladder states have no Hessian; at a minimum half the
+    kinetic energy goes into the potential at once). Frames go to
+    props/ensemble/detach_md.extxyz; the per-element MACE descriptors of these frames and of the
+    search's detach_relax.extxyz go to embeddings.npz (detach_md, detach_relax).
+    """
+    from ase.io import read
+    s = ctx.settings
+    det = ctx.results.get("detachment", {})
+    ks = sorted(st["k"] for st in det.get("steps", []))
+    if not ks:
+        return {"summary": {"skipped": "no desorption ladder (detachment skipped or empty)"}}
+    levels = sorted({k for k in s.detach_ensemble_levels if k in ks} | {ks[-1]})
+    out_dir = ctx.props / "ensemble"
+    out_dir.mkdir(exist_ok=True)
+    dt = float(s.md_timestep_fs)
+    n_steps = int(round(s.detach_ensemble_ps * 1000 / dt))
+    stride = max(1, int(round(s.detach_ensemble_stride_fs / dt)))
+    skip = int(round(s.detach_ensemble_skip_ps * 1000 / dt))
+    rng = np.random.default_rng(s.md_seed + 1)
+    systems, vels, scheds, names, info = [], [], [], [], []
+    for k in levels:
+        a = read(ctx.props / f"detach_{k}.xyz")
+        sy, p = a.get_chemical_symbols(), a.get_positions()
+        for T in s.detach_ensemble_temperatures:
+            systems.append((sy, p))
+            # at 2T: starting at a minimum, equipartition moves half the kinetic energy into the potential
+            vels.append(maxwell_velocities(_masses(sy), 2.0 * T, rng))
+            scheds.append([float(T)])
+            names.append(f"k{k}_{int(T)}K")
+            info.append({"source": "detach_md", "k": int(k)})
+    t0 = time.time()
+    frames, summ = md_replicas(_evaluator(s), systems, vels, scheds, names, s, n_steps, skip, stride, rng, info)
+    seconds_md = time.time() - t0
+    flat = [fr for rep in frames for fr in rep]
+    label = f"MACE-MH-1 {s.head}"
+    if flat:
+        _write_extxyz(out_dir / "detach_md.extxyz", None, flat, label)
+    # rattled and strained copies of the same ladder states
+    starts = [(int(k), read(ctx.props / f"detach_{k}.xyz")) for k in levels]
+    rattled, n_rejected = rattle_strain([(k, a.get_chemical_symbols(), a.get_positions()) for k, a in starts], s, rng)
+    if rattled:
+        res = _evaluator(s)([(fr["symbols"], fr["positions"]) for fr in rattled])
+        keep = []
+        for fr, (e, f) in zip(rattled, res):
+            if np.isfinite(e) and float(np.sqrt((f ** 2).sum(axis=1)).max()) <= s.md_max_force:
+                keep.append({**fr, "energy": e, "forces": f})
+            else:
+                n_rejected += 1
+        rattled = keep
+        _write_extxyz(out_dir / "detach_rattle.extxyz", None, rattled, label)
+    # descriptors (per element averaged) of the ladder MD frames and of the search's relaxation frames
+    evd = _evaluator(s, descriptors=True)
+    emb = dict(np.load(out_dir / "embeddings.npz")) if (out_dir / "embeddings.npz").is_file() else {}
+    sets = {"detach_md": [(fr["symbols"], fr["positions"]) for fr in flat],
+            "detach_rattle": [(fr["symbols"], fr["positions"]) for fr in rattled]}
+    relax_file = out_dir / "detach_relax.extxyz"
+    if relax_file.is_file():
+        sets["detach_relax"] = [(x.get_chemical_symbols(), x.get_positions()) for x in read(relax_file, index=":")]
+    els = sorted(set(ctx.symbols))
+    for key, structs in sets.items():
+        if structs:
+            labels = evd(structs)
+            emb[key] = np.stack([_element_means_fixed(sy, d, els) for (sy, _p), (_e, _f, d) in zip(structs, labels)])
+    emb.setdefault("elements", np.array(els))
+    np.savez_compressed(out_dir / "embeddings.npz", **emb)
+    _update_manifest(out_dir, {"detach_ensemble": {"levels": levels, "temperatures_K": list(map(float, s.detach_ensemble_temperatures)),
+                                                   "ps": s.detach_ensemble_ps, "skip_ps": s.detach_ensemble_skip_ps,
+                                                   "stride_fs": s.detach_ensemble_stride_fs, "timestep_fs": dt,
+                                                   "tau_fs": s.md_tau_fs, "thermostat": _thermostat_name(s),
+                                                   "start_velocities": "Maxwell-Boltzmann at 2T (from a minimum)",
+                                                   "rattle_sigmas_A": list(s.detach_rattle_sigmas), "rattle_n": s.detach_rattle_n,
+                                                   "strains": list(s.detach_strains), "strain_n": s.detach_strain_n}})
+    return {"summary": {"levels": levels, "replicas": len(systems), "frames_md": len(flat),
+                        "frames_rattle": len(rattled), "rattle_rejected": n_rejected,
+                        "frames_relax": len(sets.get("detach_relax", [])), "seconds_md": round(seconds_md, 1),
+                        "stopped": int(sum(x["stopped"] is not None for x in summ))},
+            "replicas": dict(zip(names, summ))}
+
+
+def _min_distance(pts):
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree(pts).query(pts, k=2)
+    return float(d[:, 1].min())
+
+
+def rattle_strain(states, s, rng, tries=20):
+    """
+    Rattled and strained copies of structures [(k, symbols, positions)]: s.detach_rattle_n copies per
+    Gaussian width in s.detach_rattle_sigmas (independent displacements of every atom, sigma per
+    Cartesian component), and s.detach_strain_n copies per uniform strain in s.detach_strains (the
+    structure scaled about its centroid, then rattled by RATTLE_ON_STRAIN). A copy whose shortest
+    interatomic distance falls below s.detach_rattle_min_frac of the original's is drawn again (up to
+    `tries` times, then dropped). Returns the frames (without labels) and the number dropped.
+    """
+    out, dropped = [], 0
+    for k, sym, pts in states:
+        pts = np.asarray(pts, float)
+        d_min = s.detach_rattle_min_frac * _min_distance(pts)
+        c = pts.mean(axis=0)
+        jobs = ([("rattle", sg, 0.0) for sg in s.detach_rattle_sigmas for _ in range(s.detach_rattle_n)] +
+                [("strain", RATTLE_ON_STRAIN, eps) for eps in s.detach_strains for _ in range(s.detach_strain_n)])
+        for kind, sg, eps in jobs:
+            base = c + (pts - c) * (1.0 + eps)
+            for _ in range(tries):
+                p = base + rng.normal(0.0, sg, pts.shape)
+                if _min_distance(p) >= d_min:
+                    out.append({"symbols": list(sym), "positions": p,
+                                "info": {"source": f"detach_{kind}", "k": int(k), "sigma_A": float(sg), "strain": float(eps)}})
+                    break
+            else:
+                dropped += 1
+    return out, dropped
+
+
+RATTLE_ON_STRAIN = 0.02     # A, displacements on top of a uniform strain
+
+
+def run_monomer_ensemble(ctx) -> dict:
+    """
+    Training frames of the free monomers of props/monomers.xyz (the MA diatomic and the Z-type MX_q,
+    MACE geometries from the stability step): the MA bond and the M-X bonds of MX_q scanned
+    (monomer_scan factors of the equilibrium length; for MX_q also one bond alone, its dissociation),
+    rattled copies of MX_q (monomer_rattle_sigmas) and short CSVR MD of MX_q at
+    monomer_md_temperatures. The seed comes from the formula, so every record of a material writes
+    the same frames (deduplicated when the set is assembled): props/ensemble/monomers.extxyz.
+    """
+    import hashlib
+    from ase.io import read
+    s = ctx.settings
+    path = ctx.props / "monomers.xyz"
+    if not path.is_file():
+        return {"summary": {"skipped": "no props/monomers.xyz (stability step)"}}
+    out_dir = ctx.props / "ensemble"
+    out_dir.mkdir(exist_ok=True)
+    frames = []
+    counts = {}
+    for mol in read(path, index=":"):
+        sym, pts = mol.get_chemical_symbols(), mol.get_positions()
+        formula = mol.get_chemical_formula()
+        rng = np.random.default_rng(int.from_bytes(hashlib.sha256(f"{s.md_seed}|{formula}".encode()).digest()[:8], "little"))
+        m_idx = 0 if len(sym) == 2 else _centre_atom(pts)
+        mine = []
+        others = [i for i in range(len(sym)) if i != m_idx]
+        for f_ in s.monomer_scan:                       # all bonds together
+            p = pts.copy()
+            p[others] = pts[m_idx] + (pts[others] - pts[m_idx]) * f_
+            mine.append({"positions": p, "info": {"source": "monomer_scan", "scale": float(f_), "bonds": "all"}})
+        if len(others) > 1:                              # one bond alone: dissociation of MX_q
+            for f_ in s.monomer_scan:
+                if f_ > 1.0:
+                    p = pts.copy()
+                    p[others[0]] = pts[m_idx] + (pts[others[0]] - pts[m_idx]) * f_
+                    mine.append({"positions": p, "info": {"source": "monomer_scan", "scale": float(f_), "bonds": "one"}})
+            for sg in s.monomer_rattle_sigmas:
+                for _ in range(s.monomer_rattle_n):
+                    mine.append({"positions": pts + rng.normal(0.0, sg, pts.shape),
+                                 "info": {"source": "monomer_rattle", "sigma_A": float(sg)}})
+        res = _evaluator(s)([(sym, fr["positions"]) for fr in mine])
+        for fr, (e, f) in zip(mine, res):
+            fr.update({"symbols": sym, "energy": e, "forces": f, "info": {**fr["info"], "monomer": formula}})
+        if len(others) > 1 and s.monomer_md_temperatures:  # MD of MX_q (a diatomic has no internal motion to sample)
+            dt = float(s.md_timestep_fs)
+            n_steps = int(round(s.detach_ensemble_ps * 1000 / dt))
+            stride = max(1, int(round(s.detach_ensemble_stride_fs / dt)))
+            skip = int(round(s.detach_ensemble_skip_ps * 1000 / dt))
+            temps = list(s.monomer_md_temperatures)
+            md_frames, _summ = md_replicas(_evaluator(s), [(sym, pts)] * len(temps),
+                                           [maxwell_velocities(_masses(sym), 2.0 * T, rng) for T in temps],
+                                           [[float(T)] for T in temps], [f"{formula}_{int(T)}K" for T in temps],
+                                           s, n_steps, skip, stride, rng,
+                                           [{"source": "monomer_md", "monomer": formula}] * len(temps))
+            mine += [fr for rep in md_frames for fr in rep]
+        counts[formula] = len(mine)
+        frames += mine
+    _write_extxyz(out_dir / "monomers.extxyz", None, frames, f"MACE-MH-1 {s.head}")
+    _update_manifest(out_dir, {"monomers": {"scan": list(s.monomer_scan), "rattle_sigmas_A": list(s.monomer_rattle_sigmas),
+                                            "rattle_n": s.monomer_rattle_n,
+                                            "md_temperatures_K": list(map(float, s.monomer_md_temperatures))}})
+    return {"summary": {"frames": len(frames), "per_monomer": counts}}
+
+
+def _centre_atom(pts):
+    """Index of the atom nearest the centroid (the cation of MX_q)."""
+    return int(np.argmin(np.linalg.norm(pts - pts.mean(axis=0), axis=1)))
+
+
+def _element_means_fixed(symbols, desc, elements):
+    """Per-element mean descriptor on a fixed element list (NaN for an element the frame lacks)."""
+    sym = np.asarray(symbols)
+    return np.stack([desc[sym == e].mean(axis=0) if np.any(sym == e) else np.full(desc.shape[1], np.nan)
+                     for e in elements]).astype(np.float16)

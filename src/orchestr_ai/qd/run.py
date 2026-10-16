@@ -53,6 +53,7 @@ DEPS = {
     "sites": ["relax", "structure", "hessian", "detachment", "solvation", "field"],
     "report": ["relax", "structure", "hessian", "vibspec", "stability", "detachment", "solvation", "sites"],
     "wigner": ["relax", "structure", "hessian"], "md": ["relax", "hessian", "wigner"],
+    "detach_ensemble": ["detachment"], "monomer_ensemble": ["stability"],
 }
 # Source files whose content enters a step's cache key (engine versions are in the provenance).
 CODE_DEPS = {
@@ -62,7 +63,8 @@ CODE_DEPS = {
     "electronic": ["steps/electronic.py"], "stability": ["steps/stability.py", "references.py"],
     "detachment": ["steps/detachment.py", "references.py"], "solvation": ["steps/solvation.py"], "sites": ["steps/sites.py"],
     "report": ["steps/report.py", "steps/vibplots.py", "bulk.py", "solution.py", "dashboards.py"],
-    "wigner": ["steps/ensemble.py"], "md": ["steps/ensemble.py"],
+    "wigner": ["steps/ensemble.py"], "md": ["steps/ensemble.py"], "detach_ensemble": ["steps/ensemble.py"],
+    "monomer_ensemble": ["steps/ensemble.py"],
 }
 FORMAL_CHARGES = {
     "Cd": 2, "Zn": 2, "Pb": 2, "Hg": 2, "In": 3, "Ga": 3, "Al": 3, "Cs": 1, "Rb": 1,
@@ -109,6 +111,25 @@ class Settings:
     detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
     detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
+    # training frames from the desorption search and its ladder (ML set)
+    detach_frames: bool = True          # snapshots along every candidate relaxation (props/ensemble/detach_relax.extxyz)
+    detach_frames_fractions: List[float] = field(default_factory=lambda: [0.0, 0.25, 0.5, 0.75])  # of the energy released
+    detach_frames_max_other: int = 100  # frames kept from candidates off the best path (all of the path's are kept)
+    detach_ensemble_levels: List[int] = field(default_factory=lambda: [1, 4, 8, 12])  # ladder states run in MD (+ the last)
+    detach_ensemble_temperatures: List[float] = field(default_factory=lambda: [300.0, 600.0])
+    detach_ensemble_ps: float = 1.0
+    detach_ensemble_skip_ps: float = 0.2
+    detach_ensemble_stride_fs: float = 100.0
+    detach_rattle_sigmas: List[float] = field(default_factory=lambda: [0.01, 0.03, 0.05, 0.1, 0.2])  # A, Gaussian widths
+    detach_rattle_n: int = 4            # rattled copies per width and ladder state
+    detach_strains: List[float] = field(default_factory=lambda: [-0.03, -0.015, 0.015, 0.03])  # uniform, about the centroid
+    detach_strain_n: int = 2            # strained copies per strain and ladder state
+    detach_rattle_min_frac: float = 0.7  # copies with an interatomic distance below this x the shortest one are redrawn
+    # free monomers (MA, MX_q) for the ML set (monomer_ensemble)
+    monomer_scan: List[float] = field(default_factory=lambda: [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2, 1.3, 1.5, 1.8, 2.2])
+    monomer_rattle_sigmas: List[float] = field(default_factory=lambda: [0.02, 0.05, 0.1, 0.2])
+    monomer_rattle_n: int = 5
+    monomer_md_temperatures: List[float] = field(default_factory=lambda: [300.0, 600.0, 1000.0])
     relax_batch_atoms: int = 4000       # desorption candidates relaxed together, at most this many atoms per
                                         # MACE call (batched L-BFGS, see batch_relax); 0: one at a time (ASE BFGS).
                                         # MACE-MH-1 in float64 needs 11.4 MB per atom (A100 benchmark): 4,000 atoms (46 GB)
@@ -124,8 +145,7 @@ class Settings:
     wigner_soft_cm: float = 50.0        # modes below are sampled with the width of a mode at this frequency
     wigner_seed: int = 0
     md_enabled: bool = False            # MD runs on a subset of the library: switch on per job
-    md_schedule: List = field(default_factory=lambda: [[300.0], [400.0], [500.0], [600.0],
-                                                       [300.0, 1000.0], [300.0, 1000.0]])  # [T] or ramp [T0, T1]
+    md_schedule: List = field(default_factory=lambda: [[300.0], [300.0, 1000.0]])  # [T] or ramp [T0, T1]: one replica each
     md_ps: float = 5.0                  # length of every replica
     md_timestep_fs: float = 2.0         # fs; the library's dots are heavy elements only
     md_thermostat: str = "csvr"        # csvr (Bussi-Donadio-Parrinello velocity rescaling, canonical) | langevin (BAOAB)
@@ -172,6 +192,8 @@ class Settings:
                            "max_atoms": self.detach_max_atoms,
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),
+                           **({"frames": [self.detach_frames_fractions, self.detach_frames_max_other]}
+                              if self.detach_frames else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
                            "temperatures": self.temperatures},
             "solvation": {"charges": self.solvation_charges, "method": self.xtb_method, "gxtb_max_atoms": self.gxtb_max_atoms, "checks": self.solvation_checks},
@@ -185,6 +207,18 @@ class Settings:
                    "tau_fs": self.md_tau_fs, "friction_fs": self.md_friction_fs,
                    "stride_fs": self.md_stride_fs, "skip_ps": self.md_skip_ps, "max_force": self.md_max_force,
                    "seed": self.md_seed},
+            "detach_ensemble": {**mace, "levels": self.detach_ensemble_levels, "temperatures": self.detach_ensemble_temperatures,
+                                "ps": self.detach_ensemble_ps, "skip_ps": self.detach_ensemble_skip_ps,
+                                "stride_fs": self.detach_ensemble_stride_fs, "timestep_fs": self.md_timestep_fs,
+                                "thermostat": self.md_thermostat, "tau_fs": self.md_tau_fs, "friction_fs": self.md_friction_fs,
+                                "max_force": self.md_max_force, "seed": self.md_seed,
+                                "rattle": [self.detach_rattle_sigmas, self.detach_rattle_n, self.detach_strains,
+                                           self.detach_strain_n, self.detach_rattle_min_frac]},
+            "monomer_ensemble": {**mace, "scan": self.monomer_scan, "rattle": [self.monomer_rattle_sigmas, self.monomer_rattle_n],
+                                 "temperatures": self.monomer_md_temperatures, "ps": self.detach_ensemble_ps,
+                                 "skip_ps": self.detach_ensemble_skip_ps, "stride_fs": self.detach_ensemble_stride_fs,
+                                 "timestep_fs": self.md_timestep_fs, "thermostat": self.md_thermostat,
+                                 "tau_fs": self.md_tau_fs, "max_force": self.md_max_force, "seed": self.md_seed},
         }[step]
 
 
@@ -294,7 +328,8 @@ def run_record(record_dir: Path, steps: Sequence[str] = STEPS, settings: Optiona
     """
     from .steps import (detachment, dft_field, electronic, ensemble, hessian, relax, report, sites, solvation, stability,
                         structure, vibspec)
-    impl = {"wigner": ensemble.run_wigner, "md": ensemble.run_md,
+    impl = {"wigner": ensemble.run_wigner, "md": ensemble.run_md, "detach_ensemble": ensemble.run_detach_ensemble,
+            "monomer_ensemble": ensemble.run_monomer_ensemble,
             "relax": relax.run, "structure": structure.run, "hessian": hessian.run, "vibspec": vibspec.run,
             "field": dft_field.run,
             "electronic": electronic.run, "stability": stability.run, "detachment": detachment.run,
