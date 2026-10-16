@@ -40,7 +40,7 @@ def main(argv=None) -> int:
         p.add_argument("--device", default="auto", help="auto (CUDA GPU, else Apple GPU, else CPU), cuda, mps or cpu")
         p.add_argument("--dtype", default="float64")
         p.add_argument("--fmax", type=float, default=Settings.fmax)
-        p.add_argument("--hessian", choices=("auto", "analytic", "fd"), default="auto")
+        p.add_argument("--hessian", choices=("fd", "analytic", "auto"), default=Settings.hessian)
         p.add_argument("--no-ip-ea", action="store_true", help="skip the charged xtb single points")
         p.add_argument("--solvation-checks", action="store_true",
                        help="also compute ddCOSMO (eps 2.4, 80) and ALPB solvation per structure, as checks")

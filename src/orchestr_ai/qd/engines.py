@@ -208,12 +208,55 @@ def sync_device(device: str) -> None:
         torch.cuda.synchronize()
 
 
+HESSIAN_CHUNK_MAX = 512     # Hessian rows per backward pass (vmap), halved while the GPU runs out of memory
+
+
+def _patch_mace_hessian() -> None:
+    """
+    MACE 0.3.16 back-propagates the Hessian rows 16 at a time (a full backward pass per chunk) and,
+    on any RuntimeError (an out-of-memory chunk of a large dot), silently falls back to one row per
+    pass. Replace it: the largest chunk that fits, from HESSIAN_CHUNK_MAX down by halving, the
+    row-by-row loop only if a single row does not fit.
+    """
+    import torch
+    from mace.modules import utils as mu
+    if getattr(mu.compute_hessians_vmap, "_qdprops", False):
+        return
+
+    @torch.jit.unused
+    def compute_hessians_vmap(forces, positions):
+        flat = forces.view(-1)
+        n = flat.shape[0]
+
+        def vjp(v):
+            return torch.autograd.grad(-1 * flat, positions, v, retain_graph=True, create_graph=False,
+                                       allow_unused=False)
+
+        eye = torch.eye(n, dtype=flat.dtype, device=forces.device)
+        chunk = min(n, HESSIAN_CHUNK_MAX)
+        while True:
+            try:
+                return torch.vmap(vjp, in_dims=0, out_dims=0, chunk_size=chunk)(eye)[0]
+            except torch.cuda.OutOfMemoryError:
+                if chunk == 1:
+                    break
+                chunk = max(1, chunk // 2)
+                torch.cuda.empty_cache()
+            except RuntimeError:          # no batching rule (cuEquivariance kernels): one row per pass
+                break
+        return mu.compute_hessians_loop(forces, positions)
+
+    compute_hessians_vmap._qdprops = True
+    mu.compute_hessians_vmap = compute_hessians_vmap
+
+
 def mace_hessian(atoms, calc) -> np.ndarray:
     """Analytic (autograd) Cartesian Hessian d2E/dx2 in eV/Å², shape (3N, 3N).
 
     MACE back-propagates 16 rows at once (vmap); when that does not fit on the GPU
     (thousands of atoms) the rows are done one at a time on the same force graph."""
     n = len(atoms)
+    _patch_mace_hessian()
     try:
         h = np.asarray(calc.get_hessian(atoms=atoms), float)
     except Exception as exc:

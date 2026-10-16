@@ -80,8 +80,11 @@ class Settings:
     fmax: float = 0.01               # eV/Å, relaxation convergence
     max_steps: int = 2000
     relax_bfgs_max_atoms: int = 500  # BFGS up to here, L-BFGS above (BFGS is O(N^3) per step on the CPU)
-    hessian: str = "auto"            # auto | analytic | fd
-    analytic_max_atoms: int = 2000   # autograd Hessian up to here (43 min on an A100 at 2000); FD above
+    hessian: str = "fd"              # fd | analytic | auto. FD: batched central differences, displaced copies share
+                                     # the reference graph; 3-3.5x faster than the autograd Hessian (which runs one
+                                     # row per pass: cuEquivariance has no vmap rule) and within 0.03 cm-1 of it
+                                     # (A100 benchmark, 141-1946 atoms: 7 s to 12 min)
+    analytic_max_atoms: int = 2000   # auto: autograd Hessian up to here, FD above
     hessian_max_atoms: int = 2000    # larger dots: relax, structure and single points only (no Hessian or its dependents)
     fd_step: float = 0.01            # Å
     temperatures: List[float] = field(default_factory=lambda: [float(t) for t in range(50, 801, 25)])

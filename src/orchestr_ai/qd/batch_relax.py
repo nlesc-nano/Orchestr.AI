@@ -83,10 +83,35 @@ class BatchMACE:
             return mace_data.AtomicData.from_config(config, z_table=c.z_table, cutoff=c.r_max,
                                                     heads=c.available_heads)
 
+    def _as_graph(self, item):
+        """A (symbols, positions) pair becomes a graph (neighbour list on the CPU); a graph is used as given."""
+        return self._graph(*item) if isinstance(item, tuple) else item
+
+    @staticmethod
+    def _size(item) -> int:
+        return len(item[0]) if isinstance(item, tuple) else int(item.positions.shape[0])
+
+    def displaced(self, symbols, pos0, displacements):
+        """
+        [(energy, forces), ...] of copies of one structure displaced by `displacements` (each (N, 3), Å),
+        all on the graph of pos0: the neighbour list is built once. A finite-difference step of
+        0.01 Å can only move edges across the cutoff, where MACE's smooth envelope makes their
+        contribution vanish; the periodic shifts do not depend on the positions.
+        """
+        import copy
+        import torch
+        ref = self._graph(symbols, np.asarray(pos0, float))
+        graphs = []
+        for d in displacements:
+            g = copy.copy(ref)
+            g.positions = ref.positions + torch.as_tensor(np.asarray(d, float), dtype=ref.positions.dtype)
+            graphs.append(g)
+        return self(graphs)
+
     def _chunk(self, structures):
         import torch
         from mace.tools import torch_geometric
-        batch = torch_geometric.Batch.from_data_list([self._graph(s, p) for s, p in structures]).to(self.calc.device)
+        batch = torch_geometric.Batch.from_data_list([self._as_graph(x) for x in structures]).to(self.calc.device)
         dtype = next(self.model.parameters()).dtype
         for key in batch.keys:
             value = batch[key]
@@ -97,7 +122,7 @@ class BatchMACE:
         e = out["energy"].detach().cpu().numpy().astype(float) * self.calc.energy_units_to_eV
         f = out["forces"].detach().cpu().numpy().astype(float) * (
             self.calc.energy_units_to_eV / self.calc.length_units_to_A)
-        sizes = [len(s) for s, _ in structures]
+        sizes = [self._size(x) for x in structures]
         bounds = list(zip(np.cumsum([0] + sizes[:-1]), np.cumsum(sizes)))
         if not self.descriptors:
             return [(float(e[i]), f[a:b]) for i, (a, b) in enumerate(bounds)]
@@ -129,18 +154,20 @@ class BatchMACE:
         gc.collect()
         torch.cuda.empty_cache()
         half = len(chunk) // 2
-        self.max_atoms = max(1, min(self.max_atoms, sum(len(s) for s, _ in chunk[:half])))
+        self.max_atoms = max(1, min(self.max_atoms, sum(self._size(x) for x in chunk[:half])))
         self.n_oom += 1
         return self._safe_chunk(chunk[:half]) + self._safe_chunk(chunk[half:])
 
-    def __call__(self, structures: Sequence[Tuple[Sequence[str], np.ndarray]]):
+    def __call__(self, structures: Sequence):
+        """Structures as (symbols, positions) pairs or prebuilt graphs (see displaced)."""
         out, chunk, n = [], [], 0
-        for s, p in structures:
-            if chunk and n + len(s) > self.max_atoms:
+        for item in structures:
+            size = self._size(item)
+            if chunk and n + size > self.max_atoms:
                 out += self._safe_chunk(chunk)
                 chunk, n = [], 0
-            chunk.append((s, p))
-            n += len(s)
+            chunk.append(item)
+            n += size
         if chunk:
             out += self._safe_chunk(chunk)
         return out
@@ -249,14 +276,17 @@ def fd_hessian(symbols: Sequence[str], pts: np.ndarray, evaluator, delta: float 
     block = per_call * 8
     for b in range(0, len(cols), block):
         ks = cols[b:b + block]
-        structures = []
+        disp = []
         for k in ks:
             i, a = divmod(k, 3)
             for sgn in (1.0, -1.0):
-                p = pos0.copy()
-                p[i, a] += sgn * delta
-                structures.append((symbols, p))
-        res = evaluator(structures)
+                d = np.zeros((n, 3))
+                d[i, a] = sgn * delta
+                disp.append(d)
+        if hasattr(evaluator, "displaced"):      # one neighbour list for all copies
+            res = evaluator.displaced(symbols, pos0, disp)
+        else:
+            res = evaluator([(symbols, pos0 + d) for d in disp])
         for j, k in enumerate(ks):
             h[:, k] = -(res[2 * j][1].ravel() - res[2 * j + 1][1].ravel()) / (2.0 * delta)
     return h
