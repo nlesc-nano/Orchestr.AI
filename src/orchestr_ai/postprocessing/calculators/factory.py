@@ -15,6 +15,49 @@ def normalize_framework(framework: str | None) -> str:
     return framework
 
 
+_DTYPES = {"float32": "float32", "fp32": "float32", "single": "float32",
+           "float64": "float64", "fp64": "float64", "double": "float64"}
+
+
+def resolve_dtype(config: dict) -> str:
+    """Precision of every postprocessing run_type: config "default_dtype" (or "default_precision"); if unset, float64
+    for GEO_OPT and float32 for the other run_types."""
+    value = config.get("default_dtype") or config.get("default_precision")
+    if not value:
+        return "float64" if str(config.get("run_type", "")).strip().upper() == "GEO_OPT" else "float32"
+    try:
+        return _DTYPES[str(value).strip().lower()]
+    except KeyError:
+        raise ValueError(f"default_dtype must be float32 or float64, got {value!r}") from None
+
+
+def load_model(model_path: str, framework: str, device, config: dict):
+    """
+    Load a model for postprocessing at the configured precision (resolve_dtype).
+
+    Also sets torch's default dtype, because the calculators build their input tensors in it; every process that
+    runs a model (including each spawned EVAL worker) loads it through here. NequIP/Allegro: returns the path,
+    their calculator loads the compiled model in its own precision. The SchNetPack calculator runs in float32.
+    """
+    import torch
+
+    dtype = resolve_dtype(config)
+    framework = normalize_framework(framework)
+    if framework == "nequip":
+        return model_path
+    if dtype == "float64" and framework != "mace":
+        print(f"[load_model] WARNING: default_dtype float64 is only supported for MACE; the {framework} calculator runs in float32")
+    torch.set_default_dtype(getattr(torch, dtype))
+    model = torch.load(model_path, map_location=device, weights_only=False)
+    try:
+        model = model.to(device=device, dtype=getattr(torch, dtype))
+    except Exception as exc:  # e.g. scripted models that cannot be cast
+        print(f"[load_model] WARNING: could not cast {model_path} to {dtype} ({exc}); using it as stored")
+        model = model.to(device=device)
+    model.eval()
+    return model
+
+
 def create_calculator(
     framework: str,
     model_obj,

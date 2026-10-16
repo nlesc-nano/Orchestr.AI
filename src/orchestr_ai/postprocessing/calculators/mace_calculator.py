@@ -138,11 +138,23 @@ class MaceCalculator(BaseCalculator):
         return batch
 
     def forward(self, inputs, n_atoms_list):
+        data = inputs.to_dict()
         with torch.set_grad_enabled(True):
-            results = self.model(inputs.to_dict())
+            results = self.model(data)
+
+        energy = results["energy"]
+        if energy.dtype == torch.float32 and results.get("interaction_energy") is not None:
+            # float32 holds the sum of the isolated-atom energies (~1e5 eV for a few hundred atoms) only to ~0.1 eV, with
+            # a rounding that depends on the frame's slot in the batch: add the E0s in float64 to the interaction energy
+            e0 = torch.atleast_2d(self.model.atomic_energies_fn.atomic_energies).double()      # [heads, elements]
+            head = data.get("head")
+            head = torch.zeros(len(n_atoms_list), dtype=torch.long, device=e0.device) if head is None else head
+            node_e0 = (data["node_attrs"].double() @ e0.T)[torch.arange(len(data["batch"]), device=e0.device),
+                                                          head[data["batch"]]]
+            energy = results["interaction_energy"].double().index_add(0, data["batch"], node_e0)
 
         energies_np = (
-            results["energy"]
+            energy
             .detach()
             .cpu()
             .numpy()

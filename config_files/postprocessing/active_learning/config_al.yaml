@@ -3,6 +3,7 @@
 # --- 1. Model & System Settings ---
 model_framework: "nequip" # Options: "schnetpack", "mace", "nequip"
 model_path: "./models/best_model6.nequip.pth"
+default_dtype: "float32" # Model/inference precision: "float32" or "float64" (float64: MACE only); unset: float64 for GEO_OPT, float32 otherwise
 mace_head: singlet # Options: "singlet", "triplet", "triplet_reconstructed"
 scale_metadata_path: "mace_scale_metadata.json" # Required only when mace_head is triplet_reconstructed
 cutoff: 12.0
@@ -17,7 +18,8 @@ eval:
   multi_gpu_chunk_strategy: "atom_balanced" # balances GPU chunks by estimated atom-count cost
   uncertainty: ["ensemble"]
   ensemble_folder: "./models"
-  ensemble_size: 10
+  ensemble_size: 10 # 1 = single-model mode (e.g. a foundation model before fine-tuning): no ensemble sigma, so pool AL
+                    # needs al_quality: pv and picks budget_max frames among those passing the geometry and force checks
   al_multihead_mode: "dual_head_or" # Options: "reconstructed" (Option A), "dual_head_or" (Option B)
 
   mace_heads:

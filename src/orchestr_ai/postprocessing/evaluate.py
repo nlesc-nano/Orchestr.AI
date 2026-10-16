@@ -29,7 +29,7 @@ from orchestr_ai.postprocessing.parsing import parse_extxyz, save_stacked_xyz_sc
 from orchestr_ai.postprocessing.calculator import evaluate_model
 from orchestr_ai.postprocessing.stats import MLFFStats
 from orchestr_ai.postprocessing.features import al_feature_space, al_options, compute_features, member_features
-from orchestr_ai.postprocessing.calculators.factory import create_calculator
+from orchestr_ai.postprocessing.calculators.factory import create_calculator, load_model
 from orchestr_ai.postprocessing.uq_metrics_calculator import (
     VarianceScalingCalibrator,
     calculate_uq_metrics,
@@ -327,15 +327,6 @@ def _configured_gpu_ids(eval_cfg):
     return list(range(visible))
 
 
-def _load_eval_model(model_path, framework, device):
-    framework = (framework or "schnetpack").lower()
-    if framework == "allegro":
-        framework = "nequip"
-    if framework == "nequip":
-        return model_path
-    return torch.load(model_path, map_location=device, weights_only=False)
-
-
 _WORKER_GPU_ID = None
 _RESIDENT_MODELS = {}
 
@@ -390,7 +381,7 @@ def _evaluate_model_chunk_worker(payload):
             f"[Worker GPU {gpu_id}] Loading model into GPU memory: "
             f"{os.path.basename(model_path)} | global frames {frame_range}"
         )
-        _RESIDENT_MODELS[model_path] = _load_eval_model(model_path, framework, device)
+        _RESIDENT_MODELS[model_path] = load_model(model_path, framework, device, config)
 
     model_obj = _RESIDENT_MODELS[model_path]
     context_label = f"{os.path.basename(model_path)}|GPU{gpu_id}"
@@ -821,7 +812,7 @@ class EnsembleRunner:
 
     def _calculator(self, model_path):
         """Calculator of one ensemble member (used by the pool AL feature spaces)."""
-        model_obj = _load_eval_model(model_path, self.framework, self.device)
+        model_obj = load_model(model_path, self.framework, self.device, self.config)
         return create_calculator(self.framework, model_obj, self.device, self.config, self.neighbor_list)
 
     def _multi_gpu_enabled(self):
@@ -907,7 +898,7 @@ class EnsembleRunner:
         include_multihead=False,
     ):
         try:
-            model_obj = _load_eval_model(model_path, self.framework, self.device)
+            model_obj = load_model(model_path, self.framework, self.device, self.config)
         except Exception as e:
             print(f"     Failed to load {model_path}: {e}")
             return None
@@ -1657,17 +1648,6 @@ def plot_ensemble_histograms(mu_E, std_E, mu_F, std_F, out_dir="uq_plots"):
     plt.close()
 
 
-def _safe_load_model(model_path: str, device: torch.device, force_dtype=torch.float32):
-    try:
-        mdl = torch.load(model_path, map_location=device, weights_only=False)
-    except AttributeError:
-        mdl = torch.load(model_path, map_location=device)
-    if force_dtype is not None:
-        mdl = mdl.to(dtype=force_dtype)
-    mdl.eval()
-    return mdl
-
-
 def _thin_flat_pool(flat, pool_frames, thin_idx):
     """Slice full-pool flat vectors down to the thinned pool frame list."""
     if flat is None:
@@ -1737,6 +1717,7 @@ class EvaluationPipeline:
         self.stats_ens_other = None
         self.sigma_comp_other = None
         self.sigma_E_raw_other = None
+        self.single_model = False
 
     def run(self):
         data_mgr = DatasetManager(self.config)
@@ -1748,6 +1729,9 @@ class EvaluationPipeline:
             self.ds = data_mgr.load_active_learning_datasets()
             if "ensemble" not in self.uq_methods:
                 raise ValueError("eval.mode='active_learning' requires eval.uncertainty to include 'ensemble'.")
+            self.single_model = len(EnsembleRunner(self.config, self.device, self.neighbour_list)._model_paths()) == 1
+            if self.single_model and al_options(self.eval_cfg, self.config.get("model_framework"))[1] != "pv":
+                raise ValueError("A single model has no ensemble sigma: pool active learning needs eval.al_quality: pv.")
             stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval = (
                 self._run_ensemble_calibration()
             )
@@ -2062,12 +2046,12 @@ class EvaluationPipeline:
                 E_triplet_true=self.ds.get("E_triplet_true"),
             )
             ens_F_sel = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_list], dtype=float)
-            if ens_E_sel.shape[0] < 2:
+            if ens_E_sel.shape[0] < 2 and not self.single_model:
                 raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
             mu_E_frame = np.mean(ens_E_sel, axis=0)
-            sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=1)
+            sigma_E_raw = np.std(ens_E_sel, axis=0, ddof=int(not self.single_model))
             mu_F_comp = np.mean(ens_F_sel, axis=0)
-            sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=1)
+            sigma_F_flat = np.std(ens_F_sel, axis=0, ddof=int(not self.single_model))
         else:
             stats_cache = runner.evaluate_stats(
                 self.ds["frames"],
@@ -2077,7 +2061,7 @@ class EvaluationPipeline:
                 E_singlet_true=self.ds.get("E_singlet_true"),
                 E_triplet_true=self.ds.get("E_triplet_true"),
             )
-            if int(stats_cache["n_models"]) < 2:
+            if int(stats_cache["n_models"]) < 2 and not self.single_model:
                 raise ValueError("Ensemble UQ requested, but fewer than 2 models were loaded.")
             mu_E_frame = stats_cache["mu_E"]
             sigma_E_raw = stats_cache["sigma_E"]
@@ -2098,6 +2082,10 @@ class EvaluationPipeline:
         )
         sigma_comp = sigma_F_flat.flatten()
         sigma_atom = np.linalg.norm(sigma_comp.reshape(-1, 3), axis=1)
+        if self.single_model:
+            print("[Calibration] Single model: no ensemble sigma, so no UQ metrics or calibration.")
+            self._run_reference_slope_validation(stats_ens)
+            return stats_ens, sigma_comp, sigma_E_raw, {}, None, None
 
         # Build per-component element symbols for per-element calibration
         cal_factor = str(self.eval_cfg.get("calibration_factor", "global")).lower()
@@ -2524,9 +2512,9 @@ class EvaluationPipeline:
             ens_F_pool = np.array([np.concatenate(m_forces, axis=0) for m_forces in ens_F_pool_list], dtype=float)
 
             mu_E_pool = np.mean(ens_E_pool, axis=0)
-            sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=1)
+            sigma_E_pool = np.std(ens_E_pool, axis=0, ddof=int(not self.single_model))
             mu_F_pool = np.mean(ens_F_pool, axis=0)
-            sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=1)
+            sigma_F_pool = np.std(ens_F_pool, axis=0, ddof=int(not self.single_model))
             sigma_F_pool_mean, sigma_F_pool_max = _force_summary_from_flat(sigma_F_pool, pool_frames)
             frame_mean_force_pool, frame_max_force_pool = _force_summary_from_flat(mu_F_pool, pool_frames)
         elif pool_cache_mode == "stats":
@@ -2977,7 +2965,9 @@ class EvaluationPipeline:
             rdf_ok_mask,
             quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
         )
-        al_opts = dict(al_kernel=kernel, al_quality=quality, al_selector=selector, quests=quests, quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False))
+        al_opts = dict(al_kernel=kernel, al_quality=quality, al_selector=selector,
+                       quests=quests, quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
+                       single_model=self.single_model)
         good_rows = np.isfinite(feat_cal).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[train_idx])
         print(f"[Pool-AL] Extracted {good_rows.sum()} valid training frames for GP calibration.")
         if int(good_rows.sum()) < 2:

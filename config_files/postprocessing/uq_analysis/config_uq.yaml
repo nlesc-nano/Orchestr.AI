@@ -1,5 +1,6 @@
 # config.yaml
 model_path: "../models_painn/best_inference_cspbbr3_model_1"
+default_dtype: "float32" # Model/inference precision: "float32" or "float64" (float64: MACE only); unset: float64 for GEO_OPT, float32 otherwise
 cutoff: 12.0
 skin: 2.0 
 prefactor: 14.39964

@@ -396,7 +396,7 @@ def _plot_status_track(ax, x, arrays):
     ax.set_yticks([1, 2, 3, 4, 5])
     ax.set_yticklabels(["failed geom", "failed caps", "OOD", "uncertain", "shortlist"])
     ax.set_ylim(0.4, 5.6)
-    ax.legend(loc="upper right", fontsize=8, ncol=5)
+    # ax.legend(loc="upper right", fontsize=8, ncol=5)
 
 
 def _plotly_imports():
@@ -559,8 +559,7 @@ def plot_al_uncertainty_state(rows, metadata, state, out_dir="al_plots", dpi=300
     axes[4].plot(x, arrays["raw_score"], lw=1.0, color="#8c510a")
     _mark_events(axes[4], x, arrays["raw_score"], arrays)
     _apply_score_ylim(axes[4], arrays["raw_score"], arrays, thr)
-    axes[4].set_ylabel("acquisition score")
-    axes[4].set_title("Acquisition score = σF_mean × √(novelty left after earlier picks / initial novelty)", fontsize=10)
+    axes[4].set_ylabel("Acquisition score\n= quality × kernel novelty")
 
     _plot_status_track(axes[5], x, arrays)
     axes[5].set_ylabel("AL status")

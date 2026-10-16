@@ -82,11 +82,13 @@ def calibrate_alpha_reg_gcv(
     """Calibrate a ridge (GP) model via GCV and compute predictive variances."""
     n, d = feat.shape
     print(f"\n[GCV] Starting calibration. Matrix shape: {n} samples x {d} features")
+    # Substract model's energy offset (e.g. foundation model) so it doesn't affect lambda
+    y = y - y.mean()
 
     try:
         print("[GCV] Running SVD (Divide-and-Conquer)...")
         # Removed memory-heavy lapack_driver='gesvd', letting SciPy use efficient defaults
-        U, s, _ = scipy.linalg.svd(feat, full_matrices=False)
+        U, s, _ = scipy.linalg.svd(feat - feat.mean(axis=0), full_matrices=False)
         print("[GCV] SVD complete.")
     except MemoryError:
         print("[GCV] ERROR: Ran out of memory during SVD!")
@@ -101,11 +103,12 @@ def calibrate_alpha_reg_gcv(
         df = a.sum()
         y_hat = (a * UTy) @ U.T
         resid = y - y_hat
-        return np.log((resid @ resid) / (n - df)**2)
+        return np.log((resid @ resid) / (n - 1 - df)**2)
 
     print("[GCV] Optimizing ridge parameter...")
     res = scipy.optimize.minimize_scalar(gcv_obj, bounds=np.log(lambda_bounds), method='bounded')
     lam_opt = np.exp(res.x)
+    print(f"[GCV] lambda = {lam_opt:.4g}")
 
     print("[GCV] Building covariance matrix and running Cholesky...")
     A = feat.T @ feat + lam_opt * np.eye(d)
@@ -285,6 +288,7 @@ class _PoolActiveLearner:
             "al_kernel": getattr(self, "al_kernel", "latent"),
             "al_quality": getattr(self, "al_quality", "sigma"),
             "al_selector": getattr(self, "al_selector", "greedy"),
+            "single_model": int(getattr(self, "single_model", False)),
             **{f"quests_h_{el}": v for el, v in (getattr(self, "quests", None) or {"h": {}})["h"].items()},
             "pool_hi_k": getattr(self, "pool_hi_k", np.nan),
             "red_zone_train_mult": getattr(self, "red_zone_train_mult", np.nan),
@@ -578,6 +582,8 @@ class _PoolActiveLearner:
                 return np.nan
             med = float(np.median(arr))
             mad = float(np.median(np.abs(arr - med)))
+            if mad == 0.0:  # no spread: the red zone decides
+                return np.inf
             return med + k * 1.4826 * mad
 
         # Calculate Adaptive Upper Caps from OK frames
@@ -643,7 +649,7 @@ class _PoolActiveLearner:
             red_Fmean = _red_zone(self.abs_ceiling_sF_mean, legacy_Fmean, train_red_Fmean)
 
             def _eff_ceiling(pool_hi, low_anchor, red_zone, legacy):
-                if pool_reliable and pool_hi is not None and np.isfinite(pool_hi):
+                if pool_reliable and pool_hi is not None and not np.isnan(pool_hi):
                     base = max(pool_hi, legacy)
                 else:
                     base = legacy
@@ -731,10 +737,13 @@ class _PoolActiveLearner:
         n_fail = n_pool - sum(1 for i in phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap)
         n_acc = n_pool - n_fail - len(high)
         label = len(high) > self.candidate_tol * n_pool
+        single = getattr(self, "single_model", False)
 
         # Novelty w.r.t. the training set: gamma^2 = f^T (feat_train^T feat_train + lambda I)^-1 f = ||L^-1 f||^2.
         # A callable feat_pool (a costly kernel such as ntk_ef) is only evaluated on the candidates.
-        cand = np.array(high, dtype=int)
+        # A single model has no sigma: its batch comes from every frame that passes the geometry and force checks.
+        cand = np.array([i for i in good if self.frame_max_force_pool[i] < self.thr_Fmag_hi_eff
+                         and self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap] if single else high, dtype=int)
         if callable(self.feat_pool):
             rows, pos = cand, np.arange(len(cand))
             feat = self.feat_pool(cand) if len(cand) else np.zeros((0, self.feat_train.shape[1]))
@@ -755,7 +764,7 @@ class _PoolActiveLearner:
         # Batch over the candidates (features.select_batch): al_selector greedy or lcmd, al_quality sigma
         # (sigmaF_mean in the score) or pv (the kernel alone), al_kernel quests for per-atom redundancy.
         kernel = getattr(self, "al_kernel", "latent")
-        n_sel = min(len(cand), self.budget_max or len(cand)) if label else 0
+        n_sel = min(len(cand), self.budget_max or len(cand)) if label or single else 0
         picks, acq_c = select_batch(
             getattr(self, "al_quality", "sigma"), getattr(self, "al_selector", "greedy"), kernel, n_sel,
             self.sigma_F_pool_mean[cand], G[pos], feat[pos], self.feat_train,
@@ -779,7 +788,9 @@ class _PoolActiveLearner:
         print(f"  -> Classes | accurate: {n_acc / n_pool:.1%} | candidate: {len(high) / n_pool:.1%} | "
               f"failed: {n_fail / n_pool:.1%} | candidate_tol: {self.candidate_tol:.1%} | "
               f"reference frames above a floor: {ref_above:.1%}")
-        if not label:
+        if single:
+            print("[AL] Single model: no sigma, so the classes above are not used; the batch comes from the kernel alone.")
+        elif not label:
             print("[AL] Candidate fraction <= candidate_tol: nothing worth labelling in this pool.")
         if n_fail:
             print(f"[AL] WARNING: {n_fail} pool frames failed the geometry, ceiling or force-cap checks: "
