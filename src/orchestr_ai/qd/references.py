@@ -56,7 +56,9 @@ def ideal_gas_g(atoms, energy: float, freqs_cm1: np.ndarray, temperatures, symme
     translation, rotation (rigid rotor, symmetry number) and pV from ASE's
     IdealGasThermo, plus the vibrational free energy of qdprops thermo()
     (harmonic U, quasi-RRHO S; the same treatment as for every other species).
-    `freqs_cm1` are the vibrations only (translations and rotations projected out).
+    `freqs_cm1` are the vibrations only (translations and rotations projected out). Empty for a
+    polyatomic species: translation, rotation and pV only, the caller adds F_vib (ladder states in
+    quick mode, whose F_vib is interpolated in k).
     """
     from ase.thermochemistry import IdealGasThermo
     from .steps.hessian import thermo
@@ -67,6 +69,15 @@ def ideal_gas_g(atoms, energy: float, freqs_cm1: np.ndarray, temperatures, symme
         pos = atoms.get_positions() - atoms.get_positions().mean(axis=0)
         sv = np.linalg.svd(pos, compute_uv=False)
         geometry = "linear" if sv[1] < 1e-3 * sv[0] else "nonlinear"
+    if n > 1 and not len(freqs_cm1):
+        # ASE needs 3N-6 (3N-5) modes: stiff placeholders whose harmonic free energy,
+        # ZPE + kT sum ln(1 - exp(-e/kT)), is removed exactly.
+        e = np.full(3 * n - (5 if geometry == "linear" else 6), 1.0)
+        gas = IdealGasThermo(vib_energies=e, geometry=geometry, potentialenergy=energy, atoms=atoms,
+                             symmetrynumber=symmetry_number, spin=spin)
+        return [float(gas.get_gibbs_energy(t, standard_pressure(t), verbose=False)
+                      - (0.5 * e.sum() + KB_EV * t * np.log1p(-np.exp(-e / (KB_EV * t))).sum()))
+                for t in temperatures]
     from .steps.hessian import thermo_modes
     nu = thermo_modes(freqs_cm1) if len(freqs_cm1) else np.zeros(0)
     th = thermo(nu, temperatures) if nu.size else None

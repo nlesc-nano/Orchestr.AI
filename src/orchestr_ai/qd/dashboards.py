@@ -111,7 +111,7 @@ function makeControls(host, keys, specs, alpb, onchange) {
   for (const k of keys) {
     const sp = specs[k];
     if (sp.type === "solv") {
-      parts.push(`<div><label>Solvent model <select data-k="model"><option value="gb" selected>Generalized Born, ε from the slider</option>` +
+      parts.push(`<div><label>Solvent model <select data-k="model"><option value="gb" selected>implicit solvent (see the note), ε from the slider</option>` +
         alpb.map(([s, e]) => `<option value="alpb:${s}">ALPB ${s} (ε ${e})</option>`).join("") +
         `<option value="gas">gas phase</option></select></label></div>` +
         `<div><label>Dielectric constant ε = <output data-o="eps"></output>` +
@@ -375,13 +375,15 @@ def solution_section(ex: dict, sites: dict | None = None) -> tuple[str, str]:
         return (f"<div class='panel'><h3>{title}</h3><div id='{pid}_ctl'></div><div id='{pid}'></div>"
                 f"<div class='cap'>{cap}</div></div>")
     sites_panel = ""
+    solv_word = ("COSMO solvation on the DFT potential" if ex.get("solvation_model", "").startswith("COSMO")
+                 else "Generalized Born solvation")
     if sites and sites.get("classes"):
         sites_panel = (
             "<div class='panel wide'><h3>Binding-site map</h3><div id='s_sites_ctl'></div><div id='s_sites'></div>"
             f"<div class='cap'>Every Cd and Cl of a desorbable {mx} unit of the intact dot, coloured by the free energy of "
             f"removing that unit (the cheapest unit it belongs to): ΔG<sub>site</sub> = G<sup>sol</sup>(dot − unit) − "
             f"G<sup>sol</sup>(dot) + μ({mx}), each product relaxed with MACE-MH-1, with its own harmonic free energy and "
-            f"Generalized Born solvation; or the electronic ΔE<sub>site</sub> = E(dot − unit) + E({mx}) − E(dot) in "
+            f"{solv_word}; or the electronic ΔE<sub>site</sub> = E(dot − unit) + E({mx}) − E(dot) in "
             f"vacuum. ΔG colours: blue, bound; orange, ΔG &lt; 0, the unit desorbs at these conditions (white is pinned at "
             f"0 when both occur). "
             f"Grey: Se and atoms of no desorbable unit. 3D: orthographic, van der Waals spheres. 2D: each surface atom "
@@ -514,7 +516,7 @@ h1 {{ font-size: 21px; margin: 0 0 4px; }} h2 {{ font-size: 16px; margin: 24px 0
 <h1>Synthesis thermodynamics: {title}</h1>
 <div class="sub">Dots {species} in equilibrium with {ma} and {mx} monomers in solution, including every ligand-stripped
 state found by the desorption search. Free energies: MACE-MH-1 (harmonic vibrations, rigid-rotor rotation, ideal solutes at
-1 M) plus Generalized Born solvation of the xTB charges. For each temperature the coupled equilibria
+1 M) plus {solvation}. For each temperature the coupled equilibria
 c<sub>i</sub> = exp(−ΔG°<sub>i</sub>/k<sub>B</sub>T) c<sub>{ma}</sub><sup>n<sub>i</sub></sup> c<sub>{mx}</sub><sup>m<sub>i</sub></sup>,
 with mass balances C<sub>{ma}</sub> = c<sub>{ma}</sub> + Σ n<sub>i</sub> c<sub>i</sub> and
 C<sub>{mx}</sub> = c<sub>{mx}</sub> + Σ m<sub>i</sub> c<sub>i</sub>, are solved for the free monomers (nested bisection in
@@ -611,7 +613,14 @@ def synthesis_page(exports: list) -> str:
     from plotly.offline import get_plotlyjs_version
     ex0 = exports[0]
     ma, mx = ex0["units"]["MA"], ex0["units"]["MX"]
-    return SYN_PAGE.format(
+    models = {e.get("solvation_model", "") for e in exports}
+    solvation = ("COSMO solvation on the CP2K PBE potential (cavity on the density isosurface)"
+                 if all(m.startswith("COSMO") for m in models) else
+                 "Generalized Born solvation of the xTB charges" if not any(m.startswith("COSMO") for m in models) else
+                 "implicit solvation: COSMO on the DFT potential for " + ", ".join(
+                     _fh(e["formula"]) for e in exports if e.get("solvation_model", "").startswith("COSMO"))
+                 + ", Generalized Born of the xTB charges for the others")
+    return SYN_PAGE.format(solvation=solvation,
         plotly_js=get_plotlyjs_version(), ink=INK, ink2=INK2, ink3=INK3, grid=GRID, ctl_css=CONTROLS_CSS,
         title=", ".join(_fh(e["formula"]) for e in exports), species=", ".join(_fh(e["formula"]) for e in exports),
         ma=_fh(ma), mx=_fh(mx), js_lib=JS_LIB, exports=json.dumps(exports), colors=json.dumps(SITE),

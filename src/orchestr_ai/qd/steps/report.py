@@ -598,8 +598,8 @@ SECTIONS = [
     ("Vibrations &amp; thermochemistry",
      ["vdos_element", "vdos_role", "ir", "raman", "modemap", "thermo_e", "thermo_s"],
      "Harmonic normal modes of the analytic MACE-MH-1 Hessian at the relaxed geometry, with translations and "
-     "rotations projected out. IR and Raman intensities: g-xTB dipole and polarisability derivatives along those "
-     "modes (finite differences, static finite field). Hover a curve or a peak for its value and definition."),
+     "rotations projected out. IR and Raman intensities: {vib_source} dipole and polarisability derivatives along "
+     "those modes (static finite field). Hover a curve or a peak for its value and definition."),
     ("Stability &amp; ligands in vacuum", ["stability", "binding", "detach"],
      "References computed with the same MACE head: bulk {ma} (cell-relaxed, phonons) and the {ma} and {mx} "
      "monomers as ideal gases at a 1 M standard state (harmonic vibrations, rigid-rotor rotation; the dot is treated "
@@ -617,6 +617,9 @@ def _write_html(ctx, d, figs, caps, keys, solution=None) -> None:
     from plotly.offline import get_plotlyjs_version
     ma = formula_html(d.get("unit_ma", "MA"))
     mx = formula_html(d.get("unit_mx") or "MX")
+    src = ((d.get("vib") or {}).get("summary") or {}).get("source") or ""
+    vib_source = (f"DFT ({html.escape(src)})" if src.startswith("CP2K")
+                  else "g-xTB" if not src or "xtb" in src.lower() else html.escape(src))
     rec = d["rec"]
     head = ctx.results["relax"].get("provenance", {}).get("head", "")
     keys_html = "".join(f"<tr><td>{k[0]}</td><td class='v'>{k[2]}</td><td class='d'>{k[4]}</td></tr>" for k in keys)
@@ -631,7 +634,7 @@ def _write_html(ctx, d, figs, caps, keys, solution=None) -> None:
             panels = "".join(f"<div class='panel'><h3>{caps[i][0]}</h3><div id='{i}'></div>"
                              f"<div class='cap'>{caps[i][2]}</div></div>" for i in ids)
             body.append(f"<h2>{title}</h2><div class='grid'>{panels}</div>"
-                        + (f"<div class='note'>{note.format(ma=ma, mx=mx)}</div>" if note else ""))
+                        + (f"<div class='note'>{note.format(ma=ma, mx=mx, vib_source=vib_source)}</div>" if note else ""))
         if not body and not extra:
             continue
         shown = {i for _t, ids, _n in sections for i in ids}
