@@ -1,11 +1,11 @@
 # src/orchestr_ai/qd/steps/report.py
 """
-Summary figures for one dot: props/ground_state.html (interactive Plotly, the
-webapp's Properties tab) and props/ground_state.png (static, matplotlib).
+Summary figures for one dot, interactive (Plotly) for the webapp's Properties tabs:
+props/ground_state.html (structure and relaxation, vibrations and thermochemistry, vibrational
+spectra when the vibspec step ran) and props/stability.html (stability and ligands, in vacuum and
+in solution); props/ground_state.png has every panel (static, matplotlib).
 
-Panels in four groups (structure and relaxation, vibrations and
-thermochemistry, vibrational spectra when the vibspec step ran, stability and
-ligands), each with a caption that defines
+Each panel has a caption that defines
 what is plotted and how to read it, plus a table of key numbers.  The relaxed
 geometry itself is not drawn (the webapp viewer shows it) and electronic
 properties are left to the DFT panels.
@@ -608,35 +608,44 @@ SECTIONS = [
 ]
 
 
+STABILITY_SECTIONS = 2      # SECTIONS[2:] (and the solution-phase section) go to stability.html
+
+
 def _write_html(ctx, d, figs, caps, keys, solution=None) -> None:
+    """ground_state.html (key numbers, structure, vibrations) and stability.html (stability and ligands)."""
     import plotly
     from plotly.offline import get_plotlyjs_version
-    body = []
     ma = formula_html(d.get("unit_ma", "MA"))
     mx = formula_html(d.get("unit_mx") or "MX")
-    for title, ids, note in SECTIONS:
-        ids = [i for i in ids if i in figs]
-        if not ids:
-            continue
-        panels = "".join(f"<div class='panel'><h3>{caps[i][0]}</h3><div id='{i}'></div>"
-                         f"<div class='cap'>{caps[i][2]}</div></div>" for i in ids)
-        body.append(f"<h2>{title}</h2><div class='grid'>{panels}</div>"
-                    + (f"<div class='note'>{note.format(ma=ma, mx=mx)}</div>" if note else ""))
-    shown = {i for _t, ids, _n in SECTIONS for i in ids}
-    payload = {k: json.loads(plotly.io.to_json(f)) for k, f in figs.items() if k in shown}
     rec = d["rec"]
     head = ctx.results["relax"].get("provenance", {}).get("head", "")
     keys_html = "".join(f"<tr><td>{k[0]}</td><td class='v'>{k[2]}</td><td class='d'>{k[4]}</td></tr>" for k in keys)
-    page = PAGE.format(
-        title_text=html.escape(f"{rec.get('formula', '')} ground state"),
-        title=f"{formula_html(rec.get('formula', ''))} · {html.escape(rec.get('material', ''))} "
-              f"{html.escape(rec.get('phase', ''))}",
-        subtitle=html.escape(f"{rec.get('id', '')} — ground state from MACE-MH-1 ({head})"),
-        plotly_js=get_plotlyjs_version(), ink=INK, ink2=INK2, grid=GRID, surface=SURFACE,
-        keys=keys_html, sections="".join(body), figs=json.dumps(payload),
-        extra_html=solution[0] if solution else "", extra_js=solution[1] if solution else "",
-        ctl_css=CONTROLS_CSS)
-    (ctx.props / "ground_state.html").write_text(page)
+    pages = [("ground_state.html", "ground state", SECTIONS[:STABILITY_SECTIONS], keys_html, None),
+             ("stability.html", "stability and ligands", SECTIONS[STABILITY_SECTIONS:], "", solution)]
+    for name, what, sections, keys_rows, extra in pages:
+        body = []
+        for title, ids, note in sections:
+            ids = [i for i in ids if i in figs]
+            if not ids:
+                continue
+            panels = "".join(f"<div class='panel'><h3>{caps[i][0]}</h3><div id='{i}'></div>"
+                             f"<div class='cap'>{caps[i][2]}</div></div>" for i in ids)
+            body.append(f"<h2>{title}</h2><div class='grid'>{panels}</div>"
+                        + (f"<div class='note'>{note.format(ma=ma, mx=mx)}</div>" if note else ""))
+        if not body and not extra:
+            continue
+        shown = {i for _t, ids, _n in sections for i in ids}
+        payload = {k: json.loads(plotly.io.to_json(f)) for k, f in figs.items() if k in shown}
+        page = PAGE.format(
+            title_text=html.escape(f"{rec.get('formula', '')} {what}"),
+            title=f"{formula_html(rec.get('formula', ''))} · {html.escape(rec.get('material', ''))} "
+                  f"{html.escape(rec.get('phase', ''))}",
+            subtitle=html.escape(f"{rec.get('id', '')} — {what} from MACE-MH-1 ({head})"),
+            plotly_js=get_plotlyjs_version(), ink=INK, ink2=INK2, grid=GRID, surface=SURFACE,
+            keys=keys_rows, sections="".join(body), figs=json.dumps(payload),
+            extra_html=extra[0] if extra else "", extra_js=extra[1] if extra else "",
+            ctl_css=CONTROLS_CSS)
+        (ctx.props / name).write_text(page)
 
 
 # --------------------------------------------------------------------------
@@ -751,7 +760,7 @@ def _solution_captions(d) -> dict:
                      "", f"$\\Delta G_\\mathrm{{bind}}$ = [$G^\\mathrm{{sol}}$(dot) − {n} μ({mat}) − {m} μ({mxt})] / {n + m} at "
                          f"$\\varepsilon$ = 2.4 and equal monomer concentrations c. Markers: $T_\\mathrm{{diss}}$, where "
                          "$\\Delta G_\\mathrm{bind}$ = 0 and the dot dissolves into monomers; dilution lowers it through "
-                         "$k_BT\\ln c$. Interactive version with sliders in ground_state.html."),
+                         "$k_BT\\ln c$. Interactive version with sliders in stability.html."),
         "sol_iso": ("", f"{mxt} desorption isotherm",
                     "", f"Equilibrium number of {mxt} units lost, ⟨k⟩, against the {mxt} concentration in solution at "
                         f"$\\varepsilon$ = 2.4 (Boltzmann average over the evaluated configurations, each with its own "
@@ -1068,5 +1077,6 @@ def run(ctx) -> dict:
         d["solution"] = ex
     _write_html(ctx, d, figs, caps, keys, solution)
     _write_png(ctx, d, caps, keys)
-    return {"summary": {"html": "ground_state.html", "png": "ground_state.png", "figures": sorted(figs)},
+    return {"summary": {"html": "ground_state.html", "stability_html": "stability.html", "png": "ground_state.png",
+                        "figures": sorted(figs)},
             "key_numbers": [[k[1], k[3], k[5]] for k in keys]}

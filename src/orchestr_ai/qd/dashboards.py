@@ -3,7 +3,7 @@
 Interactive solution-thermodynamics dashboards (Plotly + plain JS).
 
 * solution_section(export): the "Stability & ligands in solution" block of a
-  dot's ground_state.html: dG_dec(T), dG_bind(T) with T_diss, the stepwise
+  dot's stability.html: dG_dec(T), dG_bind(T) with T_diss, the stepwise
   CdCl2 ladder, the desorption isotherm <k>(c) and the <k>(c, T) map, each with
   its own controls (solvent model and eps, concentrations, precursor
   stabilisation, T) for only the quantities that enter it.
