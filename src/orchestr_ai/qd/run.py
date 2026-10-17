@@ -110,7 +110,9 @@ class Settings:
                                      # moves of symmetry-equivalent units | beam: width-2 beam, every unit
     detach_max_levels: int = 12      # greedy search: at most this many removals (0: all units)
     detach_quick: bool = True        # qualitative ladder: candidates to 0.05 eV/Å, no polishing, one Hessian per path
-    detach_thermo_max_atoms: int = 300  # Hessians of the products up to this size
+    detach_thermo_max_atoms: int = 2000  # Hessian of the last ladder state (F_vib linear in k between): on Cd68 within 0.03 eV of every state's Hessian
+    detach_up: bool = True              # also the ladder up: MX_q added one at a time on free surface anions
+    detach_up_max_levels: int = 12      # ... at most this many additions
     detach_refresh_max: int = 24        # greedy: estimated units re-relaxed after a removal, lowest first (0: no cap; the
                                         # lazy check still relaxes any estimate before it is chosen)
     detach_screen: bool = True          # levels with many candidates: unrelaxed single points first, relax the best only
@@ -118,6 +120,8 @@ class Settings:
     detach_screen_keep: int = 12        # ... relax the lowest this many by unrelaxed energy
     detach_screen_window: float = 0.5   # eV ... and those within this of the lowest
     detach_screen_max: int = 32         # ... but at most this many (estimates that could compete are relaxed lazily)
+    detach_lazy_margin: float = 0.1     # eV: estimates up to this above the best relaxed candidate are relaxed too (near-ties)
+    detach_rigid_refresh: bool = True   # unrelaxed single point of every candidate at every level; estimates follow its change
     detach_screen_quantile: float = 0.9  # the others: unrelaxed J minus this quantile of the relaxation energies (optimistic)
     detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
@@ -204,7 +208,10 @@ class Settings:
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),
                            **({"screen": [self.detach_screen_min, self.detach_screen_keep, self.detach_screen_window,
-                                          self.detach_screen_quantile, self.detach_screen_max]} if self.detach_screen else {}),
+                                          self.detach_screen_quantile, self.detach_screen_max, self.detach_lazy_margin]}
+                              if self.detach_screen else {}),
+                           **({"up": self.detach_up_max_levels} if self.detach_up else {}),
+                           **({"rigid_refresh": True} if self.detach_rigid_refresh else {}),
                            **({"frames": [self.detach_frames_fractions, self.detach_frames_max_other]}
                               if self.detach_frames else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,

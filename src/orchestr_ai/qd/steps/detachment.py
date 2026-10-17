@@ -439,8 +439,9 @@ def site_locations(start_symbols, start_pts, native, indices):
 class State:
     """A relaxed structure after k removals; ids map atoms back to the full dot."""
 
-    def __init__(self, sym, pts, ids, energy, path, parent=None, last_center=None, parent_table=None):
+    def __init__(self, sym, pts, ids, energy, path, parent=None, last_center=None, parent_table=None, sign=1):
         self.sym, self.pts, self.ids = list(sym), np.asarray(pts, float), list(ids)
+        self.sign = sign                # +1: units removed (ladder down), -1: units added (ladder up)
         self.energy = energy            # E(state) - E(full dot), eV
         self.path = path                # [(cation id, ligand ids), ...] in removal order
         self.parent = parent
@@ -455,7 +456,148 @@ class State:
 
 
 def _key(state, unit):
+    if "add" in unit:
+        return unit["key"]
     return (state.ids[unit["cation"]], tuple(sorted(state.ids[x] for x in unit["ligands"])))
+
+
+def _apply(state, unit):
+    """(symbols, positions) of the state with the unit removed (ladder down) or added (ladder up)."""
+    if "add" in unit:
+        sym, pos = unit["add"]
+        return list(state.sym) + list(sym), np.vstack([state.pts, pos])
+    return _product(state.sym, state.pts, unit["atoms"])
+
+
+def _center(state, unit):
+    return np.asarray(unit["center"]) if "add" in unit else state.pts[unit["cation"]]
+
+
+def _unit_sigma(cache, state, unit):
+    """Rotational symmetry number of the product. Removals: from the intact dot's rotations (precomputed).
+    Additions: 1 when the intact dot has no rotation (an added unit does not create symmetry the dot
+    lacks, except by accident), else None (computed from the structure). The point-group analysis
+    of every addition product took 81 % of a PbS ladder (17 s per 507-atom configuration)."""
+    if "add" in unit:
+        return 1 if cache.perms is not None and len(cache.perms) <= 1 else None
+    return cache.sigma(_remaining(state, unit["atoms"]))
+
+
+# --------------------------------------------------------------------------
+# Ladder up: sites where one more MX_q can bind
+# --------------------------------------------------------------------------
+#
+# The rules of the builder's Z-type post-treatment (QD_builder z_type_ligand_posttreat), applied
+# to the relaxed dot: M takes the empty cation site above an under-coordinated surface anion A
+# (the direction of one of A's missing bonds, at the M-A bond length), and its q ligands X take
+# free sites around M in the cation's bulk coordination (tetrahedral or octahedral), preferring
+# sites that bridge to surface metals, then outward ones. No atom may be closer to a new atom
+# than ADD_CLEAR times its bond.
+
+ADD_CLEAR = 0.8
+ADD_PARTNER = 1.15       # x the M-X bond: metals an X site would bridge to
+
+
+def _unit_vec(v):
+    v = np.asarray(v, float)
+    return v / max(float(np.linalg.norm(v)), 1e-12)
+
+
+def _perp_basis(d):
+    a = np.array([1.0, 0.0, 0.0]) if abs(d[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    e1 = _unit_vec(np.cross(d, a))
+    return e1, np.cross(d, e1)
+
+
+def _missing_directions(us, cn):
+    """Directions of the missing bonds of a site whose bonds point along the unit vectors `us`
+    (bulk coordination cn: 4 tetrahedral, otherwise octahedral)."""
+    us = [_unit_vec(u) for u in us]
+    if cn >= 6:
+        return [-u for u in us]
+    if len(us) >= 3:
+        return [_unit_vec(-np.sum(us, axis=0))]
+    if len(us) == 2:
+        b = _unit_vec(-(us[0] + us[1]))
+        n = _unit_vec(np.cross(us[0], us[1]))
+        half = np.arccos(-1.0 / 3.0) / 2
+        return [np.cos(half) * b + s * np.sin(half) * n for s in (1.0, -1.0)]
+    if len(us) == 1:
+        e1, e2 = _perp_basis(us[0])
+        r = np.sqrt(8.0) / 3.0
+        return [-us[0] / 3.0 + r * (np.cos(f) * e1 + np.sin(f) * e2) for f in np.deg2rad([0.0, 120.0, 240.0])]
+    return []
+
+
+def _ligand_directions(d, cn, phi):
+    """Bond directions of the new M other than the one to its host (-d), rotated by phi about d."""
+    e1, e2 = _perp_basis(d)
+    if cn >= 6:
+        return [d] + [np.cos(phi + f) * e1 + np.sin(phi + f) * e2 for f in np.deg2rad([0.0, 90.0, 180.0, 270.0])]
+    r = np.sqrt(8.0) / 3.0
+    return [d / 3.0 + r * (np.cos(phi + f) * e1 + np.sin(phi + f) * e2) for f in np.deg2rad([0.0, 120.0, 240.0])]
+
+
+def enumerate_sites(state, charges, native, bulk_bond, units, d_mx):
+    """
+    Candidate MX_q additions on `state`: dicts with the atoms to add, their centre (the new M),
+    the host anion and a key that stays the same from one ladder state to the next.
+    """
+    from scipy.spatial import cKDTree
+    sym, p = list(state.sym), state.pts
+    nb = _bonds(sym, p, _cutoffs(sym, charges, native, bulk_bond))
+    nat = set(native)
+    cat_n = [e for e in native if charges.get(e, 0) > 0][0]
+    an_n = [e for e in native if charges.get(e, 0) < 0][0]
+    m, x, q = units["M"], units["X"], units["q"]
+    anions = [i for i, s in enumerate(sym) if s == an_n]
+    cn_of = {i: [j for j in nb[i] if charges.get(sym[j], 0) > 0] for i in anions}
+    cn_bulk = max(len(v) for v in cn_of.values())
+    centroid = p.mean(axis=0)
+    tree = cKDTree(p)
+    d_ma = float(bulk_bond)
+    out = []
+    for a in anions:
+        if len(cn_of[a]) >= cn_bulk:
+            continue
+        outward = _unit_vec(p[a] - centroid)
+        for d in _missing_directions([p[j] - p[a] for j in cn_of[a]], cn_bulk):
+            if float(np.dot(d, outward)) < 0.1:
+                continue
+            mpos = p[a] + d_ma * d
+            if any(j != a for j in tree.query_ball_point(mpos, ADD_CLEAR * d_ma)):
+                continue
+            best = None
+            for phi in np.deg2rad(np.arange(0.0, 120.0, 10.0)):
+                sites = []
+                for e in _ligand_directions(d, cn_bulk, phi):
+                    xpos = mpos + d_mx * e
+                    if tree.query_ball_point(xpos, ADD_CLEAR * d_mx):
+                        continue
+                    partners = [j for j in tree.query_ball_point(xpos, ADD_PARTNER * d_mx) if charges.get(sym[j], 0) > 0]
+                    sites.append((len(partners), float(np.dot(e, outward)), xpos, partners))
+                sites.sort(key=lambda s: (-s[0], -s[1]))
+                if len(sites) < q:
+                    continue
+                score = (sum(s[0] for s in sites[:q]), sum(s[1] for s in sites[:q]))
+                if best is None or score > best[0]:
+                    best = (score, sites[:q])
+            if best is None:
+                continue
+            xs = best[1]
+            partners = sorted({state.ids[j] for s in xs for j in s[3]})
+            out.append({"add": ([m] + [x] * q, np.vstack([mpos] + [s[2] for s in xs])), "center": mpos,
+                        "host": a, "key": ("+", state.ids[a], tuple(partners)),
+                        "bridges": [s[0] for s in xs], "molecular": True})
+    return out
+
+
+def _surface_mx_bond(symbols, pts, charges, native, bulk_bond, units, fallback):
+    """Median M-X bond of the dot's ligands (the length of a surface-bound X), or `fallback`."""
+    nb = _bonds(list(symbols), np.asarray(pts, float), _cutoffs(symbols, charges, native, bulk_bond))
+    d = [float(np.linalg.norm(pts[i] - pts[j])) for i, s in enumerate(symbols) if s == units["M"]
+         for j in nb[i] if symbols[j] == units["X"]]
+    return float(np.median(d)) if d else fallback
 
 
 def rotation_permutations(symbols, pts, tol: float = 0.1) -> list:
@@ -518,11 +660,12 @@ def plan(state, units, local_r=LOCAL_R):
     for un in units:
         key = _key(state, un)
         near = state.last_center is None or \
-            float(np.linalg.norm(state.pts[un["cation"]] - state.last_center)) <= local_r
+            float(np.linalg.norm(_center(state, un) - state.last_center)) <= local_r
         if not near and key in state.parent_table:
-            state.table[key] = {"J": state.parent_table[key], "exact": False, "unit": un}
+            j_par, jr_par = state.parent_table[key]
+            state.table[key] = {"J": j_par, "exact": False, "unit": un, "J_parent_rigid": jr_par}
             continue
-        fp = fingerprint(*_product(state.sym, state.pts, un["atoms"]))
+        fp = fingerprint(*_apply(state, un))
         exact_groups.setdefault(fp, []).append((key, un))
     return exact_groups
 
@@ -530,8 +673,7 @@ def plan(state, units, local_r=LOCAL_R):
 def evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats):
     """Relax the representative of every group of every beam state in one batch and fill the tables."""
     reqs = [(si, members) for si, g in enumerate(groups) for members in g.values()]
-    res = cache.relax_many([_product(beam[si].sym, beam[si].pts, members[0][1]["atoms"]) for si, members in reqs],
-                           settings)
+    res = cache.relax_many([_apply(beam[si], members[0][1]) for si, members in reqs], settings)
     stats["relaxations"] += len(reqs)
     for (si, members), (atoms, e, ok) in zip(reqs, res):
         state = beam[si]
@@ -541,11 +683,47 @@ def evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats):
             state.table[key] = {"J": J, "exact": True, "rep": key0, "unit": un, "converged": ok,
                                 "multiplicity": len(members)}
         state.table[key0]["product"] = atoms
-        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J,
-                           cache.sigma(_remaining(state, members[0][1]["atoms"])))
+        _add_configuration(ensemble, atoms, state.sign * (state.k + 1), state.energy + J,
+                           _unit_sigma(cache, state, members[0][1]))
 
 
-def screen(beam, groups, settings, e_full, stats):
+def rigid_level(beam, groups, settings, e_full, stats):
+    """
+    Unrelaxed single points of every candidate of the level (detach_rigid_refresh): one per group
+    to relax and one per estimate, batched. An estimate carried over from the previous level is
+    corrected by the change of its unrelaxed energy since then,
+
+        J_k(u) ~ J_(k-1)(u) + [J_k^rigid(u) - J_(k-1)^rigid(u)],
+
+    so a removal or addition that changes a unit beyond the local radius is seen (Cd68: a unit
+    7.6 A from the first removal became 0.42 eV cheaper). Returns {(state index, key): J^rigid}.
+    """
+    from ..batch_relax import BatchMACE
+    ev = BatchMACE(mace_calculator(settings.head, settings.model, settings.device, settings.dtype),
+                   settings.relax_batch_atoms)
+    reqs = []                                     # (state index, [keys sharing the value], unit)
+    for si, g in enumerate(groups):
+        st = beam[si]
+        reqs += [(si, [key for key, _u in members], members[0][1]) for members in g.values()]
+        reqs += [(si, [key], e["unit"]) for key, e in st.table.items() if not e["exact"]]
+    res = ev([_apply(beam[si], un) for si, _keys, un in reqs]) if reqs else []
+    stats["rigid_single_points"] = stats.get("rigid_single_points", 0) + len(reqs)
+    rig = {}
+    for (si, keys, _un), (e, _f) in zip(reqs, res):
+        for key in keys:
+            rig[(si, key)] = e - e_full - beam[si].energy
+    for si, st in enumerate(beam):
+        for key, entry in st.table.items():
+            if entry["exact"] or (si, key) not in rig:
+                continue
+            if entry.get("J_parent_rigid") is not None:
+                entry["J"] += rig[(si, key)] - entry["J_parent_rigid"]
+                stats["rigid_corrected"] = stats.get("rigid_corrected", 0) + 1
+            entry["J_rigid"] = rig[(si, key)]
+    return rig
+
+
+def screen(beam, groups, settings, e_full, stats, rig=None):
     """
     Screening of a level with many candidates (settings.detach_screen): every group's product is
     evaluated as removed, without relaxing it (one batched single point each), and only the
@@ -562,14 +740,17 @@ def screen(beam, groups, settings, e_full, stats):
         if len(g) <= settings.detach_screen_min:
             kept_all.append(g)
             continue
-        if ev is None:
+        if ev is None and rig is None:
             ev = BatchMACE(mace_calculator(settings.head, settings.model, settings.device, settings.dtype),
                            settings.relax_batch_atoms)
         st = beam[si]
         fps = list(g)
-        res = ev([_product(st.sym, st.pts, g[fp][0][1]["atoms"]) for fp in fps])
-        stats["screen_single_points"] = stats.get("screen_single_points", 0) + len(fps)
-        J = {fp: e - e_full - st.energy for fp, (e, _f) in zip(fps, res)}
+        if rig is not None:                       # the level's single points (rigid_level)
+            J = {fp: rig[(si, g[fp][0][0])] for fp in fps}
+        else:
+            res = ev([_apply(st, g[fp][0][1]) for fp in fps])
+            stats["screen_single_points"] = stats.get("screen_single_points", 0) + len(fps)
+            J = {fp: e - e_full - st.energy for fp, (e, _f) in zip(fps, res)}
         order = sorted(fps, key=J.get)
         within = [fp for fp in order if J[fp] <= J[order[0]] + settings.detach_screen_window]
         # dense levels (InAs In844As715Cl387: ~300 of 557 within 0.5 eV) keep at most detach_screen_max
@@ -617,8 +798,7 @@ def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
     todo = uniq
     if not todo:
         return
-    res = cache.relax_many([_product(beam[si].sym, beam[si].pts, beam[si].table[key]["unit"]["atoms"])
-                            for si, key in todo], settings)
+    res = cache.relax_many([_apply(beam[si], beam[si].table[key]["unit"]) for si, key in todo], settings)
     stats["relaxations"] += len(todo)
     stats["lazy"] += len(todo)
     for (si, key), (atoms, e, ok) in zip(todo, res):
@@ -629,8 +809,8 @@ def relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats):
         for k2 in group:
             state.table[k2].update(J=J, exact=True, rep=key, converged=ok, multiplicity=len(group))
         entry["product"] = atoms
-        _add_configuration(ensemble, atoms, state.k + 1, state.energy + entry["J"],
-                           cache.sigma(_remaining(state, entry["unit"]["atoms"])))
+        _add_configuration(ensemble, atoms, state.sign * (state.k + 1), state.energy + entry["J"],
+                           _unit_sigma(cache, state, entry["unit"]))
 
 
 def polish(beam, todo, cache, settings, e_full, ensemble, stats):
@@ -652,8 +832,8 @@ def polish(beam, todo, cache, settings, e_full, ensemble, stats):
             if entry.get("rep") == key:
                 entry["J"] = J
         state.table[key].update(product=atoms, converged=ok, polished=True)
-        _add_configuration(ensemble, atoms, state.k + 1, state.energy + J,
-                           cache.sigma(_remaining(state, state.table[key]["unit"]["atoms"])))
+        _add_configuration(ensemble, atoms, state.sign * (state.k + 1), state.energy + J,
+                           _unit_sigma(cache, state, state.table[key]["unit"]))
 
 
 def polish_level(beam, cache, settings, e_full, ensemble, stats):
@@ -672,17 +852,22 @@ def relax_estimate(state, key, cache, settings, e_full, ensemble, stats):
     relax_estimates([state], [(0, key)], cache, settings, e_full, ensemble, stats)
 
 
-def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, local_r=LOCAL_R, width=BEAM,
+def expand(beam, cache, settings, e_full, ensemble, stats, enum, local_r=LOCAL_R, width=BEAM,
            refresh=REFRESH_WINDOW):
-    """Next level: the `width` best children of the current beam (lazy, deduplicated)."""
+    """Next level: the `width` best children of the current beam (lazy, deduplicated); enum(state)
+    lists the state's candidate units (enumerate_units: removals, enumerate_sites: additions)."""
     import heapq
     heap = []
     # Every candidate of the level (all beam states) is relaxed in one batch.
-    groups = [plan(st, enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q), local_r)
-              for st in beam]
-    groups, deferred, rigid = screen(beam, groups, settings, e_full, stats)
+    groups = [plan(st, enum(st), local_r) for st in beam]
+    rig = rigid_level(beam, groups, settings, e_full, stats) if getattr(settings, "detach_rigid_refresh", False) else None
+    groups, deferred, rigid = screen(beam, groups, settings, e_full, stats, rig)
     evaluate_many(beam, groups, cache, settings, e_full, ensemble, stats)
     estimate_screened(beam, deferred, rigid, settings)
+    if rig is not None:
+        for (si, key), jr in rig.items():
+            if key in beam[si].table:
+                beam[si].table[key].setdefault("J_rigid", jr)
     # Refresh: relax estimated candidates close to the best relaxed one, per beam state (one batch).
     todo = []
     for si, st in enumerate(beam):
@@ -698,14 +883,18 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
             cand = cand[:cap]
         todo += [(si, key) for _j, key in cand]
     relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
-    # Lazy checks in batches: every estimate below the best relaxed candidate is relaxed, all together,
-    # until none is left (one at a time each ran alone on the GPU: 266 on InAs In844As715Cl387).
+    # Lazy checks in batches: every estimate below the best relaxed candidate, or within
+    # detach_lazy_margin above it, is relaxed, all together, until none is left (one at a time each
+    # ran alone on the GPU: 266 on InAs In844As715Cl387). The margin settles near-ties with real
+    # relaxations: on Cd68 a unit screened out at step 2 was 3 meV below the chosen one, and the
+    # other branch cost 0.55 eV more at step 3.
+    margin = float(getattr(settings, "detach_lazy_margin", 0.0) or 0.0)
     while True:
         exact = [st.energy + e["J"] for st in beam for e in st.table.values() if e["exact"]]
         if not exact:
             break
         todo = [(si, key) for si, st in enumerate(beam) for key, e in st.table.items()
-                if not e["exact"] and st.energy + e["J"] < min(exact)]
+                if not e["exact"] and st.energy + e["J"] < min(exact) + margin]
         if not todo:
             break
         stats["lazy_batches"] = stats.get("lazy_batches", 0) + 1
@@ -734,19 +923,30 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
                     heapq.heappush(heap, (st.energy + e2["J"], si, k2))
             continue
         un = rep["unit"]
-        removed = set(un["atoms"])
-        keep = [i for i in range(len(st.sym)) if i not in removed]
         atoms = rep["product"]
-        child = State(atoms.get_chemical_symbols(), atoms.get_positions(), [st.ids[i] for i in keep],
-                      st.energy + rep["J"], st.path + [entry["rep"]], parent=st,
-                      last_center=st.pts[un["cation"]].copy(),
-                      parent_table={k_: v["J"] for k_, v in st.table.items()
-                                    if not (set((k_[0], *k_[1])) & {st.ids[i] for i in removed})})
-        child.step = {"J_eV": rep["J"], "unit": entry["rep"], "molecular": un["molecular"],
-                      "cation_native_cn": un["cation_native_cn"], "cation_ligands": un["cation_ligands"],
-                      "ligand_mu": un["ligand_mu"], "M_X_A": un["M_X_A"],
-                      "n_candidates": len(st.table),
-                      "n_exact": sum(1 for v in st.table.values() if v["exact"])}
+        if "add" in un:                  # ladder up: the new atoms get ids after every id used so far
+            first = max(st.ids) + 1
+            child = State(atoms.get_chemical_symbols(), atoms.get_positions(),
+                          st.ids + list(range(first, first + len(un["add"][0]))),
+                          st.energy + rep["J"], st.path + [entry["rep"]], parent=st,
+                          last_center=np.asarray(un["center"]).copy(),
+                          parent_table={k_: (v["J"], v.get("J_rigid")) for k_, v in st.table.items()}, sign=-1)
+            child.step = {"J_eV": rep["J"], "unit": entry["rep"], "host": st.ids[un["host"]], "molecular": True,
+                          "bridges": un["bridges"], "n_candidates": len(st.table),
+                          "n_exact": sum(1 for v in st.table.values() if v["exact"])}
+        else:
+            removed = set(un["atoms"])
+            keep = [i for i in range(len(st.sym)) if i not in removed]
+            child = State(atoms.get_chemical_symbols(), atoms.get_positions(), [st.ids[i] for i in keep],
+                          st.energy + rep["J"], st.path + [entry["rep"]], parent=st,
+                          last_center=st.pts[un["cation"]].copy(),
+                          parent_table={k_: (v["J"], v.get("J_rigid")) for k_, v in st.table.items()
+                                        if k_[0] != "+" and not (set((k_[0], *k_[1])) & {st.ids[i] for i in removed})})
+            child.step = {"J_eV": rep["J"], "unit": entry["rep"], "molecular": un["molecular"],
+                          "cation_native_cn": un["cation_native_cn"], "cation_ligands": un["cation_ligands"],
+                          "ligand_mu": un["ligand_mu"], "M_X_A": un["M_X_A"],
+                          "n_candidates": len(st.table),
+                          "n_exact": sum(1 for v in st.table.values() if v["exact"])}
         if child.fp in seen:
             continue
         seen.add(child.fp)
@@ -972,6 +1172,65 @@ def symmetric_search(ctx, settings, cache, e_full, bulk_bond, q, perms, ensemble
 # Step
 # --------------------------------------------------------------------------
 
+LIGAND_SITE_MERGE = 0.8     # A: candidate X positions of neighbouring metals this close are one (bridging) site
+
+
+def ligand_sites(symbols, pts, charges, native, bulk_bond, x_sym, d_mx, cn_bulk):
+    """
+    (x, y, occupied): the places a ligand X can sit on the dot, the ligands, and how many of the
+    places hold one. Every surface metal misses bonds to the anion sublattice; along each missing
+    bond (bulk coordination cn_bulk) an X would sit at the M-X distance, as the builder places it.
+    Positions of neighbouring metals that coincide (within LIGAND_SITE_MERGE) are one site that
+    bridges them; the others are terminal. Positions inside the dot (closer than 0.8 x the bond to
+    a core atom) are dropped. Each site holds at most one X.
+    """
+    from scipy.spatial import cKDTree
+    sym, p = list(symbols), np.asarray(pts, float)
+    nb = _bonds(sym, p, _cutoffs(sym, charges, native, bulk_bond))
+    an_n = {e for e in native if charges.get(e, 0) < 0}
+    centroid = p.mean(axis=0)
+    core = np.array([q for s_, q in zip(sym, p) if s_ != x_sym])
+    core_tree = cKDTree(core)
+    cand = []
+    for i, s_ in enumerate(sym):
+        if charges.get(s_, 0) <= 0:
+            continue
+        us = [p[j] - p[i] for j in nb[i] if sym[j] in an_n]
+        if not us or len(us) >= cn_bulk:
+            continue
+        for d in _missing_directions(us, cn_bulk):
+            if float(np.dot(d, _unit_vec(p[i] - centroid))) < -0.2:
+                continue
+            xp = p[i] + d_mx * d
+            if any(float(np.linalg.norm(core[j] - p[i])) > 1e-6 for j in core_tree.query_ball_point(xp, 0.8 * d_mx)):
+                continue
+            cand.append(xp)
+    if not cand:
+        return 0, sum(1 for s_ in sym if s_ == x_sym), 0
+    cand = np.asarray(cand)
+    root = list(range(len(cand)))
+
+    def find(a):
+        while root[a] != a:
+            root[a] = root[root[a]]
+            a = root[a]
+        return a
+    for a, b in cKDTree(cand).query_pairs(LIGAND_SITE_MERGE):
+        ra, rb = find(a), find(b)
+        root[max(ra, rb)] = min(ra, rb)
+    sites = np.array([cand[[j for j in range(len(cand)) if find(j) == r]].mean(axis=0) for r in sorted(set(map(find, range(len(cand)))))])
+    xs = np.array([q for s_, q in zip(sym, p) if s_ == x_sym])
+    occupied = 0
+    if len(xs):                                  # every X sits on a site: one not matching a predicted
+        dist, idx = cKDTree(sites).query(xs)     # position (within 1 A, one X per site) adds its own
+        taken = set()
+        for d_, j in sorted(zip(dist, idx)):
+            if d_ < 1.0 and j not in taken:
+                taken.add(j)
+        occupied = len(taken)
+    return len(sites) + len(xs) - occupied, len(xs), occupied
+
+
 def training_frames(ctx, settings, path, q, unit) -> dict:
     """
     props/ensemble/detach_relax.extxyz: frames off the minimum from the search, for the ML set.
@@ -1069,7 +1328,9 @@ def run(ctx) -> dict:
         levels = [[root]]
         first_table = None
         while levels[-1] and levels[-1][0].k < k_max:
-            children = expand(levels[-1], cache, s, e_full, ensemble, stats, ctx, bulk_bond, q, local_r, width, refresh)
+            children = expand(levels[-1], cache, s, e_full, ensemble, stats,
+                              lambda st: enumerate_units(st.sym, st.pts, ctx.charges, ctx.native, bulk_bond, q),
+                              local_r, width, refresh)
             if first_table is None:
                 first_table = root.table
             if not children:
@@ -1084,6 +1345,27 @@ def run(ctx) -> dict:
             path.append(st)
             st = st.parent
         path.reverse()
+    # Ladder up: MX_q added one at a time on free surface anions (the reverse step), with the same
+    # greedy machinery (screening, local updates, batched relaxations).
+    path_up = []
+    if getattr(s, "detach_up", False) and u.get("X"):
+        mono = np.asarray(mx["positions"], float)
+        d_mx = _surface_mx_bond(sym0, np.asarray(pts0, float), ctx.charges, ctx.native, bulk_bond, u,
+                                1.08 * float(np.linalg.norm(mono[1:] - mono[0], axis=1).min()))
+        up_levels = [[State(sym0, pts0, range(len(sym0)), 0.0, [], sign=-1)]]
+        while up_levels[-1] and up_levels[-1][0].k < s.detach_up_max_levels:
+            kids = expand(up_levels[-1], cache, s, e_full, ensemble, stats,
+                          lambda st: enumerate_sites(st, ctx.charges, ctx.native, bulk_bond, u, d_mx),
+                          GREEDY_R_LOCAL, 1, GREEDY_REFRESH)
+            if not kids:
+                break
+            up_levels.append(kids)
+        st = min(up_levels[-1], key=lambda x: x.energy) if len(up_levels) > 1 else None
+        while st is not None and st.parent is not None:
+            path_up.append(st)
+            st = st.parent
+        path_up.reverse()
+
     best_at = {}
     for k_, e_, _sg in ensemble.values():
         best_at[k_] = min(best_at.get(k_, e_), e_)
@@ -1125,20 +1407,98 @@ def run(ctx) -> dict:
         _write_xyz(ctx.props / f"detach_{st.k}.xyz", st.sym, st.pts,
                    f"best path, {st.k} {unit} removed, E - E_full = {st.energy:.6f} eV")
         prev_e, f_prev = st.energy, f_st
+    # The ladder up: adsorption energies dE_add = E(dot_-j) - E(dot_-(j-1)) - E(MX_q) (negative: the unit binds).
+    ladder_up = []
+    f_prev, prev_e = f_full, 0.0
+    if path_up:
+        fr_up = (np.asarray(cache.frequencies(path_up[-1].sym, path_up[-1].pts, s_hess)) if thermo_ok else None)
+        f_up = np.asarray(thermo(fr_up, T)["F_vib_eV"]) if fr_up is not None else None
+        for st in path_up:
+            last = st is path_up[-1]
+            f_st = (f_up if last else f_full + (f_up - f_full) * st.k / path_up[-1].k) if f_up is not None else f_prev
+            dF = f_st - f_prev
+            dE = st.energy - prev_e - mx["energy_eV"]
+            dG = st.energy - prev_e + dF - g_mx
+            ladder_up.append({"k": -st.k, "E_mace_eV": st.energy, "dE_eV": dE, "dG_eV": dG.tolist(),
+                              "dG_300K_eV": float(dG[i300]) if i300 is not None else None,
+                              "dF_vib_300K_eV": float(dF[i300]) if i300 is not None else None,
+                              "dF_vib_eV": dF.tolist(), **st.step,
+                              "frequencies_cm1": fr_up.round(3).tolist() if (last and fr_up is not None) else None,
+                              "F_vib_source": ("Hessian" if (last and fr_up is not None) else
+                                               "linear in k (quick mode)" if fr_up is not None else "not computed"),
+                              "symbols": st.sym})
+            _write_xyz(ctx.props / f"adsorb_{st.k}.xyz", st.sym, st.pts,
+                       f"ladder up, {st.k} {unit} added, E - E_full = {st.energy:.6f} eV")
+            prev_e, f_prev = st.energy, f_st
     cache.close()
-    frames = training_frames(ctx, s, path, q, unit) if getattr(s, "detach_frames", False) else None
+    frames = training_frames(ctx, s, path + path_up, q, unit) if getattr(s, "detach_frames", False) else None
+
+    # Configurational entropy of every ladder state from its own structure: the ways to place its
+    # y ligands X on the x places an X can sit (ligand_sites: the distinct anion-lattice positions
+    # next to the surface metals, one per position whether it bridges several metals or is
+    # terminal), S_conf = k_B ln C(x, y). An ideal count (every arrangement equally likely): an
+    # upper bound, S_conf = 0 the lower one. It includes the sites left free at maximum coverage.
+    from math import lgamma
+
+    def ln_binom(n_, k_):
+        return lgamma(n_ + 1) - lgamma(k_ + 1) - lgamma(n_ - k_ + 1) if 0 <= k_ <= n_ else 0.0
+
+    an_n = [e for e in ctx.native if ctx.charges.get(e, 0) < 0]
+    nb0 = _bonds(list(sym0), np.asarray(pts0, float), _cutoffs(sym0, ctx.charges, ctx.native, bulk_bond))
+    cats0 = [i for i, s_ in enumerate(sym0) if ctx.charges.get(s_, 0) > 0]
+    cn_bulk = max(sum(1 for j in nb0[i] if sym0[j] in an_n) for i in cats0)
+
+    mono = np.asarray(mx["positions"], float)
+    d_mx_conf = _surface_mx_bond(sym0, np.asarray(pts0, float), ctx.charges, ctx.native, bulk_bond, u,
+                                 1.08 * float(np.linalg.norm(mono[1:] - mono[0], axis=1).min()))
+
+    def sites_and_ligands(sym, pts):
+        x_, y_, _occ = ligand_sites(sym, pts, ctx.charges, ctx.native, bulk_bond, u["X"], d_mx_conf, cn_bulk)
+        return x_, y_
+
+    x0, y0 = sites_and_ligands(sym0, pts0)
+    xy = {0: (x0, y0)}
+    pairs = [(st_, e_) for st_, e_ in zip(path, ladder)] + [(st_, e_) for st_, e_ in zip(path_up, ladder_up)]
+    for st, lad in pairs:
+        xy[lad["k"]] = sites_and_ligands(st.sym, st.pts)
+    # The raw count moves by a few sites from state to state (relaxation reconstructs the surface and
+    # moves predicted positions across the merge tolerance), which made single steps noisy by
+    # 0.1-0.2 eV. x(k) is therefore a straight line on each side of the intact dot, through its exact
+    # count x0 (least squares slope: sites lost per removal, gained per addition); y is exact.
+    def slope(side):
+        ks_ = np.array([k_ for k_ in xy if (k_ > 0 if side > 0 else k_ < 0)], float)
+        if not len(ks_):
+            return 0.0
+        xs_ = np.array([xy[int(k_)][0] for k_ in ks_], float) - x0
+        return float((ks_ * xs_).sum() / (ks_ * ks_).sum())
+    a_down, a_up = slope(1), slope(-1)
+
+    def x_fit(k_):
+        return x0 + (a_down if k_ > 0 else a_up) * k_
+
+    def ln_binom_real(n_, k_):
+        return lgamma(n_ + 1) - lgamma(k_ + 1) - lgamma(n_ - k_ + 1) if 0 <= k_ <= n_ else 0.0
+    s_conf = {k_: ln_binom_real(x_fit(k_), y_) for k_, (_x, y_) in xy.items()}
+    for st, lad in pairs:
+        xk, yk = xy[lad["k"]]
+        prev = lad["k"] - 1 if lad["k"] > 0 else lad["k"] + 1    # the state one step closer to the intact dot
+        lad["sites_x"], lad["sites_x_fit"], lad["ligands_y"] = int(xk), round(x_fit(lad["k"]), 2), int(yk)
+        lad["S_conf_kB"] = s_conf[lad["k"]] - s_conf[0]           # relative to the intact dot
+        lad["dS_conf_kB"] = s_conf[lad["k"]] - s_conf[prev]       # change in this step
 
     # Equilibrium <k>(T, dmu) over every evaluated configuration.
     mu = np.asarray(s.mu_grid, float)
     dF_cum = {0: np.zeros(len(T))}          # vibrational change after k removals (best path)
     for st in ladder:
         dF_cum[st["k"]] = dF_cum[st["k"] - 1] + np.asarray(st["dF_vib_eV"])
+    for st in ladder_up:                     # k = -1, -2, ...: units added
+        dF_cum[st["k"]] = dF_cum[st["k"] + 1] + np.asarray(st["dF_vib_eV"])
     sigma0 = len(cache.perms)
     confs = [(0, 0.0, sigma0)] + [v for v in ensemble.values()]
     ks = np.array([c[0] for c in confs], float)
     es = np.array([c[1] for c in confs], float)
     lw = np.log(sigma0 / np.array([c[2] for c in confs], float))   # labelled count of each distinct configuration
-    dfs = np.vstack([dF_cum[min(int(k), len(ladder))] for k in ks])
+    dfs = np.vstack([dF_cum[min(int(k), len(ladder)) if k >= 0 else max(int(k), -len(ladder_up))] for k in ks])
     kmean = np.zeros((len(T), len(mu)))
     for ti, t in enumerate(T):
         kT = KB_EV * t
@@ -1147,6 +1507,24 @@ def run(ctx) -> dict:
         lg -= lg.max(axis=0, keepdims=True)
         p = np.exp(lg)
         kmean[ti] = (p * ks[:, None]).sum(axis=0) / p.sum(axis=0)
+
+    # <k> over the ladder states with their configurational entropy (lattice gas): state k (removed,
+    # k > 0, or added, k < 0) has G_k(T) = E_k + F_vib,k + k G_MXq - T S_conf(k).
+    states = [(0, 0.0)] + [(st["k"], st["E_mace_eV"]) for st in ladder] + [(st["k"], st["E_mace_eV"]) for st in ladder_up]
+    kk = np.array([k_ for k_, _e in states], float)
+    ee = np.array([e_ for _k, e_ in states], float)
+    def ladder_kmean(entropy):                      # entropy -> S_conf/k_B of every state in kk
+        out = np.zeros((len(T), len(mu)))
+        for ti, t_ in enumerate(T):
+            kT = KB_EV * t_
+            base = ee + np.array([dF_cum[int(k_)][ti] for k_ in kk]) + kk * g_mx[ti] - kT * entropy
+            lg = -(base[:, None] + kk[:, None] * mu[None, :]) / kT
+            lg -= lg.max(axis=0, keepdims=True)
+            p_ = np.exp(lg)
+            out[ti] = (p_ * kk[:, None]).sum(axis=0) / p_.sum(axis=0)
+        return out
+    kmean_conf = ladder_kmean(np.array([s_conf[int(k_)] - s_conf[0] for k_ in kk]))
+    kmean_noconf = ladder_kmean(np.zeros(len(kk)))
 
     # Site-resolved first step (all symmetry classes of the intact dot).
     sites = []
@@ -1181,6 +1559,9 @@ def run(ctx) -> dict:
             "polish_window_eV": POLISH_WINDOW,
             "n_relaxations_new": cache.n_new, "n_configurations": len(confs),
             "refresh_max": s.detach_refresh_max, "refresh_capped": stats.get("refresh_capped", 0),
+            "rigid_refresh": ({"single_points": stats.get("rigid_single_points", 0),
+                               "estimates_corrected": stats.get("rigid_corrected", 0)}
+                              if getattr(s, "detach_rigid_refresh", False) else None),
             "screen": ({"single_points": stats.get("screen_single_points", 0), "screened_out": stats.get("screened_out", 0),
                         "min_groups": s.detach_screen_min, "keep": s.detach_screen_keep, "max": s.detach_screen_max,
                         "window_eV": s.detach_screen_window, "quantile": s.detach_screen_quantile}
@@ -1193,15 +1574,32 @@ def run(ctx) -> dict:
                         f"after {len(ladder)} of {m} units (detach_max_levels)" if s.detach_search == "greedy"
                         and s.detach_max_levels and len(ladder) >= s.detach_max_levels else "no unit left"),
             "thermo": bool(thermo_ok),
+            "up": ({"dE_add_eV": [st["dE_eV"] for st in ladder_up],
+                    "dG_add_300K_eV": [st["dG_300K_eV"] for st in ladder_up],
+                    "cumulative_dE_add_eV": [st["E_mace_eV"] - abs(st["k"]) * mx["energy_eV"] for st in ladder_up],
+                    "n_steps": len(ladder_up), "max_levels": s.detach_up_max_levels}
+                   if getattr(s, "detach_up", False) else None),
             "training_frames": frames,
         },
         "site_classes": sites,
         "steps": ladder,
+        "steps_up": ladder_up,
         "ensemble_list": [list(v) for v in ensemble.values()],      # [k, E - E_full, rotational symmetry number]
         "sigma_full": sigma0,
         "hessian_method": method,
         "levels": [[{"E_eV": x.energy, "path": [list(map(lambda v: v if isinstance(v, int) else list(v), p_))
                                                for p_ in x.path]} for x in lv] for lv in levels_out],
-        "map": {"T": T, "dmu_eV": mu.tolist(), "k_mean": kmean.tolist(), "ensemble": "evaluated configurations"},
+        "map": {"T": T, "dmu_eV": mu.tolist(), "k_mean": kmean_conf.tolist(),
+                "model": "ladder states (down and up) with the configurational entropy k_B ln C(x, y) of each",
+                "k_mean_no_conf": kmean_noconf.tolist(),
+                "bounds": "k_mean: S_conf = k_B ln C(x, y) of every state (upper bound); k_mean_no_conf: S_conf = 0",
+                "k_mean_ensemble": kmean.tolist(), "ensemble": "evaluated configurations (no configurational entropy)"},
+        "configurational": {"model": ("k_B ln C(x, y): y ligands X on the x distinct anion-lattice sites next to the "
+                                      "surface metals (terminal or bridging, as the builder places X)"),
+                            "cn_bulk": int(cn_bulk), "intact": {"sites_x": int(x0), "ligands_y": int(y0),
+                                                                "S_conf_kB": float(s_conf[0])},
+                            "x_fit": {"sites_per_removal": a_down, "sites_per_addition": -a_up,
+                                      "note": "x(k) = x0 + slope k on each side of the intact dot (least squares)"},
+                            "per_state": {str(k_): {"sites_x": int(v[0]), "ligands_y": int(v[1])} for k_, v in sorted(xy.items())}},
         "reference": {"MXq_energy_eV": mx["energy_eV"], "MXq_G_1M_eV": mx["G_1M_eV"]},
     }

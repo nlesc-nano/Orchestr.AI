@@ -408,9 +408,12 @@ def run_detach_ensemble(ctx) -> dict:
     s = ctx.settings
     det = ctx.results.get("detachment", {})
     ks = sorted(st["k"] for st in det.get("steps", []))
-    if not ks:
+    ups = sorted(-st["k"] for st in det.get("steps_up", []) or [])
+    if not ks and not ups:
         return {"summary": {"skipped": "no desorption ladder (detachment skipped or empty)"}}
-    levels = sorted({k for k in s.detach_ensemble_levels if k in ks} | {ks[-1]})
+    # ladder states: removals k > 0 (props/detach_<k>.xyz) and additions k < 0 (props/adsorb_<j>.xyz)
+    levels = (sorted({k for k in s.detach_ensemble_levels if k in ks} | ({ks[-1]} if ks else set())) +
+              [-j for j in sorted({j for j in s.detach_ensemble_levels if j in ups} | ({ups[-1]} if ups else set()))])
     out_dir = ctx.props / "ensemble"
     out_dir.mkdir(exist_ok=True)
     dt = float(s.md_timestep_fs)
@@ -419,15 +422,18 @@ def run_detach_ensemble(ctx) -> dict:
     skip = int(round(s.detach_ensemble_skip_ps * 1000 / dt))
     rng = np.random.default_rng(s.md_seed + 1)
     systems, vels, scheds, names, info = [], [], [], [], []
+    def state_file(k):
+        return ctx.props / (f"detach_{k}.xyz" if k > 0 else f"adsorb_{-k}.xyz")
+
     for k in levels:
-        a = read(ctx.props / f"detach_{k}.xyz")
+        a = read(state_file(k))
         sy, p = a.get_chemical_symbols(), a.get_positions()
         for T in s.detach_ensemble_temperatures:
             systems.append((sy, p))
             # at 2T: starting at a minimum, equipartition moves half the kinetic energy into the potential
             vels.append(maxwell_velocities(_masses(sy), 2.0 * T, rng))
             scheds.append([float(T)])
-            names.append(f"k{k}_{int(T)}K")
+            names.append(f"k{k}_{int(T)}K" if k > 0 else f"a{-k}_{int(T)}K")
             info.append({"source": "detach_md", "k": int(k)})
     t0 = time.time()
     frames, summ = md_replicas(_evaluator(s), systems, vels, scheds, names, s, n_steps, skip, stride, rng, info)
@@ -437,7 +443,7 @@ def run_detach_ensemble(ctx) -> dict:
     if flat:
         _write_extxyz(out_dir / "detach_md.extxyz", None, flat, label)
     # rattled and strained copies of the same ladder states
-    starts = [(int(k), read(ctx.props / f"detach_{k}.xyz")) for k in levels]
+    starts = [(int(k), read(state_file(k))) for k in levels]
     rattled, n_rejected = rattle_strain([(k, a.get_chemical_symbols(), a.get_positions()) for k, a in starts], s, rng)
     if rattled:
         res = _evaluator(s)([(fr["symbols"], fr["positions"]) for fr in rattled])
