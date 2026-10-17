@@ -571,7 +571,9 @@ def screen(beam, groups, settings, e_full, stats):
         stats["screen_single_points"] = stats.get("screen_single_points", 0) + len(fps)
         J = {fp: e - e_full - st.energy for fp, (e, _f) in zip(fps, res)}
         order = sorted(fps, key=J.get)
-        keep = set(order[:settings.detach_screen_keep]) | {fp for fp in fps if J[fp] <= J[order[0]] + settings.detach_screen_window}
+        within = [fp for fp in order if J[fp] <= J[order[0]] + settings.detach_screen_window]
+        # dense levels (InAs In844As715Cl387: ~300 of 557 within 0.5 eV) keep at most detach_screen_max
+        keep = set(order[:settings.detach_screen_keep]) | set(within[:settings.detach_screen_max])
         kept_all.append({fp: g[fp] for fp in fps if fp in keep})
         for fp in fps:
             rigid[(si, g[fp][0][0])] = J[fp]
@@ -696,6 +698,18 @@ def expand(beam, cache, settings, e_full, ensemble, stats, ctx, bulk_bond, q, lo
             cand = cand[:cap]
         todo += [(si, key) for _j, key in cand]
     relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
+    # Lazy checks in batches: every estimate below the best relaxed candidate is relaxed, all together,
+    # until none is left (one at a time each ran alone on the GPU: 266 on InAs In844As715Cl387).
+    while True:
+        exact = [st.energy + e["J"] for st in beam for e in st.table.values() if e["exact"]]
+        if not exact:
+            break
+        todo = [(si, key) for si, st in enumerate(beam) for key, e in st.table.items()
+                if not e["exact"] and st.energy + e["J"] < min(exact)]
+        if not todo:
+            break
+        stats["lazy_batches"] = stats.get("lazy_batches", 0) + 1
+        relax_estimates(beam, todo, cache, settings, e_full, ensemble, stats)
     # Polish the candidates that can enter the beam, then rank.
     polish_level(beam, cache, settings, e_full, ensemble, stats)
     for si, st in enumerate(beam):
@@ -1160,7 +1174,7 @@ def run(ctx) -> dict:
             "n_steps": len(ladder), "n_moves": len(levels_out), "beam": 1 if s.detach_search == "greedy" else BEAM,
             "local_radius_A": local_r,
             "n_intermediate": stats.get("intermediate", 0),
-            "n_relaxations": stats["relaxations"], "n_lazy_checks": stats["lazy"],
+            "n_relaxations": stats["relaxations"], "n_lazy_checks": stats["lazy"], "n_lazy_batches": stats.get("lazy_batches", 0),
             "n_polished": stats.get("polished", 0), "polish_fmax_eV_A": POLISH_FMAX,
             "quick": bool(getattr(s, "detach_quick", False)),
             "candidate_fmax_eV_A": _candidate_fmax(s),
@@ -1168,7 +1182,7 @@ def run(ctx) -> dict:
             "n_relaxations_new": cache.n_new, "n_configurations": len(confs),
             "refresh_max": s.detach_refresh_max, "refresh_capped": stats.get("refresh_capped", 0),
             "screen": ({"single_points": stats.get("screen_single_points", 0), "screened_out": stats.get("screened_out", 0),
-                        "min_groups": s.detach_screen_min, "keep": s.detach_screen_keep,
+                        "min_groups": s.detach_screen_min, "keep": s.detach_screen_keep, "max": s.detach_screen_max,
                         "window_eV": s.detach_screen_window, "quantile": s.detach_screen_quantile}
                        if getattr(s, "detach_screen", False) else None),
             "ensemble": "every relaxed configuration evaluated by the search",

@@ -116,7 +116,8 @@ class Settings:
     detach_screen: bool = True          # levels with many candidates: unrelaxed single points first, relax the best only
     detach_screen_min: int = 16         # ... when a level has more symmetry-distinct candidates than this
     detach_screen_keep: int = 12        # ... relax the lowest this many by unrelaxed energy
-    detach_screen_window: float = 0.5   # eV ... and all within this of the lowest
+    detach_screen_window: float = 0.5   # eV ... and those within this of the lowest
+    detach_screen_max: int = 32         # ... but at most this many (estimates that could compete are relaxed lazily)
     detach_screen_quantile: float = 0.9  # the others: unrelaxed J minus this quantile of the relaxation energies (optimistic)
     detach_perturb_A: float = 0.02      # random displacement (sigma, A) of every candidate's start: leaves flat valleys
     detach_seed: int = 0
@@ -203,7 +204,7 @@ class Settings:
                            **({"perturb_A": self.detach_perturb_A, "seed": self.detach_seed}
                               if self.detach_perturb_A else {}),
                            **({"screen": [self.detach_screen_min, self.detach_screen_keep, self.detach_screen_window,
-                                          self.detach_screen_quantile]} if self.detach_screen else {}),
+                                          self.detach_screen_quantile, self.detach_screen_max]} if self.detach_screen else {}),
                            **({"frames": [self.detach_frames_fractions, self.detach_frames_max_other]}
                               if self.detach_frames else {}),
                            "thermo_max_atoms": self.detach_thermo_max_atoms, "mu_grid": self.mu_grid,
