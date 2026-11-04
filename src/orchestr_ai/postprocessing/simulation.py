@@ -1006,10 +1006,13 @@ def _set_md_initial_velocities_from_atoms(atoms, mode="auto"):
         )
 
     velocities = atoms.arrays.get("velocities")
-    if velocities is None:
+    if velocities is None and "momenta" in atoms.arrays:
+        # Note: atoms.get_velocities() never returns None (zeros if no momenta),
+        # so only use it when momenta are actually stored.
         velocities = atoms.get_velocities()
 
-    if velocities is None:
+    # Treat missing or all-zero velocities as "no velocities in file".
+    if velocities is None or not np.any(np.asarray(velocities, dtype=float)):
         if mode in {"file", "extxyz"}:
             raise ValueError(
                 "md.initial_velocities is set to 'file', but the input structure "

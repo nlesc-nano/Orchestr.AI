@@ -279,7 +279,8 @@ def recommend_elbow_k(ks, wcss):
     distances = []
     for k, val in zip(ks, wcss):
         p = np.array([k, val], dtype=float)
-        dist = np.abs(np.cross(line_vec, p - p1)) / line_norm
+        v = p - p1
+        dist = abs(line_vec[0] * v[1] - line_vec[1] * v[0]) / line_norm
         distances.append(dist)
 
     distances = np.asarray(distances, dtype=float)

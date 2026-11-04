@@ -137,18 +137,30 @@ class MaceCalculator(BaseCalculator):
 
         return batch
 
+    def _frame_energies(self, results, n_atoms_list):
+        """Per-frame energies as float64 sums of MACE's per-atom energies.
+
+        A float32 model sums results["energy"] in float32, which keeps ~7 significant digits: for clusters with
+        |E| ~ 1e6 eV it is off by several eV, and on GPU the error changes from run to run (parallel summation
+        order), which shows up as spurious ensemble energy spread. results["node_energy"] (E0 + interaction
+        energy per atom) is float64 and sums to the energy of the model run in float64. A joint-embedding readout
+        adds energy that node_energy does not contain, so such models keep the model's own total.
+        """
+        node_energy = results.get("node_energy")
+        if (
+            node_energy is None
+            or hasattr(self.model, "embedding_readout")
+            or node_energy.shape[0] != sum(n_atoms_list)
+        ):
+            return results["energy"].detach().cpu().numpy().astype(np.float64).flatten()
+        node_np = node_energy.detach().cpu().numpy().astype(np.float64)
+        return np.array([e.sum() for e in np.split(node_np, np.cumsum(n_atoms_list)[:-1])])
+
     def forward(self, inputs, n_atoms_list):
         with torch.set_grad_enabled(True):
             results = self.model(inputs.to_dict())
 
-        energies_np = (
-            results["energy"]
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float64)
-            .flatten()
-        )
+        energies_np = self._frame_energies(results, n_atoms_list)
 
         forces_cpu = results["forces"].detach().cpu()
         forces_list = [
@@ -260,14 +272,7 @@ class AutoScaledReconstructedMaceCalculator(MaceCalculator):
         with torch.set_grad_enabled(True):
             results_base = self.model(batch_base.to_dict())
 
-        E_singlet_pred = (
-            results_base["energy"]
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float64)
-            .flatten()
-        )
+        E_singlet_pred = self._frame_energies(results_base, n_atoms_list)
 
         forces_singlet_cpu = results_base["forces"].detach().cpu()
         F_singlet_pred = [
@@ -297,14 +302,7 @@ class AutoScaledReconstructedMaceCalculator(MaceCalculator):
         with torch.set_grad_enabled(True):
             results_delta = self.model(batch_delta.to_dict())
 
-        Delta_E_delta_pred_scaled = (
-            results_delta["energy"]
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float64)
-            .flatten()
-        )
+        Delta_E_delta_pred_scaled = self._frame_energies(results_delta, n_atoms_list)
 
         forces_delta_cpu = results_delta["forces"].detach().cpu()
         F_delta_pred_scaled = [
