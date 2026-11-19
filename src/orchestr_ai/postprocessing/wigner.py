@@ -7,6 +7,8 @@ from ase import units
 from ase.io import write
 from ase.md.velocitydistribution import Stationary, ZeroRotation
 
+from orchestr_ai.qd.ligand_restore import MAX_REDRAW, LigandRestore
+
 
 def _coth(x):
     if x > 50.0:
@@ -86,7 +88,7 @@ def _sample_mode_amplitudes(frequencies_cm, mode_indices, temperature_K, rng):
     return q, qdot_fs
 
 
-def _print_wigner_summary(config, mode_count, skipped_imaginary, skipped_low, output_dir):
+def _print_wigner_summary(config, mode_count, skipped_imaginary, skipped_low, output_dir, restore=None):
     print("Wigner phase-space sampling")
     print(f"  initial conditions       : {int(config.get('n_initial_conditions', 0))}")
     print(f"  temperature              : {float(config.get('temperature_K', 0.0)):.6f} K")
@@ -110,6 +112,14 @@ def _print_wigner_summary(config, mode_count, skipped_imaginary, skipped_low, ou
     print("  R = R0 + sum_j L_j Q_j")
     print("  V =      sum_j L_j Qdot_j")
     print("  extxyz velocities are written in ASE velocity units for direct restart.")
+    print("")
+    if restore is None:
+        print("Ligand restore: off or no covalent ligands (positions as above).")
+    else:
+        info = restore.summary()
+        print(f"Ligand restore: {info['atoms']} ligand atoms, {info['constraints']} bond and 1-3 distances put back")
+        print("  to their first-order values (straight-line torsions and librations stretch bonds);")
+        print(f"  frames with non-bonded ligand contacts below 0.75 x the covalent radii are drawn again (up to {MAX_REDRAW}x).")
 
 
 def generate_wigner_initial_conditions(atoms, vib_data, config):
@@ -152,27 +162,43 @@ def generate_wigner_initial_conditions(atoms, vib_data, config):
     if len(mode_indices) == 0:
         raise ValueError("No real vibrational modes remain for Wigner sampling after filtering.")
 
+    base_positions = np.asarray(vib_data.get_atoms().get_positions(), dtype=np.float64)
+    restore = None
+    if bool(wigner_config.get("restore_ligands", True)):
+        restore = LigandRestore.build(vib_data.get_atoms().get_chemical_symbols(), base_positions)
+
     _print_wigner_summary(
         wigner_config,
         len(mode_indices),
         skipped_imaginary,
         skipped_low,
         output_dir,
+        restore,
     )
 
-    base_positions = np.asarray(vib_data.get_atoms().get_positions(), dtype=np.float64)
     written_files = []
     combined_frames = []
+    redrawn = kept_clashing = 0
 
     print("Generating Wigner initial conditions...", flush=True)
     for i in range(n_initial_conditions):
-        q, qdot_fs = _sample_mode_amplitudes(frequencies_cm, mode_indices, temperature_K, rng)
-        displacement = np.einsum("m,mij->ij", q, cart_modes)
+        for attempt in range(MAX_REDRAW + 1):
+            q, qdot_fs = _sample_mode_amplitudes(frequencies_cm, mode_indices, temperature_K, rng)
+            positions = base_positions + np.einsum("m,mij->ij", q, cart_modes)
+            if restore is None:
+                break
+            positions = restore(positions)
+            if not len(restore.clashes(positions)):
+                break
+            if attempt == 0:
+                redrawn += 1
+        else:
+            kept_clashing += 1
         velocities_fs = np.einsum("m,mij->ij", qdot_fs, cart_modes)
         velocities_ase = velocities_fs / units.fs
 
         frame = atoms.copy()
-        frame.set_positions(base_positions + displacement)
+        frame.set_positions(positions)
         frame.set_velocities(velocities_ase)
         frame.set_array("velocities", np.asarray(velocities_ase, dtype=np.float64))
 
@@ -190,6 +216,7 @@ def generate_wigner_initial_conditions(atoms, vib_data, config):
                 "wigner_frequency_cutoff_cm": cutoff_cm,
                 "wigner_modes_included": int(len(mode_indices)),
                 "wigner_seed": str(wigner_config.get("random_seed", None)),
+                "wigner_ligand_restore": restore is not None,
             }
         )
 
@@ -211,5 +238,7 @@ def generate_wigner_initial_conditions(atoms, vib_data, config):
         write(combined_path, combined_frames, format="extxyz")
         print(f"Combined Wigner initial conditions saved to {combined_path}")
 
+    if restore is not None:
+        print(f"Ligand clashes: {redrawn} frames drawn again, {kept_clashing} kept with a clash after {MAX_REDRAW} redraws.")
     print(f"Wigner initial conditions written: {len(written_files)}")
     return written_files

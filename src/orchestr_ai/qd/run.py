@@ -158,6 +158,7 @@ class Settings:
     wigner_cutoff_cm: float = 20.0      # modes below are not sampled (translations, rotations, numerical noise)
     wigner_soft_cm: float = 50.0        # modes below are sampled with the width of a mode at this frequency
     wigner_seed: int = 0
+    wigner_restore_ligands: bool = True # put covalent-ligand bond and 1-3 distances back to first order (qd/ligand_restore.py)
     md_enabled: bool = False            # MD runs on a subset of the library: switch on per job
     md_schedule: List = field(default_factory=lambda: [[300.0], [300.0, 1000.0]])  # [T] or ramp [T0, T1]: one replica each
     md_ps: float = 5.0                  # length of every replica
@@ -221,7 +222,8 @@ class Settings:
                       "hessian_max_atoms": self.sites_hessian_max_atoms, "solvation": self.sites_solvation},
             "report": {},
             "wigner": {**mace, "temperatures": self.wigner_temperatures, "samples": self.wigner_samples,
-                       "cutoff_cm": self.wigner_cutoff_cm, "soft_cm": self.wigner_soft_cm, "seed": self.wigner_seed},
+                       "cutoff_cm": self.wigner_cutoff_cm, "soft_cm": self.wigner_soft_cm, "seed": self.wigner_seed,
+                       **({"restore_ligands": False} if not self.wigner_restore_ligands else {})},
             "md": {**mace, "enabled": self.md_enabled, "schedule": self.md_schedule, "ps": self.md_ps,
                    "timestep_fs": self.md_timestep_fs, "thermostat": self.md_thermostat,
                    "tau_fs": self.md_tau_fs, "friction_fs": self.md_friction_fs,

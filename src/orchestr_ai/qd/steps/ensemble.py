@@ -9,6 +9,13 @@ wigner  For each temperature, `wigner_samples` structures drawn from the quantum
         (below wigner_soft_cm: ligand rotations, floppy surface motion) are sampled
         with the width of a wigner_soft_cm mode, because a straight-line displacement
         along a rotation-like mode at its own (huge) amplitude stretches bonds.
+        Covalent ligands (acetate, oleate, amines) are then restored (wigner_restore_ligands,
+        qd/ligand_restore.py): their bond and 1-3 distances are put back to their first-order
+        values, which removes the bond stretching of straight-line torsions and librations
+        (methyl groups) and keeps the rotations; metal, core and halide atoms do not move,
+        and Cl-capped dots are unchanged.  Frames where two ligand atoms not bonded at the
+        minimum come closer than 0.75 x their covalent radii (a methyl H in the next acetate's
+        O, about 1 frame in 100 at 600 K) are drawn again.
 
 md      Short MD with MACE-MH-1 in the canonical ensemble: velocity Verlet with the CSVR
         thermostat (Bussi, Donadio, Parrinello, J. Chem. Phys. 126, 014101 (2007): the
@@ -70,8 +77,13 @@ def _masses(symbols):
     return np.array([atomic_masses[atomic_numbers[s]] for s in symbols])
 
 
-def wigner_samples(pos0, masses, freqs_cm, modes_mw, T, n, rng, cutoff_cm=20.0, soft_cm=50.0):
-    """n (positions A, velocities A/fs) from the Wigner distribution at T (modes: mass-weighted, (3N, m))."""
+def wigner_samples(pos0, masses, freqs_cm, modes_mw, T, n, rng, cutoff_cm=20.0, soft_cm=50.0, restore=None,
+                   stats=None):
+    """n (positions A, velocities A/fs) from the Wigner distribution at T (modes: mass-weighted, (3N, m)).
+
+    restore: a LigandRestore (qd/ligand_restore.py) applied to the positions, or None.  With a
+    restore, frames whose ligands clash (restore.clashes) are drawn again, up to MAX_REDRAW times;
+    stats (a dict, optional) gets "redrawn" (frames drawn again) and "clashing" (kept with a clash)."""
     keep = np.flatnonzero(freqs_cm > cutoff_cm)
     w = 2 * np.pi * C_CM * np.maximum(freqs_cm[keep], soft_cm)          # rad/s
     x = HBAR * w / (2 * KB_J * max(T, 1e-6))
@@ -80,11 +92,41 @@ def wigner_samples(pos0, masses, freqs_cm, modes_mw, T, n, rng, cutoff_cm=20.0, 
     sig_v = np.sqrt(HBAR * w / 2 * coth / (AMU * 1e-20) * 1e-30)       # amu^1/2 A/fs
     L = modes_mw[:, keep]
     inv_sqrt_m = np.repeat(1 / np.sqrt(masses), 3)
-    Q = rng.standard_normal((n, len(keep))) * sig_q
-    V = rng.standard_normal((n, len(keep))) * sig_v
-    dx = (Q @ L.T) * inv_sqrt_m
-    dv = (V @ L.T) * inv_sqrt_m
-    return pos0[None] + dx.reshape(n, -1, 3), dv.reshape(n, -1, 3)
+
+    def draw(k):
+        Q = rng.standard_normal((k, len(keep))) * sig_q
+        V = rng.standard_normal((k, len(keep))) * sig_v
+        P = pos0[None] + ((Q @ L.T) * inv_sqrt_m).reshape(k, -1, 3)
+        if restore is not None:
+            P = restore.frames(P)
+        return P, ((V @ L.T) * inv_sqrt_m).reshape(k, -1, 3)
+
+    P, dv = draw(n)
+    redrawn = clashing = 0
+    if restore is not None:
+        from ..ligand_restore import MAX_REDRAW
+        for f in range(n):
+            if not len(restore.clashes(P[f])):
+                continue
+            redrawn += 1
+            for _ in range(MAX_REDRAW):
+                (p,), (v,) = draw(1)
+                if not len(restore.clashes(p)):
+                    P[f], dv[f] = p, v
+                    break
+            else:
+                clashing += 1
+    if stats is not None:
+        stats.update(redrawn=redrawn, clashing=clashing)
+    return P, dv
+
+
+def _ligand_restore(s, symbols, pos0):
+    """The ligand restore of this dot, or None (switched off, or no covalent ligands)."""
+    if not getattr(s, "wigner_restore_ligands", True):
+        return None
+    from ..ligand_restore import LigandRestore
+    return LigandRestore.build(symbols, pos0)
 
 
 def _element_means(symbols, desc):
@@ -190,10 +232,12 @@ def run_wigner(ctx) -> dict:
     latent = write_latent(out_dir / "optimised.xyz", [d0], [symbols], s)
     emb = {"optimised_per_atom": d0.astype(np.float16)}
     rng = np.random.default_rng(s.wigner_seed)
+    restore = _ligand_restore(s, symbols, pos0)
     per_T = {}
     for T in s.wigner_temperatures:
+        redraw = {}
         P, V = wigner_samples(pos0, masses, freqs, modes, T, s.wigner_samples, rng,
-                              s.wigner_cutoff_cm, s.wigner_soft_cm)
+                              s.wigner_cutoff_cm, s.wigner_soft_cm, restore, redraw)
         lab = _label(ev, symbols, P)
         frames = [{"positions": P[k], "velocities": V[k], "forces": f, "energy": e,
                    "info": {"T_K": float(T), "sample": k, "source": "wigner"}} for k, (e, f, _d) in enumerate(lab)]
@@ -206,7 +250,9 @@ def run_wigner(ctx) -> dict:
         rmsd = np.sqrt(((P - pos0[None]) ** 2).sum(axis=2).mean(axis=1))
         per_T[str(int(T))] = {"n": len(lab), "dE_mean_eV": float(dE.mean()), "dE_std_eV": float(dE.std()),
                               "dE_harmonic_eV": harmonic_potential_energy(freqs, T, s.wigner_cutoff_cm, s.wigner_soft_cm),
-                              "fmax_max_eV_A": float(fmax.max()), "rmsd_mean_A": float(rmsd.mean())}
+                              "fmax_max_eV_A": float(fmax.max()), "rmsd_mean_A": float(rmsd.mean()),
+                              **({"redrawn_clash": redraw["redrawn"], "kept_clashing": redraw["clashing"]}
+                                 if restore is not None else {})}
     els = sorted(set(symbols))
     np.savez_compressed(out_dir / "embeddings.npz", elements=np.array(els), **emb)
     n_used = int(np.sum(freqs > s.wigner_cutoff_cm))
@@ -215,7 +261,8 @@ def run_wigner(ctx) -> dict:
                 "wigner": {"temperatures_K": list(map(float, s.wigner_temperatures)), "samples": s.wigner_samples,
                            "seed": s.wigner_seed, "cutoff_cm": s.wigner_cutoff_cm, "soft_cm": s.wigner_soft_cm,
                            "modes_used": n_used, "soft_modes": n_soft,
-                           "imaginary_modes": int(np.sum(freqs < 0))},
+                           "imaginary_modes": int(np.sum(freqs < 0)),
+                           "ligand_restore": restore.summary() if restore is not None else None},
                 "latent": latent,
                 "model": mace_provenance(s.head, s.model, s.device, s.dtype)}
     _update_manifest(out_dir, manifest)
@@ -362,9 +409,11 @@ def run_md(ctx) -> dict:
     names = [f"{int(sc[0])}K" if len(sc) == 1 else f"ramp_{int(sc[0])}-{int(sc[1])}K" for sc in scheds]
     names = [n if names.count(n) == 1 else f"{n}_{k}" for k, n in enumerate(names)]
     rng = np.random.default_rng(s.md_seed)
+    restore = _ligand_restore(s, symbols, pos0)
     systems, vels = [], []
     for sc in scheds:                          # replicas start from Wigner samples at their first temperature
-        P, Vw = wigner_samples(pos0, masses, freqs, modes, sc[0], 1, rng, s.wigner_cutoff_cm, s.wigner_soft_cm)
+        P, Vw = wigner_samples(pos0, masses, freqs, modes, sc[0], 1, rng, s.wigner_cutoff_cm, s.wigner_soft_cm,
+                               restore)
         systems.append((symbols, P[0]))
         vels.append(Vw[0])
     t0 = time.time()

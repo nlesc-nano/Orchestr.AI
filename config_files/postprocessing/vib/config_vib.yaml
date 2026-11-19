@@ -78,5 +78,6 @@ vib:
     skip_imaginary_modes: true
     remove_translation: false
     remove_rotation: false
+    restore_ligands: true        # covalent-ligand bond and 1-3 distances back to first order (no stretched C-H)
     write_combined_trajectory: true
     combined_file: "wigner_initial_conditions.xyz"
