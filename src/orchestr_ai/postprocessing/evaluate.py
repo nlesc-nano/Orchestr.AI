@@ -658,15 +658,17 @@ class DatasetManager:
         except OSError:
             return os.path.abspath(self.train_path) == os.path.abspath(self.eval_path)
 
-    def load_active_learning_datasets(self):
+    def load_active_learning_datasets(self, labels_optional=False):
+        # labels_optional/single model: without calibration/validation data the training frames are the reference
         print("\n--- Setting up Active Learning Calibration Dataset ---")
-        if not self.validation_path or not os.path.exists(self.validation_path):
+        has_val = bool(self.validation_path and os.path.exists(self.validation_path))
+        if not has_val and not labels_optional:
             raise ValueError("eval.mode='active_learning' requires eval.validation_data (or legacy eval.eval_input_xyz).")
         pool_path = self.eval_cfg.get("unlabeled_pool_path")
         if not pool_path or not os.path.exists(pool_path):
             raise ValueError("eval.mode='active_learning' requires eval.unlabeled_pool_path.")
 
-        purge = _parse_bool_like(self.eval_cfg.get("purge_redundant_validation", True), default=True)
+        purge = _parse_bool_like(self.eval_cfg.get("purge_redundant_validation", True), default=True) and has_val
         if purge and (not self.train_path or not os.path.exists(self.train_path)):
             raise ValueError("purge_redundant_validation=true requires eval.training_data for active_learning mode.")
 
@@ -684,7 +686,7 @@ class DatasetManager:
 
         val_frames, val_E, val_F, val_E_singlet, val_F_singlet, val_E_triplet, val_F_triplet = _load_labeled_set(
             self.validation_path, "validation"
-        )
+        ) if has_val else ([], [], [], [], [], [], [])
         if separate_calibration:
             cal_frames, cal_E, cal_F, cal_E_singlet, cal_F_singlet, cal_E_triplet, cal_F_triplet = _load_labeled_set(
                 calibration_path, "calibration"
@@ -729,8 +731,15 @@ class DatasetManager:
             cal_E_singlet, cal_F_singlet = val_E_singlet, val_F_singlet
             cal_E_triplet, cal_F_triplet = val_E_triplet, val_F_triplet
 
+        source = "validation"
+        if not cal_frames and labels_optional:
+            cal_frames, cal_E, cal_F, source = train_frames, train_E, train_F, "training"
+            cal_E_singlet = cal_F_singlet = cal_E_triplet = cal_F_triplet = []
+            if not train_frames:
+                print("[Dataset] No labelled frames: geometry filters and force cap are skipped.")
+
         n_cal = len(cal_frames)
-        if n_cal < 2:
+        if n_cal < 2 and not (labels_optional and n_cal == 0):
             raise ValueError("active_learning mode requires at least two non-redundant calibration frames.")
 
         if separate_calibration:
@@ -748,8 +757,8 @@ class DatasetManager:
             cal_idx = np.arange(n_cal, dtype=int)
             val_idx = np.array([], dtype=int)
             rdf_ref_frames = cal_frames
-            print(f"[Dataset] Calibration source: validation ({n_cal} frames).")
-            print("[Dataset] Active-learning thresholds and calibration will be based on validation data.")
+            print(f"[Dataset] Calibration source: {source} ({n_cal} frames).")
+            print(f"[Dataset] Active-learning thresholds and calibration will be based on {source} data.")
 
         all_frames = cal_frames + val_frames if separate_calibration else cal_frames
 
@@ -1725,14 +1734,15 @@ class EvaluationPipeline:
             al_options(self.eval_cfg, self.config.get("model_framework"))   # fail before any ensemble work
 
         if mode == "active_learning":
-            self.ds = data_mgr.load_active_learning_datasets()
+            self.single_model = len(EnsembleRunner(self.config, self.device, self.neighbour_list)._model_paths()) == 1
+            self.ds = data_mgr.load_active_learning_datasets(labels_optional=self.single_model)
             if "ensemble" not in self.uq_methods:
                 raise ValueError("eval.mode='active_learning' requires eval.uncertainty to include 'ensemble'.")
-            self.single_model = len(EnsembleRunner(self.config, self.device, self.neighbour_list)._model_paths()) == 1
             if self.single_model and al_options(self.eval_cfg, self.config.get("model_framework"))[1] != "pv":
                 raise ValueError("A single model has no ensemble sigma: pool active learning needs eval.al_quality: pv.")
             stats_ens, sigma_comp, sigma_E_raw, uq_calibrators, metrics_cal, metrics_eval = (
-                self._run_ensemble_calibration()
+                self._run_ensemble_calibration() if len(self.ds["train_idx"])
+                else (None, np.zeros(0), np.zeros(0), {}, None, None)      # single model without labelled frames
             )
             if _parse_bool_like(self.eval_cfg.get("train_UQstats"), False):
                 self._run_train_uq_plots(uq_calibrators)
@@ -2618,8 +2628,8 @@ class EvaluationPipeline:
         # --- Compute RDF thresholds and physical mask first ---
         rdf_cache = "rdf_thresholds_cache.npz"
         rdf_ref_count = len(self.ds["val_frames_ref"])
-        rdf_thresholds = None
-        if os.path.exists(rdf_cache):
+        rdf_thresholds = None if rdf_ref_count else {}
+        if rdf_ref_count and os.path.exists(rdf_cache):
             data = np.load(rdf_cache, allow_pickle=True)
             if "n_ref_frames" in data and int(data["n_ref_frames"]) == rdf_ref_count:
                 print(f"[Pool-AL] Loading cached RDF thresholds...")
@@ -2636,7 +2646,8 @@ class EvaluationPipeline:
             )
             np.savez_compressed(rdf_cache, rdf_thresholds=rdf_thresholds, n_ref_frames=rdf_ref_count)
 
-        debug_plot_rdfs(self.ds["val_frames_ref"], rdf_thresholds)
+        if rdf_ref_count:
+            debug_plot_rdfs(self.ds["val_frames_ref"], rdf_thresholds)
         rdf_ok_mask = fast_filter_by_rdf_kdtree(pool_frames_thin, rdf_thresholds)
 
         margin = self.eval_cfg.get('detachment_margin', 0.8)
@@ -2647,7 +2658,7 @@ class EvaluationPipeline:
             margin=margin,
             arm_tol=arm_tol,
             verbose=True
-        )
+        ) if rdf_ref_count else rdf_ok_mask
 
         mu_E_pool_thin = mu_E_pool[thin_idx].astype(float)
         sigma_E_pool_thin = sigma_E_pool[thin_idx].astype(float)
@@ -2683,8 +2694,8 @@ class EvaluationPipeline:
         ], dtype=float)
 
         support_mult = float(self.eval_cfg.get("calibration_support_upper_mult", 1.25))
-        train_count_min = float(np.nanmin(train_atom_counts))
-        train_count_max = float(np.nanmax(train_atom_counts))
+        train_count_min, train_count_max = ((float(np.nanmin(train_atom_counts)), float(np.nanmax(train_atom_counts)))
+                                            if len(train_idx) else (-np.inf, np.inf))
         support_E = _in_range(
             sigma_E_pool_atom_raw,
             _range_with_margin(sigma_E_train_atom_raw, upper_mult=support_mult),
@@ -2700,7 +2711,8 @@ class EvaluationPipeline:
         support_count = (pool_atom_counts_thin >= train_count_min) & (pool_atom_counts_thin <= train_count_max)
         size_extrapolation = ~support_count
         support_Fphys = frame_max_force_pool_thin <= (
-            np.nanmax(frame_max_force_train_raw) * float(self.eval_cfg.get("calibration_support_force_mult", 1.5))
+            (np.nanmax(frame_max_force_train_raw) if len(train_idx) else np.inf)
+            * float(self.eval_cfg.get("calibration_support_force_mult", 1.5))
         )
         calibration_in_support = support_E & support_Fmean & support_Fmax & support_Fphys
         ood_risk_mask = ~calibration_in_support
@@ -2978,15 +2990,15 @@ class EvaluationPipeline:
                        al_lambda_rel=al_lambda_rel, quests=quests,
                        quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
                        single_model=self.single_model)
-        train_delta_E_atom = stats_ens.delta_E_frame[train_idx] / train_atom_counts
-
         calibrator = UQCalibrator()
-        mu_E_train = stats_ens.pred_energies[train_idx]
-        mu_E_train_atom = mu_E_train / train_atom_counts
-        sigma_E_train_atom = sigma_E_raw[train_idx] / train_atom_counts
-        calibrator.fit(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
-        if self.do_plot:
-            calibrator.plot_diagnostics(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
+        mu_E_train = stats_ens.pred_energies[train_idx] if stats_ens is not None else np.zeros(0)
+        if stats_ens is not None:      # not fitted without labelled frames
+            train_delta_E_atom = stats_ens.delta_E_frame[train_idx] / train_atom_counts
+            mu_E_train_atom = mu_E_train / train_atom_counts
+            sigma_E_train_atom = sigma_E_raw[train_idx] / train_atom_counts
+            calibrator.fit(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
+            if self.do_plot:
+                calibrator.plot_diagnostics(mu_E_train_atom, sigma_E_train_atom, train_delta_E_atom)
 
         train_forces = [self.ds["F_true"][i] for i in train_idx]
         train_frames = [self.ds["frames"][i] for i in train_idx]
@@ -3239,7 +3251,7 @@ class EvaluationPipeline:
                         s_atom_raw = s_raw / n_atoms
                         _, _, bias_corr_arr = calibrator.calibrate(
                             np.array([e_atom_raw]), np.array([s_atom_raw])
-                        )
+                        ) if calibrator.is_fitted else (None, None, np.zeros(1))
                         e_atom_cal = e_atom_raw - float(bias_corr_arr[0])
                         exp_abs_e_atom = float(expected_abs_E_atom[rel_idx])
                         comment = (

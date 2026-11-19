@@ -464,7 +464,7 @@ class _PoolActiveLearner:
         self.mu_E_atom_pool = np.asarray(self.mu_E_pool, dtype=float) / self.pool_atom_counts
         self.sigma_E_atom_pool = np.asarray(self.sigma_E_pool, dtype=float) / self.pool_atom_counts
 
-        self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5
+        self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5 if len(self.mu_E_atom_train) else np.inf
         self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / self.pool_atom_counts
         self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / self.pool_atom_counts
 
@@ -490,6 +490,14 @@ class _PoolActiveLearner:
             ])
         else:
             self.frame_rel_unc = self.sigma_F_pool_mean / (self.frame_mean_force_pool + REL_FORCE_EPS)
+
+        if not len(self.train_atom_counts):
+            print("[AL] No labelled reference frames: no ceilings and no force cap.")
+            self._train_ref_mask = np.zeros(0, dtype=bool)
+            self.thr_sigma_E_low = self.thr_sigma_F = self.thr_sigma_Fmean = self.thr_Fmag = np.nan
+            self.thr_sigma_E_hi_eff = self.thr_sigma_F_hi_eff = self.thr_sigma_Fmean_hi_eff = np.inf
+            self.thr_Fmag_hi_eff = self.train_Fmax_hard_cap = self.allowed_offset_eff = np.inf
+            return
 
         # Baseline Thresholds (optional stratification by cluster size for mixed train sets)
         stratify = bool(getattr(self, "stratify_train_by_size", False))
