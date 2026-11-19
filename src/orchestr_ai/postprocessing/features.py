@@ -354,7 +354,7 @@ def model_features(kind, frames, runner):
 
 
 def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_report=False):
-    """Features of the labelled (calibration) frames, the training frames (reference) and the pool in the
+    """Features of the labelled frames, the training frames (reference) and the pool in the
     redundancy space of al_kernel, plus the QUESTS reference when it is needed.
 
     latent / ntk_e / ntk_ef: model features z-scored with the training statistics (frame features of one system are
@@ -363,38 +363,45 @@ def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_r
     of the pool indices and only evaluated on the candidates. soap: frame-averaged SOAP; pool frames that fail the
     geometry checks stay at zero. quests: latent features for the frame-level diagnostics; its batch redundancy is
     per atom (quests_reference, quests_greedy).
+    Without training frames the reference has no rows: the pool frames that pass the geometry
+    checks set the normalisation, all their features are computed here, and there is no QUESTS reference.
     """
     kernel = str(eval_cfg.get("al_kernel", "latent")).lower()
+    phys = np.flatnonzero(physical)
     quests = None
-    if kernel == "quests" or quests_report:
+    if (kernel == "quests" or quests_report) and len(train):
         quests = quests_reference(train, target=float(eval_cfg.get("candidate_tol", 0.01)))
     if kernel == "soap":
-        species = sorted({s for a in labelled for s in a.get_chemical_symbols()})
+        species = sorted({s for a in [*(labelled or []), *train, *pool] for s in a.get_chemical_symbols()})
 
         def soap(frames):
             return compute_soap_features(frames, species=species, r_cut=eval_cfg.get("soap_rcut", 6.0),
                                          n_max=eval_cfg.get("soap_nmax", 4), l_max=eval_cfg.get("soap_lmax", 4))[0]
 
-        feat_ref = soap(train)
+        feat_phys = soap([pool[i] for i in phys]) if len(phys) else None
+        feat_ref = soap(train) if len(train) else np.zeros((0, feat_phys.shape[1]))
         feat_pool = np.zeros((len(pool), feat_ref.shape[1]))
-        phys = np.flatnonzero(physical)
         if len(phys):
-            feat_pool[phys] = soap([pool[i] for i in phys])
-        return soap(labelled), feat_ref, feat_pool, quests
+            feat_pool[phys] = feat_phys
+        return None if labelled is None else soap(labelled), feat_ref, feat_pool, quests
 
     kind = "latent" if kernel == "quests" else kernel
-    feat_ref = model_features(kind, train, runner)
-    keep = feat_ref.std(axis=0) > 0
-    mu, sd = feat_ref[:, keep].mean(axis=0), feat_ref[:, keep].std(axis=0)
+    ref = model_features(kind, train if len(train) else [pool[i] for i in phys], runner)
+    keep = ref.std(axis=0) > 0
+    mu, sd = ref[:, keep].mean(axis=0), ref[:, keep].std(axis=0)
 
     def z(x):
         return (x[:, keep] - mu) / sd
 
-    if kind in ("ntk_e", "ntk_ef"):
+    if not len(train):
+        feat_pool = np.zeros((len(pool), int(keep.sum())))
+        feat_pool[phys] = z(ref)
+    elif kind in ("ntk_e", "ntk_ef"):
         feat_pool = lambda idx: z(model_features(kind, [pool[i] for i in idx], runner))
     else:
         feat_pool = z(model_features(kind, pool, runner)) if len(pool) else np.zeros((0, int(keep.sum())))
-    return z(model_features(kind, labelled, runner)), z(feat_ref), feat_pool, quests
+    feat_ref = z(ref) if len(train) else np.zeros((0, int(keep.sum())))
+    return None if labelled is None else z(model_features(kind, labelled, runner)), feat_ref, feat_pool, quests
 
 
 def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_max=4, l_max=4):
@@ -500,7 +507,10 @@ def lcmd(feat_cand, feat_ref, w, n_sel):
 
     The reference frames and the picks are cluster centres. Each step takes the cluster with the largest
     sum of squared weighted distances (w * distance to the nearest centre) and picks its farthest member.
+    Without reference frames (first AL iteration) the candidates' mean is the initial centre.
     """
+    if not len(feat_ref):
+        feat_ref = feat_cand.mean(axis=0, keepdims=True)
     n_ref = len(feat_ref)
     d2 = (feat_cand ** 2).sum(1)[:, None] + (feat_ref ** 2).sum(1)[None] - 2.0 * feat_cand @ feat_ref.T
     assign, dist2 = d2.argmin(axis=1), np.maximum(d2.min(axis=1), 0.0)

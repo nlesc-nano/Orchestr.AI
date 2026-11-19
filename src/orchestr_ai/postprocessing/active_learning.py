@@ -288,6 +288,8 @@ class _PoolActiveLearner:
             "al_kernel": getattr(self, "al_kernel", "latent"),
             "al_quality": getattr(self, "al_quality", "sigma"),
             "al_selector": getattr(self, "al_selector", "greedy"),
+            "al_lambda": getattr(self, "al_lambda", np.nan),
+            "al_lambda_rel": getattr(self, "al_lambda_rel", np.nan),
             "single_model": int(getattr(self, "single_model", False)),
             **{f"quests_h_{el}": v for el, v in (getattr(self, "quests", None) or {"h": {}})["h"].items()},
             "pool_hi_k": getattr(self, "pool_hi_k", np.nan),
@@ -353,6 +355,10 @@ class _PoolActiveLearner:
 
     def _setup_latent_space(self):
         self.G_train = scipy.linalg.solve_triangular(self.L, self.feat_train.T, lower=True).T
+        if len(self.G_train) < 2:       # no reference frames (first AL iteration): no Mahalanobis diagnostic
+            d = self.G_train.shape[1]
+            self.mu_Gtrain, self.Cov_inv, self.dM_thr = np.zeros(d), np.full((d, d), np.nan), np.nan
+            return
 
         self.mu_Gtrain = self.G_train.mean(axis=0)
         Cov_Gtrain = np.cov(self.G_train, rowvar=False) + 1e-6 * np.eye(self.G_train.shape[1])
@@ -754,7 +760,7 @@ class _PoolActiveLearner:
         quad_all[rows] = np.einsum("id,id->i", G, G)
         dM_all[rows] = np.sqrt(np.einsum("id,dk,ik->i", G - self.mu_Gtrain, self.Cov_inv, G - self.mu_Gtrain))
         gamma_all = np.sqrt(quad_all)
-        if getattr(self, "quests_report", False):
+        if getattr(self, "quests_report", False) and getattr(self, "quests", None) is not None:
             novel, per_el = quests_coverage([self.pool_frames[i] for i in good], self.quests)
             self.quests_novel = np.full(n_pool, np.nan)
             self.quests_novel[good] = novel
@@ -764,6 +770,9 @@ class _PoolActiveLearner:
         # Batch over the candidates (features.select_batch): al_selector greedy or lcmd, al_quality sigma
         # (sigmaF_mean in the score) or pv (the kernel alone), al_kernel quests for per-atom redundancy.
         kernel = getattr(self, "al_kernel", "latent")
+        if kernel == "quests" and getattr(self, "quests", None) is None:
+            print("[AL] No training frames: QUESTS needs training atoms, so this batch uses its latent features.")
+            kernel = "latent"
         n_sel = min(len(cand), self.budget_max or len(cand)) if label or single else 0
         picks, acq_c = select_batch(
             getattr(self, "al_quality", "sigma"), getattr(self, "al_selector", "greedy"), kernel, n_sel,
@@ -775,6 +784,21 @@ class _PoolActiveLearner:
         acq = np.zeros(n_pool)
         acq[cand] = acq_c
         self.picks = cand[picks].tolist()
+
+        # Kernel diagnostics: ridge lambda; rank and effective dimension d_lambda = sum s^2/(s^2 + lambda) of the
+        # reference features; picks among the top frames by |f| (the large-lambda limit, a feature-norm ranking); and
+        # the median largest |f_j| of the picks vs the candidates (feature outliers).
+        lam = float(getattr(self, "al_lambda", np.nan))
+        s2 = np.linalg.svd(self.feat_train, compute_uv=False) ** 2 if len(self.feat_train) else np.zeros(0)
+        f_c = feat[pos]
+        top = set(np.argsort(-np.einsum("id,id->i", f_c, f_c))[:len(picks)].tolist())
+        f_max = np.abs(f_c).max(axis=1) if f_c.size else np.zeros(len(f_c))
+        print(f"  -> Kernel | lambda {lam:.4g} (al_lambda_rel {getattr(self, 'al_lambda_rel', np.nan):g}) | "
+              f"d {f_c.shape[1]} | reference frames {len(self.feat_train)}, rank "
+              f"{int(np.sum(s2 > 1e-12 * s2.max())) if len(s2) else 0}, d_lambda {np.sum(s2 / (s2 + lam)):.1f} | "
+              f"picks among the top {len(picks)} by |f|: {len(top & set(np.asarray(picks).tolist()))} | median max|f_j|: "
+              f"picks {np.median(f_max[picks]) if len(picks) else np.nan:.2f}, candidates "
+              f"{np.median(f_max) if len(f_max) else np.nan:.2f}")
 
         # --- NEW INFORMATIVE PRINT LOGGING WITH REJECTION REASONS ---
         print(f"  -> Pool | GeomOK: {len(good):4d} | PhysOK: {len(phys):4d} | "
@@ -935,7 +959,7 @@ class _PoolActiveLearner:
 # --- Wrapper to maintain evaluate.py compatibility ---
 def adaptive_learning_mig_pool_windowed(*args, **kwargs):
     learner = _PoolActiveLearner(**dict(zip([
-        "pool_frames", "feat_pool", "feat_train", "alpha_sq", "L", "forces_train", "sigma_energy", 
+        "pool_frames", "feat_pool", "feat_train", "L", "forces_train", "sigma_energy",
         "sigma_force", "mu_E_frame_train", "mu_E_pool", "sigma_E_pool", "mu_F_pool", 
         "sigma_F_pool", "rdf_thresholds"], args)), **kwargs)
     return learner.run()

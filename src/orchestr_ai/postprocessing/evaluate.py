@@ -38,7 +38,6 @@ from orchestr_ai.postprocessing.mlff_plotting import plot_mlff_stats
 from orchestr_ai.postprocessing.plotting import generate_uq_plots
 # Active Learning & Geometry Sanity
 from orchestr_ai.postprocessing.active_learning import (
-    calibrate_alpha_reg_gcv,
     adaptive_learning_mig_pool_windowed,
     adaptive_learning_ensemble_calibrated,
     UQCalibrator,
@@ -2954,29 +2953,32 @@ class EvaluationPipeline:
             
         np.savez_compressed("pool_energy_trace.npz", steps=np.arange(len(mu_E_pool)), mu=sm["mu"].values, sigma=sm["sigma"].values, bad=bad_mask)
 
-        # Calibrations. Features of the calibration (GCV), training (novelty reference) and pool frames in the
-        # redundancy space of al_kernel (features.al_feature_space).
-        feat_cal, feat_ref, feat_pool_thin, quests = al_feature_space(
+        # Features of the training frames (novelty reference) and pool frames in the redundancy space of al_kernel
+        # (features.al_feature_space). In active_learning mode the reference is eval.training_data; without it (first
+        # iteration) there is none and the posterior variance is the prior (label-free first batch).
+        _, feat_ref, feat_pool_thin, quests = al_feature_space(
             self.eval_cfg,
             runner,
-            [self.ds["frames"][i] for i in train_idx],
-            self.ds.get("train_frames") or [self.ds["frames"][i] for i in train_idx],
+            None,
+            self.ds["train_frames"] if "train_frames" in self.ds else [self.ds["frames"][i] for i in train_idx],
             pool_frames_thin,
             rdf_ok_mask,
             quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
         )
-        al_opts = dict(al_kernel=kernel, al_quality=quality, al_selector=selector,
-                       quests=quests, quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
+        # Ridge lambda = al_lambda_rel x mean |f|^2 of the reference frames (of the pool frames that pass the geometry
+        # checks when there is no reference), i.e. a fixed sigma^2 on a kernel scaled to a unit mean training diagonal
+        # (Holzmueller et al., JMLR 2023: sigma^2 = 1e-6). It is not fitted to any labels.
+        al_lambda_rel = float(self.eval_cfg.get("al_lambda_rel", 1.0e-6))
+        scale_rows = feat_ref if len(feat_ref) else feat_pool_thin[rdf_ok_mask]
+        al_lambda = al_lambda_rel * float(np.mean(np.einsum("id,id->i", scale_rows, scale_rows)))
+        print(f"[Pool-AL] Ridge lambda = {al_lambda:.4g} (al_lambda_rel {al_lambda_rel:g} x mean |f|^2 of the "
+              f"{len(scale_rows)} {'training' if len(feat_ref) else 'pool'} frames)")
+        L_chol = np.linalg.cholesky(feat_ref.T @ feat_ref + al_lambda * np.eye(feat_ref.shape[1]))
+        al_opts = dict(al_kernel=kernel, al_quality=quality, al_selector=selector, al_lambda=al_lambda,
+                       al_lambda_rel=al_lambda_rel, quests=quests,
+                       quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
                        single_model=self.single_model)
-        good_rows = np.isfinite(feat_cal).all(axis=1) & np.isfinite(stats_ens.delta_E_frame[train_idx])
-        print(f"[Pool-AL] Extracted {good_rows.sum()} valid training frames for GP calibration.")
-        if int(good_rows.sum()) < 2:
-            raise ValueError("Pool AL needs at least two finite training latent rows for GP calibration")
         train_delta_E_atom = stats_ens.delta_E_frame[train_idx] / train_atom_counts
-        alpha_sq, lam_gcv, _, _, _ = calibrate_alpha_reg_gcv(feat_cal[good_rows], train_delta_E_atom[good_rows])
-
-        # Novelty reference = the frames the models were trained on (ridge lambda from the GCV above)
-        L_chol = np.linalg.cholesky(feat_ref.T @ feat_ref + lam_gcv * np.eye(feat_ref.shape[1]))
 
         calibrator = UQCalibrator()
         mu_E_train = stats_ens.pred_energies[train_idx]
@@ -3018,7 +3020,7 @@ class EvaluationPipeline:
             try:
                 print(f"[Pool-AL] Running diagnostic selection for primary head '{orig_mace_head}'...")
                 _, sel_rel_thin_orig = adaptive_learning_mig_pool_windowed(
-                    pool_frames_thin, feat_pool_thin, feat_ref, alpha_sq, L_chol,
+                    pool_frames_thin, feat_pool_thin, feat_ref, L_chol,
                     forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
                     mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_orig_thin,
                     rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
@@ -3078,7 +3080,7 @@ class EvaluationPipeline:
                     train_forces_other = [other_F_true[i] for i in train_idx]
 
                     _, sel_rel_thin_other = adaptive_learning_mig_pool_windowed(
-                        pool_frames_thin, feat_pool_thin, feat_ref, alpha_sq, L_chol,
+                        pool_frames_thin, feat_pool_thin, feat_ref, L_chol,
                         forces_train=train_forces_other, sigma_energy=sigma_energy_train_other, sigma_force=sigma_force_train_other,
                         mu_E_frame_train=mu_E_train_other, mu_E_pool=mu_E_pool_other_thin, sigma_E_pool=sigma_E_pool_other_thin,
                         rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,
@@ -3139,7 +3141,7 @@ class EvaluationPipeline:
             # Single-head fallback
             try:
                 _, sel_rel_thin_orig = adaptive_learning_mig_pool_windowed(
-                    pool_frames_thin, feat_pool_thin, feat_ref, alpha_sq, L_chol,
+                    pool_frames_thin, feat_pool_thin, feat_ref, L_chol,
                     forces_train=train_forces, sigma_energy=sigma_energy_train, sigma_force=sigma_force_train,
                     mu_E_frame_train=mu_E_train, mu_E_pool=mu_E_pool_thin, sigma_E_pool=sigma_E_pool_thin,
                     rdf_thresholds=rdf_thresholds, rdf_ok_mask=rdf_ok_mask,

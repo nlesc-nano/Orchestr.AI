@@ -46,6 +46,7 @@ eval:
   al_kernel: latent # Redundancy features: latent (invariant node features) | soap | ntk_e (energy NTK; MACE, SchNet, PaiNN) | ntk_ef (energy + force NTK; MACE, SchNet, PaiNN) | quests (per-atom QUESTS coverage)
   al_quality: sigma # sigma: candidates ranked by ensemble sigmaF_mean x redundancy | pv: the kernel alone decides (posterior variance; plain LCMD)
   al_selector: greedy # greedy (log-det, rank-1 updates) | lcmd (cluster-based; not with quests)
+  al_lambda_rel: 1.0e-6 # greedy: ridge lambda = al_lambda_rel x mean |f|^2 of the training frames (Holzmueller et al., JMLR 2023); not fitted to labels
   al_members: all # latent, ntk_e, ntk_ef: "all" concatenates every member (NTK cost grows with members); an index (e.g. 0) keeps one
   ntk_probes: 16 # ntk_ef only: random probes for the force part (cost grows linearly)
   quests_report: false # Print the per-element QUESTS coverage of the pool (share of atoms with dH > 0)
