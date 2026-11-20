@@ -365,7 +365,7 @@ class _PoolActiveLearner:
         self.Cov_inv = np.linalg.inv(Cov_Gtrain)
         
         diff_train = self.G_train - self.mu_Gtrain
-        dM_train = np.sqrt(np.einsum("id,dk,ik->i", diff_train, self.Cov_inv, diff_train))
+        dM_train = np.sqrt(((diff_train @ self.Cov_inv) * diff_train).sum(axis=1))
         self.dM_thr = np.quantile(dM_train, 99.0 / 100.0)
 
     def _setup_thresholds(self):
@@ -766,7 +766,8 @@ class _PoolActiveLearner:
         G = scipy.linalg.solve_triangular(self.L, feat.T, lower=True).T
         quad_all, dM_all = np.full(n_pool, np.nan), np.full(n_pool, np.nan)
         quad_all[rows] = np.einsum("id,id->i", G, G)
-        dM_all[rows] = np.sqrt(np.einsum("id,dk,ik->i", G - self.mu_Gtrain, self.Cov_inv, G - self.mu_Gtrain))
+        diff = G - self.mu_Gtrain
+        dM_all[rows] = np.sqrt(((diff @ self.Cov_inv) * diff).sum(axis=1))
         gamma_all = np.sqrt(quad_all)
         if getattr(self, "quests_report", False) and getattr(self, "quests", None) is not None:
             # data completeness at a fixed bandwidth (features.quests_completeness), comparable across AL rounds
