@@ -43,7 +43,7 @@ eval:
   active_learning: "influence"
   budget_max: 50 # Number of pool frames to select for DFT labelling
   candidate_tol: 0.01 # Label nothing if candidates (above a floor, below the ceilings) are <= this fraction of the pool
-  al_kernel: latent # Redundancy features: latent (invariant node features) | lastlayer (inputs of the readout weights; MACE) | soap | ntk_e (energy NTK; MACE, SchNet, PaiNN) | ntk_ef (energy + force NTK; MACE, SchNet, PaiNN) | quests (per-atom QUESTS coverage)
+  al_kernel: latent # Redundancy features: latent (invariant node features) | lastlayer (inputs of the readout weights; MACE) | soap | ntk_e (energy NTK; MACE, SchNet, PaiNN) | ntk_ef (energy + force NTK; MACE, SchNet, PaiNN) | quests (minimum set cover of per-atom QUESTS environments; Yu, Lordi & Schwalbe-Koda, J. Chem. Phys. 164, 164111 (2026))
   al_quality: sigma # sigma: candidates ranked by ensemble sigmaF_mean x redundancy | pv: the kernel alone decides (posterior variance; plain LCMD)
   al_selector: greedy # greedy (log-det, rank-1 updates) | lcmd (cluster-based; not with quests)
   al_lambda_rel: 1.0e-6 # greedy: ridge lambda = al_lambda_rel x mean |f|^2 of the training frames (Holzmueller et al., JMLR 2023); not fitted to labels
@@ -54,7 +54,8 @@ eval:
   soap_nmax: 12 # soap only: radial basis functions
   soap_lmax: 6 # soap only: maximum degree of the spherical harmonics
   soap_sigma: 0.3 # soap only: width (A) of the atomic Gaussians (0.3 A with hydrogen present; 0.5 A for H-free systems up to the third row)
-  quests_report: false # Print the per-element QUESTS coverage of the pool (share of atoms with dH > 0)
+  quests_report: false # Print the QUESTS data completeness of the training set (Yu, Lordi & Schwalbe-Koda, J. Chem. Phys. 2026): overlap with the pool, training entropy and diversity, novel pool atoms per element
+  quests_report_h: 0.015 # Fixed bandwidth (1/A) of quests_report (QUESTS default), so the values compare across AL rounds and runs; the quests kernel fits its own per element
   merge_al_selections: true
 
   # Pool stride

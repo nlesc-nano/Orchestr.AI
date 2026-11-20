@@ -583,30 +583,43 @@ def quests_greedy(frames, u, atom_sigma, n_sel, quests, relative=True):
     A is each atom's kernel sum over the training atoms of its element plus the atoms already picked. An atom's
     distinctness min(1, 1/A) = min(1, exp(dH)) is 1 while it is novel (dH > 0) and smaller the better it is covered
     (its term in the QUESTS diversity D = log sum exp(dH)). relative=True scores u x the sigma^2-weighted mean
-    distinctness of the frame's atoms, so low-sigma atoms (e.g. bulk solvent) barely count; relative=False scores the
-    frame's largest dH (Yu, Lordi & Schwalbe-Koda, JCP 2026). Each pick adds its atoms to A.
+    distinctness of the frame's atoms, so low-sigma atoms (e.g. bulk solvent) barely count. relative=False is the
+    minimum set cover of Yu, Lordi & Schwalbe-Koda (J. Chem. Phys. 164, 164111 (2026), Eq. 9; QUESTS
+    msc_conditional): the frame's largest dH plus its own entropy H(frame), their Eq. 4 over the frame's environments,
+    computed once. Their descriptor and H ignore species (single-element systems); here atoms only meet atoms of their
+    own element, as for dH, and H(frame) is the atom-weighted mean of the per-element entropies (the published H for
+    one element). Each pick adds its atoms to A.
     """
     from quests.descriptor import get_descriptors
-    from quests.entropy import kernel_sum
+    from quests.entropy import entropy, kernel_sum
 
     if not frames:
         return [], np.zeros(0)
     h_of = lambda el: quests["h"].get(el, float(np.median(list(quests["h"].values()))))
     X = get_descriptors(frames, k=quests["k"], cutoff=quests["cutoff"])
     sym = np.concatenate([a.get_chemical_symbols() for a in frames])
-    fid = np.repeat(np.arange(len(frames)), [len(a) for a in frames])
+    n_at = np.array([len(a) for a in frames])
+    fid = np.repeat(np.arange(len(frames)), n_at)
+    start = np.r_[0, np.cumsum(n_at)[:-1]]              # each frame's first row of X (frames are contiguous)
     w = np.concatenate(atom_sigma) ** 2
     A = np.zeros(len(X))
     for el in np.unique(sym):
         if el in quests["ref"]:
             A[sym == el] = kernel_sum(X[sym == el], quests["ref"][el], h=h_of(el), batch_size=2000)
+    if not relative:
+        H = np.array([sum((s == el).sum() * entropy(x[s == el], h=h_of(el)) for el in np.unique(s)) / len(s)
+                      for x, s in zip(np.split(X, start[1:]), np.split(sym, start[1:]))])
+
+    def max_dH():
+        return np.maximum.reduceat(-np.log(np.maximum(A, np.finfo(float).tiny)), start)
 
     def score():
         if relative:
             distinct = np.minimum(1.0, 1.0 / np.maximum(A, np.finfo(float).tiny))
             return u * np.bincount(fid, weights=w * distinct, minlength=len(frames)) / np.bincount(fid, weights=w, minlength=len(frames))
-        dH = -np.log(np.maximum(A, np.finfo(float).tiny))
-        return np.array([dH[fid == f].max() for f in range(len(frames))])
+        return max_dH() + H
+
+    dH0 = None if relative else max_dH()
 
     picks, acq = [], np.zeros(len(frames))
     for _ in range(n_sel):
@@ -620,11 +633,25 @@ def quests_greedy(frames, u, atom_sigma, n_sel, quests, relative=True):
             A[m] += kernel_sum(X[m], X[m & (fid == r)], h=h_of(el), batch_size=2000)
     rest = np.setdiff1d(np.arange(len(frames)), picks)
     acq[rest] = score()[rest]
+    if not relative and picks:
+        print(f"  -> QUESTS set cover | median largest dH (before the batch): picks {np.median(dH0[picks]):.2f}, "
+              f"candidates {np.median(dH0):.2f} | median H(frame): picks {np.median(H[picks]):.3f}, "
+              f"candidates {np.median(H):.3f} (nats)")
     return picks, acq
 
 
-def quests_coverage(frames, quests):
-    """QUESTS coverage of `frames` by the training set: the share of atoms with dH > 0, per frame and per element."""
+def quests_completeness(frames, quests, h=0.015):
+    """QUESTS data completeness of the training set (the atoms of quests["ref"]) w.r.t. the training set plus `frames`
+    (the pool), with one fixed bandwidth h for every element (the QUESTS default 0.015 1/A), so the values compare
+    across AL rounds and runs. These are the dataset metrics of Yu, Lordi & Schwalbe-Koda (J. Chem. Phys. 164, 164111
+    (2026); quests DatasetCompressor): the overlap, i.e. the share of all environments with dH <= 0 w.r.t. the training
+    set, and the training set's entropy H (their Eq. 4) and diversity D = log sum_i 1 / sum_j K_h(x_i, x_j), the log of
+    its number of distinct environments. Atoms only meet atoms of their own element; overall, H is the atom-weighted
+    mean and D = log sum_el exp(D_el).
+
+    Returns the share of novel atoms (dH > 0) of each frame and {element, ..., "all": (overlap, H, D, share of novel
+    atoms of `frames`)}.
+    """
     from quests.descriptor import get_descriptors
     from quests.entropy import kernel_sum
 
@@ -632,11 +659,23 @@ def quests_coverage(frames, quests):
     sym = np.concatenate([a.get_chemical_symbols() for a in frames])
     fid = np.repeat(np.arange(len(frames)), [len(a) for a in frames])
     novel = np.ones(len(X), dtype=bool)
-    for el in np.unique(sym):
-        if el in quests["ref"]:
-            novel[sym == el] = kernel_sum(X[sym == el], quests["ref"][el], h=quests["h"][el], batch_size=2000) < 1.0
+    out, n_all, novel_all, nH, eD = {}, 0, 0, 0.0, 0.0
+    for el in sorted(set(sym) | set(quests["ref"])):
+        ref, m = quests["ref"].get(el, X[:0]), sym == el
+        if len(ref) and m.any():
+            novel[m] = kernel_sum(X[m], ref, h=h, batch_size=2000) < 1.0
+        H = D = np.nan
+        if len(ref):
+            p = kernel_sum(ref, ref, h=h, batch_size=2000)      # sum_j K_h(x_i, x_j), self term included
+            H, D = float(-np.mean(np.log(p / len(p)))), float(np.log(np.sum(1 / p)))
+            nH, eD = nH + len(ref) * H, eD + np.exp(D)
+        n_new = int(novel[m].sum())
+        out[el] = (1 - n_new / (len(ref) + m.sum()), H, D, n_new / max(m.sum(), 1))
+        n_all, novel_all = n_all + len(ref) + int(m.sum()), novel_all + n_new
+    out["all"] = (1 - novel_all / n_all, nH / sum(len(r) for r in quests["ref"].values()), float(np.log(eD)),
+                  novel_all / max(len(X), 1))
     per_frame = np.bincount(fid, weights=novel.astype(float)) / np.bincount(fid)
-    return per_frame, {el: float(novel[sym == el].mean()) for el in np.unique(sym)}
+    return per_frame, out
 
 
 def select_batch(quality, selector, kernel, n_sel, u, G, feat, feat_ref, frames=None, atom_sigma=None, quests=None):

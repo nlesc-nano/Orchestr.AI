@@ -2989,6 +2989,7 @@ class EvaluationPipeline:
         al_opts = dict(al_kernel=kernel, al_quality=quality, al_selector=selector, al_lambda=al_lambda,
                        al_lambda_rel=al_lambda_rel, quests=quests,
                        quests_report=_parse_bool_like(self.eval_cfg.get("quests_report"), False),
+                       quests_report_h=float(self.eval_cfg.get("quests_report_h", 0.015)),
                        single_model=self.single_model)
         calibrator = UQCalibrator()
         mu_E_train = stats_ens.pred_energies[train_idx] if stats_ens is not None else np.zeros(0)

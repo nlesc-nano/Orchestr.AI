@@ -25,7 +25,7 @@ from typing import Tuple, List, Optional, Dict, Any
 from sklearn.isotonic import IsotonicRegression
 from orchestr_ai.postprocessing.uq_metrics_calculator import PerElementCalibrator
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
-from orchestr_ai.postprocessing.features import quests_coverage, select_batch
+from orchestr_ai.postprocessing.features import quests_completeness, select_batch
 from orchestr_ai.postprocessing.plots.al_diagnostics import REL_FORCE_EPS
 
 _GAUSSIAN_SIGMA_TO_ABS = float(np.sqrt(2.0 / np.pi))
@@ -769,10 +769,17 @@ class _PoolActiveLearner:
         dM_all[rows] = np.sqrt(np.einsum("id,dk,ik->i", G - self.mu_Gtrain, self.Cov_inv, G - self.mu_Gtrain))
         gamma_all = np.sqrt(quad_all)
         if getattr(self, "quests_report", False) and getattr(self, "quests", None) is not None:
-            novel, per_el = quests_coverage([self.pool_frames[i] for i in good], self.quests)
+            # data completeness at a fixed bandwidth (features.quests_completeness), comparable across AL rounds
+            h = float(getattr(self, "quests_report_h", 0.015))
+            novel, comp = quests_completeness([self.pool_frames[i] for i in good], self.quests, h=h)
             self.quests_novel = np.full(n_pool, np.nan)
             self.quests_novel[good] = novel
-            print("  -> QUESTS coverage | novel atoms (dH > 0): " + ", ".join(f"{el} {v:.1%}" for el, v in per_el.items())
+            els = [el for el in comp if el != "all"]
+            print(f"  -> QUESTS data completeness (h {h:g} 1/A) | overlap, training + pool atoms with dH <= 0: "
+                  + ", ".join(f"{el} {comp[el][0]:.3%}" for el in [*els, "all"])
+                  + f" | training set: entropy H {comp['all'][1]:.3f} nats, diversity D {comp['all'][2]:.3f} (H/D "
+                  + ", ".join(f"{el} {comp[el][1]:.2f}/{comp[el][2]:.2f}" for el in els) + ")")
+            print("  -> QUESTS coverage | novel atoms (dH > 0): " + ", ".join(f"{el} {comp[el][3]:.2%}" for el in els)
                   + f" | frames with a novel atom: {np.mean(novel > 0):.1%}")
 
         # Batch over the candidates (features.select_batch): al_selector greedy or lcmd, al_quality sigma
