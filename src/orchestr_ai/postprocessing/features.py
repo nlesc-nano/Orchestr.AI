@@ -230,11 +230,11 @@ def compute_features(all_frames, config, training_data_path=None, train_mask=Non
 # Active-learning feature spaces and batch selection (pool AL)
 # =============================================================================
 # eval options:
-#   al_kernel   latent | soap | ntk_e | ntk_ef | quests   feature space of the batch redundancy
-#   al_quality  sigma | pv                                ensemble sigmaF_mean in the score, or the kernel alone
-#   al_selector greedy | lcmd                             batch rule
-#   al_members  all | <index>                             ensemble members of latent / ntk_e / ntk_ef
-#   ntk_probes  <int>                                     force probes of ntk_ef
+#   al_kernel   latent | lastlayer | soap | ntk_e | ntk_ef | quests   feature space of the batch redundancy
+#   al_quality  sigma | pv                                            ensemble sigmaF_mean in the score, or the kernel alone
+#   al_selector greedy | lcmd                                         batch rule
+#   al_members  all | <index>                                         ensemble members of latent / lastlayer / ntk_e / ntk_ef
+#   ntk_probes  <int>                                                 force probes of ntk_ef
 
 
 def al_options(eval_cfg, framework):
@@ -244,12 +244,17 @@ def al_options(eval_cfg, framework):
     kernel = str(eval_cfg.get("al_kernel", "latent")).lower()
     quality = str(eval_cfg.get("al_quality", "sigma")).lower()
     selector = str(eval_cfg.get("al_selector", "greedy")).lower()
-    if (kernel not in ("latent", "soap", "ntk_e", "ntk_ef", "quests") or quality not in ("sigma", "pv")
+    if (kernel not in ("latent", "lastlayer", "soap", "ntk_e", "ntk_ef", "quests") or quality not in ("sigma", "pv")
             or selector not in ("greedy", "lcmd") or (kernel, selector) == ("quests", "lcmd")):
         raise ValueError(
             f"Unsupported pool AL options al_kernel={kernel}, al_quality={quality}, al_selector={selector}: "
-            "al_kernel latent|soap|ntk_e|ntk_ef|quests, al_quality sigma|pv, al_selector greedy|lcmd "
+            "al_kernel latent|lastlayer|soap|ntk_e|ntk_ef|quests, al_quality sigma|pv, al_selector greedy|lcmd "
             "(lcmd needs a frame-level kernel, not quests)."
+        )
+    if kernel == "lastlayer" and normalize_framework(framework) != "mace":
+        raise ValueError(
+            f"al_kernel=lastlayer reads the MACE readouts and is not available for {framework} models; "
+            "use al_kernel latent, soap or quests."
         )
     if kernel in ("ntk_e", "ntk_ef") and normalize_framework(framework) == "nequip":
         raise ValueError(
@@ -328,7 +333,8 @@ def model_features(kind, frames, runner):
     i.e. sums their kernels; an index keeps one).
 
     latent: each member's frame-mean invariant node features, from the same inference chain as the ensemble
-    predictions (the ensemble passes store them, so they are rarely recomputed). ntk_e / ntk_ef: NTK features
+    predictions (the ensemble passes store them, so they are rarely recomputed). lastlayer: the inputs of the readout
+    weights summed over each frame's atoms (MACE, calc.lastlayer_features). ntk_e / ntk_ef: NTK features
     (ntk_frame_features). Cached in one file per kind (member_features).
     """
     from orchestr_ai.postprocessing.inference_runner import InferenceRunner
@@ -346,6 +352,9 @@ def model_features(kind, frames, runner):
             chunk = [frames[i] for i in idx]
             if kind == "latent":
                 return InferenceRunner(calc[0], runner.batch_size, None).run(frames=chunk)[2]
+            if kind == "lastlayer":
+                return np.concatenate([calc[0].lastlayer_features(chunk[b:b + runner.batch_size])
+                                       for b in range(0, len(chunk), runner.batch_size)])
             return ntk_frame_features(calc[0], chunk, n_probes, runner.batch_size)
 
         key = runner._model_key(paths[k]) + (f"|probes={n_probes}" if n_probes else "")
@@ -362,7 +371,7 @@ def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_r
     e.g. of species absent from the data, are dropped. The costly NTK features of the pool are returned as a function
     of the pool indices and only evaluated on the candidates. soap: frame-averaged SOAP; pool frames that fail the
     geometry checks stay at zero. quests: latent features for the frame-level diagnostics; its batch redundancy is
-    per atom (quests_reference, quests_greedy).
+    per atom (quests_reference, quests_greedy). lastlayer: as latent, with each member's readout inputs.
     Without training frames the reference has no rows: the pool frames that pass the geometry
     checks set the normalisation, all their features are computed here, and there is no QUESTS reference.
     """
