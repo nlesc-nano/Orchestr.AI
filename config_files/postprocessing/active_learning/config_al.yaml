@@ -49,6 +49,11 @@ eval:
   al_lambda_rel: 1.0e-6 # greedy: ridge lambda = al_lambda_rel x mean |f|^2 of the training frames (Holzmueller et al., JMLR 2023); not fitted to labels
   al_members: all # latent, lastlayer, ntk_e, ntk_ef: "all" concatenates every member (NTK cost grows with members); an index (e.g. 0) keeps one
   ntk_probes: 16 # ntk_ef only: random probes for the force part (cost grows linearly)
+  # soap_* defaults: GAP practice, Deringer et al., Chem. Rev. 121, 10073 (2021), section 4.5
+  soap_rcut: 6.0 # soap only: cutoff (A) of the frame-averaged SOAP (DScribe, outer average; z-scored like the model features)
+  soap_nmax: 12 # soap only: radial basis functions
+  soap_lmax: 6 # soap only: maximum degree of the spherical harmonics
+  soap_sigma: 0.3 # soap only: width (A) of the atomic Gaussians (0.3 A with hydrogen present; 0.5 A for H-free systems up to the third row)
   quests_report: false # Print the per-element QUESTS coverage of the pool (share of atoms with dH > 0)
   merge_al_selections: true
 

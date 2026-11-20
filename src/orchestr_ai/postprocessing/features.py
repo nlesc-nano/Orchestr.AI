@@ -369,9 +369,9 @@ def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_r
     latent / ntk_e / ntk_ef: model features z-scored with the training statistics (frame features of one system are
     nearly parallel, so without this the informative variation sits far below any ridge lambda); constant channels,
     e.g. of species absent from the data, are dropped. The costly NTK features of the pool are returned as a function
-    of the pool indices and only evaluated on the candidates. soap: frame-averaged SOAP; pool frames that fail the
-    geometry checks stay at zero. quests: latent features for the frame-level diagnostics; its batch redundancy is
-    per atom (quests_reference, quests_greedy). lastlayer: as latent, with each member's readout inputs.
+    of the pool indices and only evaluated on the candidates. soap: frame-averaged SOAP z-scored. quests: latent
+    features for the frame-level diagnostics; its batch redundancy is per atom (quests_reference, quests_greedy).
+    lastlayer: as latent, with each member's readout inputs.
     Without training frames the reference has no rows: the pool frames that pass the geometry
     checks set the normalisation, all their features are computed here, and there is no QUESTS reference.
     """
@@ -380,22 +380,20 @@ def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_r
     quests = None
     if (kernel == "quests" or quests_report) and len(train):
         quests = quests_reference(train, target=float(eval_cfg.get("candidate_tol", 0.01)))
-    if kernel == "soap":
-        species = sorted({s for a in [*(labelled or []), *train, *pool] for s in a.get_chemical_symbols()})
-
-        def soap(frames):
-            return compute_soap_features(frames, species=species, r_cut=eval_cfg.get("soap_rcut", 6.0),
-                                         n_max=eval_cfg.get("soap_nmax", 4), l_max=eval_cfg.get("soap_lmax", 4))[0]
-
-        feat_phys = soap([pool[i] for i in phys]) if len(phys) else None
-        feat_ref = soap(train) if len(train) else np.zeros((0, feat_phys.shape[1]))
-        feat_pool = np.zeros((len(pool), feat_ref.shape[1]))
-        if len(phys):
-            feat_pool[phys] = feat_phys
-        return None if labelled is None else soap(labelled), feat_ref, feat_pool, quests
-
     kind = "latent" if kernel == "quests" else kernel
-    ref = model_features(kind, train if len(train) else [pool[i] for i in phys], runner)
+    if kind == "soap":
+        species = sorted({s for a in [*(labelled or []), *train, *pool] for s in a.get_chemical_symbols()})
+        settings = {arg: eval_cfg[key] for key, arg in (("soap_rcut", "r_cut"), ("soap_nmax", "n_max"),
+                                                       ("soap_lmax", "l_max"), ("soap_sigma", "sigma"))
+                    if key in eval_cfg}            # unset keys: the defaults of compute_soap_features
+
+        def features(frames):
+            return compute_soap_features(frames, species=species, **settings)[0]
+    else:
+        def features(frames):
+            return model_features(kind, frames, runner)
+
+    ref = features(train if len(train) else [pool[i] for i in phys])
     keep = ref.std(axis=0) > 0
     mu, sd = ref[:, keep].mean(axis=0), ref[:, keep].std(axis=0)
 
@@ -406,14 +404,14 @@ def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_r
         feat_pool = np.zeros((len(pool), int(keep.sum())))
         feat_pool[phys] = z(ref)
     elif kind in ("ntk_e", "ntk_ef"):
-        feat_pool = lambda idx: z(model_features(kind, [pool[i] for i in idx], runner))
+        feat_pool = lambda idx: z(features([pool[i] for i in idx]))
     else:
-        feat_pool = z(model_features(kind, pool, runner)) if len(pool) else np.zeros((0, int(keep.sum())))
+        feat_pool = z(features(pool)) if len(pool) else np.zeros((0, int(keep.sum())))
     feat_ref = z(ref) if len(train) else np.zeros((0, int(keep.sum())))
-    return None if labelled is None else z(model_features(kind, labelled, runner)), feat_ref, feat_pool, quests
+    return None if labelled is None else z(features(labelled)), feat_ref, feat_pool, quests
 
 
-def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_max=4, l_max=4):
+def compute_soap_features(frames, train_frames=None, species=None, r_cut=6.0, n_max=12, l_max=6, sigma=0.3):
     """
     Computes averaged SOAP descriptors for a list of ASE Atoms objects.
     
@@ -421,10 +419,15 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
         frames (list): List of ASE Atoms objects.
         train_frames (list, optional): List of training ASE Atoms objects to gather chemical symbols.
         species (list, optional): Predefined list of species (chemical symbols).
-        r_cut (float): Cutoff radius in Angstrom. Default 4.0.
-        n_max (int): Number of radial basis functions. Default 4.
-        l_max (int): Maximum degree of spherical harmonics. Default 4.
+        r_cut (float): Cutoff radius in Angstrom. Default 6.0.
+        n_max (int): Number of radial basis functions. Default 12.
+        l_max (int): Maximum degree of spherical harmonics. Default 6.
+        sigma (float): Width of the atomic Gaussians in Angstrom. Default 0.3.
         
+    The defaults follow the GAP practice of Deringer et al., Chem. Rev. 121, 10073 (2021), section 4.5: sigma 0.3 A
+    when hydrogen is present (0.5 A for H-free systems up to the third row), band limits (n_max, l_max) = (12, 6) for
+    a very accurate description, and a cutoff of 5-6 A.
+
     Returns:
         tuple: (features_array, species_list).
     """
@@ -440,7 +443,8 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
                 species_set.update(fr.get_chemical_symbols())
         species = sorted(list(species_set))
         
-    print(f"[SOAP] Computing descriptors for species: {species} (rcut={r_cut}, nmax={n_max}, lmax={l_max})")
+    print(f"[SOAP] Computing descriptors for species: {species} "
+          f"(rcut={r_cut}, nmax={n_max}, lmax={l_max}, sigma={sigma})")
     
     # 2. Construct SOAP descriptor
     soap = SOAP(
@@ -448,6 +452,7 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
         r_cut=r_cut,
         n_max=n_max,
         l_max=l_max,
+        sigma=sigma,
         periodic=False,     # Quantum dots in vacuum
         average="outer",    # Average SOAP over all atoms in the frame to get a per-frame descriptor
         sparse=False
