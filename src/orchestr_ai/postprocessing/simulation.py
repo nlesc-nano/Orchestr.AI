@@ -85,8 +85,9 @@ def get_ase_calculator(model, config, device, neighbor_list=None):
         if isinstance(mace_head, str):
             mace_head = mace_head.strip()
 
-        # Check for user-defined dtype or default to float32
-        default_dtype = config.get("default_dtype") or config.get("default_precision") or "float32"
+        from orchestr_ai.postprocessing.calculators.factory import resolve_dtype
+
+        default_dtype = resolve_dtype(config)
 
         print(f"[MACE] Initializing calculator with precision default_dtype='{default_dtype}'")
 

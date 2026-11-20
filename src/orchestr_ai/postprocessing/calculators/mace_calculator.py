@@ -157,10 +157,29 @@ class MaceCalculator(BaseCalculator):
         return np.array([e.sum() for e in np.split(node_np, np.cumsum(n_atoms_list)[:-1])])
 
     def forward(self, inputs, n_atoms_list):
+        data = inputs.to_dict()
         with torch.set_grad_enabled(True):
-            results = self.model(inputs.to_dict())
+            results = self.model(data)
 
-        energies_np = self._frame_energies(results, n_atoms_list)
+        energy = results["energy"]
+        if energy.dtype == torch.float32 and results.get("interaction_energy") is not None:
+            # float32 holds the sum of the isolated-atom energies (~1e5 eV for a few hundred atoms) only to ~0.1 eV, with
+            # a rounding that depends on the frame's slot in the batch: add the E0s in float64 to the interaction energy
+            e0 = torch.atleast_2d(self.model.atomic_energies_fn.atomic_energies).double()      # [heads, elements]
+            head = data.get("head")
+            head = torch.zeros(len(n_atoms_list), dtype=torch.long, device=e0.device) if head is None else head
+            node_e0 = (data["node_attrs"].double() @ e0.T)[torch.arange(len(data["batch"]), device=e0.device),
+                                                          head[data["batch"]]]
+            energy = results["interaction_energy"].double().index_add(0, data["batch"], node_e0)
+
+        energies_np = (
+            energy
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float64)
+            .flatten()
+        )
 
         forces_cpu = results["forces"].detach().cpu()
         forces_list = [
@@ -207,6 +226,44 @@ class MaceCalculator(BaseCalculator):
             "atom_species": data["node_attrs"].argmax(dim=1),
             "n_species": data["node_attrs"].shape[1],
         }
+
+    def lastlayer_features(self, frames):
+        """Last-layer features of `frames` for pool active learning (postprocessing.features, al_kernel lastlayer):
+        the per-atom inputs of the readout weights, which the energy is linear in, summed over each frame's atoms.
+        A linear readout reads the l = 0 channels of its layer's node features; an MLP readout (MACE's last) reads its
+        hidden activations, only those of this calculator's head if the readout is multi-head. Zaverkin & Kästner (MLST 2021)"""
+        if hasattr(self.model, "embedding_readout"):
+            raise NotImplementedError("al_kernel lastlayer does not cover MACE models with an embedding readout")
+        data = self.prepare_batch(frames).to_dict()
+        layers, start = [], 0                   # offset and irreps of each layer's block of node_feats
+        for product in self.model.products:
+            layers.append((start, product.linear.irreps_out))
+            start += product.linear.irreps_out.dim
+        with torch.no_grad():                   # (MACE's forward keeps a graph to the positions: detach)
+            node_feats = self.model(data, compute_force=False)["node_feats"].detach()
+            feats = []
+            for i, readout in enumerate(self.model.readouts):
+                start, irreps = layers[-1 if len(self.model.readouts) == 1 else i]    # the layer this readout reads
+                x = node_feats[:, start:start + irreps.dim]
+                if hasattr(readout, "linear_1"):
+                    hidden = readout.non_linearity(readout.linear_1(x))
+                    n_heads = getattr(readout, "num_heads", 1)
+                    if n_heads > 1:             # one block of hidden units per head (MACE's mask_head)
+                        width = hidden.shape[1] // n_heads
+                        h = self.available_heads.index(self.head)
+                        hidden = hidden[:, h * width:(h + 1) * width]
+                    feats.append(hidden)
+                else:
+                    idx, offset = [], 0
+                    for mul, ir in irreps:
+                        if ir.l == 0 and ir.p == 1:
+                            idx.extend(range(offset, offset + mul))
+                        offset += mul * ir.dim
+                    feats.append(x[:, idx])
+            per_atom = torch.cat(feats, dim=1)
+            frame = torch.zeros(len(frames), per_atom.shape[1], dtype=per_atom.dtype, device=per_atom.device)
+            frame.index_add_(0, data["batch"], per_atom)
+        return frame.cpu().numpy().astype(np.float64)
 
 
 class AutoScaledReconstructedMaceCalculator(MaceCalculator):

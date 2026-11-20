@@ -25,7 +25,7 @@ from typing import Tuple, List, Optional, Dict, Any
 from sklearn.isotonic import IsotonicRegression
 from orchestr_ai.postprocessing.uq_metrics_calculator import PerElementCalibrator
 from orchestr_ai.postprocessing.rdf import compute_rdf_thresholds_from_reference, fast_filter_by_rdf_kdtree, fast_filter_connectivity_and_arms
-from orchestr_ai.postprocessing.features import quests_coverage, select_batch
+from orchestr_ai.postprocessing.features import quests_completeness, select_batch
 from orchestr_ai.postprocessing.plots.al_diagnostics import REL_FORCE_EPS
 
 _GAUSSIAN_SIGMA_TO_ABS = float(np.sqrt(2.0 / np.pi))
@@ -82,11 +82,13 @@ def calibrate_alpha_reg_gcv(
     """Calibrate a ridge (GP) model via GCV and compute predictive variances."""
     n, d = feat.shape
     print(f"\n[GCV] Starting calibration. Matrix shape: {n} samples x {d} features")
+    # Substract model's energy offset (e.g. foundation model) so it doesn't affect lambda
+    y = y - y.mean()
 
     try:
         print("[GCV] Running SVD (Divide-and-Conquer)...")
         # Removed memory-heavy lapack_driver='gesvd', letting SciPy use efficient defaults
-        U, s, _ = scipy.linalg.svd(feat, full_matrices=False)
+        U, s, _ = scipy.linalg.svd(feat - feat.mean(axis=0), full_matrices=False)
         print("[GCV] SVD complete.")
     except MemoryError:
         print("[GCV] ERROR: Ran out of memory during SVD!")
@@ -101,11 +103,12 @@ def calibrate_alpha_reg_gcv(
         df = a.sum()
         y_hat = (a * UTy) @ U.T
         resid = y - y_hat
-        return np.log((resid @ resid) / (n - df)**2)
+        return np.log((resid @ resid) / (n - 1 - df)**2)
 
     print("[GCV] Optimizing ridge parameter...")
     res = scipy.optimize.minimize_scalar(gcv_obj, bounds=np.log(lambda_bounds), method='bounded')
     lam_opt = np.exp(res.x)
+    print(f"[GCV] lambda = {lam_opt:.4g}")
 
     print("[GCV] Building covariance matrix and running Cholesky...")
     A = feat.T @ feat + lam_opt * np.eye(d)
@@ -285,6 +288,9 @@ class _PoolActiveLearner:
             "al_kernel": getattr(self, "al_kernel", "latent"),
             "al_quality": getattr(self, "al_quality", "sigma"),
             "al_selector": getattr(self, "al_selector", "greedy"),
+            "al_lambda": getattr(self, "al_lambda", np.nan),
+            "al_lambda_rel": getattr(self, "al_lambda_rel", np.nan),
+            "single_model": int(getattr(self, "single_model", False)),
             **{f"quests_h_{el}": v for el, v in (getattr(self, "quests", None) or {"h": {}})["h"].items()},
             "pool_hi_k": getattr(self, "pool_hi_k", np.nan),
             "red_zone_train_mult": getattr(self, "red_zone_train_mult", np.nan),
@@ -349,13 +355,17 @@ class _PoolActiveLearner:
 
     def _setup_latent_space(self):
         self.G_train = scipy.linalg.solve_triangular(self.L, self.feat_train.T, lower=True).T
+        if len(self.G_train) < 2:       # no reference frames (first AL iteration): no Mahalanobis diagnostic
+            d = self.G_train.shape[1]
+            self.mu_Gtrain, self.Cov_inv, self.dM_thr = np.zeros(d), np.full((d, d), np.nan), np.nan
+            return
 
         self.mu_Gtrain = self.G_train.mean(axis=0)
         Cov_Gtrain = np.cov(self.G_train, rowvar=False) + 1e-6 * np.eye(self.G_train.shape[1])
         self.Cov_inv = np.linalg.inv(Cov_Gtrain)
         
         diff_train = self.G_train - self.mu_Gtrain
-        dM_train = np.sqrt(np.einsum("id,dk,ik->i", diff_train, self.Cov_inv, diff_train))
+        dM_train = np.sqrt(((diff_train @ self.Cov_inv) * diff_train).sum(axis=1))
         self.dM_thr = np.quantile(dM_train, 99.0 / 100.0)
 
     def _setup_thresholds(self):
@@ -454,7 +464,7 @@ class _PoolActiveLearner:
         self.mu_E_atom_pool = np.asarray(self.mu_E_pool, dtype=float) / self.pool_atom_counts
         self.sigma_E_atom_pool = np.asarray(self.sigma_E_pool, dtype=float) / self.pool_atom_counts
 
-        self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5
+        self.thr_E_hi_atom = self.mu_E_atom_train.max() + 0.5 if len(self.mu_E_atom_train) else np.inf
         self.E_lo_pool_atom = (self.mu_E_pool - 3.0 * self.sigma_E_pool) / self.pool_atom_counts
         self.E_hi_pool_atom = (self.mu_E_pool + 3.0 * self.sigma_E_pool) / self.pool_atom_counts
 
@@ -480,6 +490,14 @@ class _PoolActiveLearner:
             ])
         else:
             self.frame_rel_unc = self.sigma_F_pool_mean / (self.frame_mean_force_pool + REL_FORCE_EPS)
+
+        if not len(self.train_atom_counts):
+            print("[AL] No labelled reference frames: no ceilings and no force cap.")
+            self._train_ref_mask = np.zeros(0, dtype=bool)
+            self.thr_sigma_E_low = self.thr_sigma_F = self.thr_sigma_Fmean = self.thr_Fmag = np.nan
+            self.thr_sigma_E_hi_eff = self.thr_sigma_F_hi_eff = self.thr_sigma_Fmean_hi_eff = np.inf
+            self.thr_Fmag_hi_eff = self.train_Fmax_hard_cap = self.allowed_offset_eff = np.inf
+            return
 
         # Baseline Thresholds (optional stratification by cluster size for mixed train sets)
         stratify = bool(getattr(self, "stratify_train_by_size", False))
@@ -578,6 +596,8 @@ class _PoolActiveLearner:
                 return np.nan
             med = float(np.median(arr))
             mad = float(np.median(np.abs(arr - med)))
+            if mad == 0.0:  # no spread: the red zone decides
+                return np.inf
             return med + k * 1.4826 * mad
 
         # Calculate Adaptive Upper Caps from OK frames
@@ -643,7 +663,7 @@ class _PoolActiveLearner:
             red_Fmean = _red_zone(self.abs_ceiling_sF_mean, legacy_Fmean, train_red_Fmean)
 
             def _eff_ceiling(pool_hi, low_anchor, red_zone, legacy):
-                if pool_reliable and pool_hi is not None and np.isfinite(pool_hi):
+                if pool_reliable and pool_hi is not None and not np.isnan(pool_hi):
                     base = max(pool_hi, legacy)
                 else:
                     base = legacy
@@ -731,10 +751,13 @@ class _PoolActiveLearner:
         n_fail = n_pool - sum(1 for i in phys if self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap)
         n_acc = n_pool - n_fail - len(high)
         label = len(high) > self.candidate_tol * n_pool
+        single = getattr(self, "single_model", False)
 
         # Novelty w.r.t. the training set: gamma^2 = f^T (feat_train^T feat_train + lambda I)^-1 f = ||L^-1 f||^2.
         # A callable feat_pool (a costly kernel such as ntk_ef) is only evaluated on the candidates.
-        cand = np.array(high, dtype=int)
+        # A single model has no sigma: its batch comes from every frame that passes the geometry and force checks.
+        cand = np.array([i for i in good if self.frame_max_force_pool[i] < self.thr_Fmag_hi_eff
+                         and self.frame_max_force_pool[i] <= self.train_Fmax_hard_cap] if single else high, dtype=int)
         if callable(self.feat_pool):
             rows, pos = cand, np.arange(len(cand))
             feat = self.feat_pool(cand) if len(cand) else np.zeros((0, self.feat_train.shape[1]))
@@ -743,19 +766,30 @@ class _PoolActiveLearner:
         G = scipy.linalg.solve_triangular(self.L, feat.T, lower=True).T
         quad_all, dM_all = np.full(n_pool, np.nan), np.full(n_pool, np.nan)
         quad_all[rows] = np.einsum("id,id->i", G, G)
-        dM_all[rows] = np.sqrt(np.einsum("id,dk,ik->i", G - self.mu_Gtrain, self.Cov_inv, G - self.mu_Gtrain))
+        diff = G - self.mu_Gtrain
+        dM_all[rows] = np.sqrt(((diff @ self.Cov_inv) * diff).sum(axis=1))
         gamma_all = np.sqrt(quad_all)
-        if getattr(self, "quests_report", False):
-            novel, per_el = quests_coverage([self.pool_frames[i] for i in good], self.quests)
+        if getattr(self, "quests_report", False) and getattr(self, "quests", None) is not None:
+            # data completeness at a fixed bandwidth (features.quests_completeness), comparable across AL rounds
+            h = float(getattr(self, "quests_report_h", 0.015))
+            novel, comp = quests_completeness([self.pool_frames[i] for i in good], self.quests, h=h)
             self.quests_novel = np.full(n_pool, np.nan)
             self.quests_novel[good] = novel
-            print("  -> QUESTS coverage | novel atoms (dH > 0): " + ", ".join(f"{el} {v:.1%}" for el, v in per_el.items())
+            els = [el for el in comp if el != "all"]
+            print(f"  -> QUESTS data completeness (h {h:g} 1/A) | overlap, training + pool atoms with dH <= 0: "
+                  + ", ".join(f"{el} {comp[el][0]:.3%}" for el in [*els, "all"])
+                  + f" | training set: entropy H {comp['all'][1]:.3f} nats, diversity D {comp['all'][2]:.3f} (H/D "
+                  + ", ".join(f"{el} {comp[el][1]:.2f}/{comp[el][2]:.2f}" for el in els) + ")")
+            print("  -> QUESTS coverage | novel atoms (dH > 0): " + ", ".join(f"{el} {comp[el][3]:.2%}" for el in els)
                   + f" | frames with a novel atom: {np.mean(novel > 0):.1%}")
 
-        # Batch over the candidates (features.select_batch): al_selector greedy or lcmd, al_quality sigma
+        # Batch over the candidates (features.select_batch): al_selector greedy, lcmd or topk, al_quality sigma
         # (sigmaF_mean in the score) or pv (the kernel alone), al_kernel quests for per-atom redundancy.
         kernel = getattr(self, "al_kernel", "latent")
-        n_sel = min(len(cand), self.budget_max or len(cand)) if label else 0
+        if kernel == "quests" and getattr(self, "quests", None) is None:
+            print("[AL] No training frames: QUESTS needs training atoms, so this batch uses its latent features.")
+            kernel = "latent"
+        n_sel = min(len(cand), self.budget_max or len(cand)) if label or single else 0
         picks, acq_c = select_batch(
             getattr(self, "al_quality", "sigma"), getattr(self, "al_selector", "greedy"), kernel, n_sel,
             self.sigma_F_pool_mean[cand], G[pos], feat[pos], self.feat_train,
@@ -766,6 +800,21 @@ class _PoolActiveLearner:
         acq = np.zeros(n_pool)
         acq[cand] = acq_c
         self.picks = cand[picks].tolist()
+
+        # Kernel diagnostics: ridge lambda; rank and effective dimension d_lambda = sum s^2/(s^2 + lambda) of the
+        # reference features; picks among the top frames by |f| (the large-lambda limit, a feature-norm ranking); and
+        # the median largest |f_j| of the picks vs the candidates (feature outliers).
+        lam = float(getattr(self, "al_lambda", np.nan))
+        s2 = np.linalg.svd(self.feat_train, compute_uv=False) ** 2 if len(self.feat_train) else np.zeros(0)
+        f_c = feat[pos]
+        top = set(np.argsort(-np.einsum("id,id->i", f_c, f_c))[:len(picks)].tolist())
+        f_max = np.abs(f_c).max(axis=1) if f_c.size else np.zeros(len(f_c))
+        print(f"  -> Kernel | lambda {lam:.4g} (al_lambda_rel {getattr(self, 'al_lambda_rel', np.nan):g}) | "
+              f"d {f_c.shape[1]} | reference frames {len(self.feat_train)}, rank "
+              f"{int(np.sum(s2 > 1e-12 * s2.max())) if len(s2) else 0}, d_lambda {np.sum(s2 / (s2 + lam)):.1f} | "
+              f"picks among the top {len(picks)} by |f|: {len(top & set(np.asarray(picks).tolist()))} | median max|f_j|: "
+              f"picks {np.median(f_max[picks]) if len(picks) else np.nan:.2f}, candidates "
+              f"{np.median(f_max) if len(f_max) else np.nan:.2f}")
 
         # --- NEW INFORMATIVE PRINT LOGGING WITH REJECTION REASONS ---
         print(f"  -> Pool | GeomOK: {len(good):4d} | PhysOK: {len(phys):4d} | "
@@ -779,7 +828,9 @@ class _PoolActiveLearner:
         print(f"  -> Classes | accurate: {n_acc / n_pool:.1%} | candidate: {len(high) / n_pool:.1%} | "
               f"failed: {n_fail / n_pool:.1%} | candidate_tol: {self.candidate_tol:.1%} | "
               f"reference frames above a floor: {ref_above:.1%}")
-        if not label:
+        if single:
+            print("[AL] Single model: no sigma, so the classes above are not used; the batch comes from the kernel alone.")
+        elif not label:
             print("[AL] Candidate fraction <= candidate_tol: nothing worth labelling in this pool.")
         if n_fail:
             print(f"[AL] WARNING: {n_fail} pool frames failed the geometry, ceiling or force-cap checks: "
@@ -924,7 +975,7 @@ class _PoolActiveLearner:
 # --- Wrapper to maintain evaluate.py compatibility ---
 def adaptive_learning_mig_pool_windowed(*args, **kwargs):
     learner = _PoolActiveLearner(**dict(zip([
-        "pool_frames", "feat_pool", "feat_train", "alpha_sq", "L", "forces_train", "sigma_energy", 
+        "pool_frames", "feat_pool", "feat_train", "L", "forces_train", "sigma_energy",
         "sigma_force", "mu_E_frame_train", "mu_E_pool", "sigma_E_pool", "mu_F_pool", 
         "sigma_F_pool", "rdf_thresholds"], args)), **kwargs)
     return learner.run()

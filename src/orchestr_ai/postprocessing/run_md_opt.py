@@ -17,6 +17,7 @@ torch.serialization.add_safe_globals([slice])
 import torch._inductor.codecache
 from ase.io import read
 
+from orchestr_ai.postprocessing.calculators.factory import load_model, resolve_dtype
 from orchestr_ai.utils.helpers import load_config
 from orchestr_ai.utils.env_dispatch import maybe_dispatch_to_engine_env
 from orchestr_ai.utils.engine_profiles import (
@@ -149,17 +150,8 @@ def main():
             model_obj = model_path
             logging.info("NequIP/Allegro model path passed to calculator.")
         else:
-            best = torch.load(model_path, map_location=device, weights_only=False)
-            # Determine precision dynamically (default to float32)
-            default_dtype = config.get("default_dtype") or config.get("default_precision") or "float32"
-            torch_dtype = torch.float64 if default_dtype == "float64" else torch.float32
-            
-            try:
-                best = best.to(device=device, dtype=torch_dtype)
-                logging.info(f"Successfully cast model parameters to {torch_dtype}")
-            except Exception as e:
-                logging.warning(f"Could not cast model to {torch_dtype}: {e}. Falling back to default cast.")
-                best = best.to(device=device)
+            best = load_model(model_path, framework, device, config)
+            logging.info(f"Model loaded at {resolve_dtype(config)}")
 
             if hasattr(best, "postprocessors"):
                 try:

@@ -230,11 +230,11 @@ def compute_features(all_frames, config, training_data_path=None, train_mask=Non
 # Active-learning feature spaces and batch selection (pool AL)
 # =============================================================================
 # eval options:
-#   al_kernel   latent | soap | ntk_e | ntk_ef | quests   feature space of the batch redundancy
-#   al_quality  sigma | pv                                ensemble sigmaF_mean in the score, or the kernel alone
-#   al_selector greedy | lcmd                             batch rule
-#   al_members  all | <index>                             ensemble members of latent / ntk_e / ntk_ef
-#   ntk_probes  <int>                                     force probes of ntk_ef
+#   al_kernel   latent | lastlayer | soap | ntk_e | ntk_ef | quests   feature space of the batch redundancy
+#   al_quality  sigma | pv                                            ensemble sigmaF_mean in the score, or the kernel alone
+#   al_selector greedy | lcmd | topk                                  batch rule
+#   al_members  all | <index>                                         ensemble members of latent / lastlayer / ntk_e / ntk_ef
+#   ntk_probes  <int>                                                 force probes of ntk_ef
 
 
 def al_options(eval_cfg, framework):
@@ -244,12 +244,18 @@ def al_options(eval_cfg, framework):
     kernel = str(eval_cfg.get("al_kernel", "latent")).lower()
     quality = str(eval_cfg.get("al_quality", "sigma")).lower()
     selector = str(eval_cfg.get("al_selector", "greedy")).lower()
-    if (kernel not in ("latent", "soap", "ntk_e", "ntk_ef", "quests") or quality not in ("sigma", "pv")
-            or selector not in ("greedy", "lcmd") or (kernel, selector) == ("quests", "lcmd")):
+    if (kernel not in ("latent", "lastlayer", "soap", "ntk_e", "ntk_ef", "quests") or quality not in ("sigma", "pv")
+            or selector not in ("greedy", "lcmd", "topk") or (kernel, selector) == ("quests", "lcmd")
+            or (selector, quality) == ("topk", "pv")):
         raise ValueError(
             f"Unsupported pool AL options al_kernel={kernel}, al_quality={quality}, al_selector={selector}: "
-            "al_kernel latent|soap|ntk_e|ntk_ef|quests, al_quality sigma|pv, al_selector greedy|lcmd "
-            "(lcmd needs a frame-level kernel, not quests)."
+            "al_kernel latent|lastlayer|soap|ntk_e|ntk_ef|quests, al_quality sigma|pv, al_selector greedy|lcmd|topk "
+            "(lcmd needs a frame-level kernel, not quests; topk ranks by the ensemble sigmaF_mean: al_quality sigma)."
+        )
+    if kernel == "lastlayer" and normalize_framework(framework) != "mace":
+        raise ValueError(
+            f"al_kernel=lastlayer reads the MACE readouts and is not available for {framework} models; "
+            "use al_kernel latent, soap or quests."
         )
     if kernel in ("ntk_e", "ntk_ef") and normalize_framework(framework) == "nequip":
         raise ValueError(
@@ -328,7 +334,8 @@ def model_features(kind, frames, runner):
     i.e. sums their kernels; an index keeps one).
 
     latent: each member's frame-mean invariant node features, from the same inference chain as the ensemble
-    predictions (the ensemble passes store them, so they are rarely recomputed). ntk_e / ntk_ef: NTK features
+    predictions (the ensemble passes store them, so they are rarely recomputed). lastlayer: the inputs of the readout
+    weights summed over each frame's atoms (MACE, calc.lastlayer_features). ntk_e / ntk_ef: NTK features
     (ntk_frame_features). Cached in one file per kind (member_features).
     """
     from orchestr_ai.postprocessing.inference_runner import InferenceRunner
@@ -346,6 +353,9 @@ def model_features(kind, frames, runner):
             chunk = [frames[i] for i in idx]
             if kind == "latent":
                 return InferenceRunner(calc[0], runner.batch_size, None).run(frames=chunk)[2]
+            if kind == "lastlayer":
+                return np.concatenate([calc[0].lastlayer_features(chunk[b:b + runner.batch_size])
+                                       for b in range(0, len(chunk), runner.batch_size)])
             return ntk_frame_features(calc[0], chunk, n_probes, runner.batch_size)
 
         key = runner._model_key(paths[k]) + (f"|probes={n_probes}" if n_probes else "")
@@ -354,50 +364,55 @@ def model_features(kind, frames, runner):
 
 
 def al_feature_space(eval_cfg, runner, labelled, train, pool, physical, quests_report=False):
-    """Features of the labelled (calibration) frames, the training frames (reference) and the pool in the
+    """Features of the labelled frames, the training frames (reference) and the pool in the
     redundancy space of al_kernel, plus the QUESTS reference when it is needed.
 
     latent / ntk_e / ntk_ef: model features z-scored with the training statistics (frame features of one system are
     nearly parallel, so without this the informative variation sits far below any ridge lambda); constant channels,
     e.g. of species absent from the data, are dropped. The costly NTK features of the pool are returned as a function
-    of the pool indices and only evaluated on the candidates. soap: frame-averaged SOAP; pool frames that fail the
-    geometry checks stay at zero. quests: latent features for the frame-level diagnostics; its batch redundancy is
-    per atom (quests_reference, quests_greedy).
+    of the pool indices and only evaluated on the candidates. soap: frame-averaged SOAP z-scored. quests: latent
+    features for the frame-level diagnostics; its batch redundancy is per atom (quests_reference, quests_greedy).
+    lastlayer: as latent, with each member's readout inputs.
+    Without training frames the reference has no rows: the pool frames that pass the geometry
+    checks set the normalisation, all their features are computed here, and there is no QUESTS reference.
     """
     kernel = str(eval_cfg.get("al_kernel", "latent")).lower()
+    phys = np.flatnonzero(physical)
     quests = None
-    if kernel == "quests" or quests_report:
+    if (kernel == "quests" or quests_report) and len(train):
         quests = quests_reference(train, target=float(eval_cfg.get("candidate_tol", 0.01)))
-    if kernel == "soap":
-        species = sorted({s for a in labelled for s in a.get_chemical_symbols()})
-
-        def soap(frames):
-            return compute_soap_features(frames, species=species, r_cut=eval_cfg.get("soap_rcut", 6.0),
-                                         n_max=eval_cfg.get("soap_nmax", 4), l_max=eval_cfg.get("soap_lmax", 4))[0]
-
-        feat_ref = soap(train)
-        feat_pool = np.zeros((len(pool), feat_ref.shape[1]))
-        phys = np.flatnonzero(physical)
-        if len(phys):
-            feat_pool[phys] = soap([pool[i] for i in phys])
-        return soap(labelled), feat_ref, feat_pool, quests
-
     kind = "latent" if kernel == "quests" else kernel
-    feat_ref = model_features(kind, train, runner)
-    keep = feat_ref.std(axis=0) > 0
-    mu, sd = feat_ref[:, keep].mean(axis=0), feat_ref[:, keep].std(axis=0)
+    if kind == "soap":
+        species = sorted({s for a in [*(labelled or []), *train, *pool] for s in a.get_chemical_symbols()})
+        settings = {arg: eval_cfg[key] for key, arg in (("soap_rcut", "r_cut"), ("soap_nmax", "n_max"),
+                                                       ("soap_lmax", "l_max"), ("soap_sigma", "sigma"))
+                    if key in eval_cfg}            # unset keys: the defaults of compute_soap_features
+
+        def features(frames):
+            return compute_soap_features(frames, species=species, **settings)[0]
+    else:
+        def features(frames):
+            return model_features(kind, frames, runner)
+
+    ref = features(train if len(train) else [pool[i] for i in phys])
+    keep = ref.std(axis=0) > 0
+    mu, sd = ref[:, keep].mean(axis=0), ref[:, keep].std(axis=0)
 
     def z(x):
         return (x[:, keep] - mu) / sd
 
-    if kind in ("ntk_e", "ntk_ef"):
-        feat_pool = lambda idx: z(model_features(kind, [pool[i] for i in idx], runner))
+    if not len(train):
+        feat_pool = np.zeros((len(pool), int(keep.sum())))
+        feat_pool[phys] = z(ref)
+    elif kind in ("ntk_e", "ntk_ef"):
+        feat_pool = lambda idx: z(features([pool[i] for i in idx]))
     else:
-        feat_pool = z(model_features(kind, pool, runner)) if len(pool) else np.zeros((0, int(keep.sum())))
-    return z(model_features(kind, labelled, runner)), z(feat_ref), feat_pool, quests
+        feat_pool = z(features(pool)) if len(pool) else np.zeros((0, int(keep.sum())))
+    feat_ref = z(ref) if len(train) else np.zeros((0, int(keep.sum())))
+    return None if labelled is None else z(features(labelled)), feat_ref, feat_pool, quests
 
 
-def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_max=4, l_max=4):
+def compute_soap_features(frames, train_frames=None, species=None, r_cut=6.0, n_max=12, l_max=6, sigma=0.3):
     """
     Computes averaged SOAP descriptors for a list of ASE Atoms objects.
     
@@ -405,10 +420,15 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
         frames (list): List of ASE Atoms objects.
         train_frames (list, optional): List of training ASE Atoms objects to gather chemical symbols.
         species (list, optional): Predefined list of species (chemical symbols).
-        r_cut (float): Cutoff radius in Angstrom. Default 4.0.
-        n_max (int): Number of radial basis functions. Default 4.
-        l_max (int): Maximum degree of spherical harmonics. Default 4.
+        r_cut (float): Cutoff radius in Angstrom. Default 6.0.
+        n_max (int): Number of radial basis functions. Default 12.
+        l_max (int): Maximum degree of spherical harmonics. Default 6.
+        sigma (float): Width of the atomic Gaussians in Angstrom. Default 0.3.
         
+    The defaults follow the GAP practice of Deringer et al., Chem. Rev. 121, 10073 (2021), section 4.5: sigma 0.3 A
+    when hydrogen is present (0.5 A for H-free systems up to the third row), band limits (n_max, l_max) = (12, 6) for
+    a very accurate description, and a cutoff of 5-6 A.
+
     Returns:
         tuple: (features_array, species_list).
     """
@@ -424,7 +444,8 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
                 species_set.update(fr.get_chemical_symbols())
         species = sorted(list(species_set))
         
-    print(f"[SOAP] Computing descriptors for species: {species} (rcut={r_cut}, nmax={n_max}, lmax={l_max})")
+    print(f"[SOAP] Computing descriptors for species: {species} "
+          f"(rcut={r_cut}, nmax={n_max}, lmax={l_max}, sigma={sigma})")
     
     # 2. Construct SOAP descriptor
     soap = SOAP(
@@ -432,6 +453,7 @@ def compute_soap_features(frames, train_frames=None, species=None, r_cut=4.0, n_
         r_cut=r_cut,
         n_max=n_max,
         l_max=l_max,
+        sigma=sigma,
         periodic=False,     # Quantum dots in vacuum
         average="outer",    # Average SOAP over all atoms in the frame to get a per-frame descriptor
         sparse=False
@@ -500,7 +522,10 @@ def lcmd(feat_cand, feat_ref, w, n_sel):
 
     The reference frames and the picks are cluster centres. Each step takes the cluster with the largest
     sum of squared weighted distances (w * distance to the nearest centre) and picks its farthest member.
+    Without reference frames (first AL iteration) the candidates' mean is the initial centre.
     """
+    if not len(feat_ref):
+        feat_ref = feat_cand.mean(axis=0, keepdims=True)
     n_ref = len(feat_ref)
     d2 = (feat_cand ** 2).sum(1)[:, None] + (feat_ref ** 2).sum(1)[None] - 2.0 * feat_cand @ feat_ref.T
     assign, dist2 = d2.argmin(axis=1), np.maximum(d2.min(axis=1), 0.0)
@@ -559,30 +584,43 @@ def quests_greedy(frames, u, atom_sigma, n_sel, quests, relative=True):
     A is each atom's kernel sum over the training atoms of its element plus the atoms already picked. An atom's
     distinctness min(1, 1/A) = min(1, exp(dH)) is 1 while it is novel (dH > 0) and smaller the better it is covered
     (its term in the QUESTS diversity D = log sum exp(dH)). relative=True scores u x the sigma^2-weighted mean
-    distinctness of the frame's atoms, so low-sigma atoms (e.g. bulk solvent) barely count; relative=False scores the
-    frame's largest dH (Yu, Lordi & Schwalbe-Koda, JCP 2026). Each pick adds its atoms to A.
+    distinctness of the frame's atoms, so low-sigma atoms (e.g. bulk solvent) barely count. relative=False is the
+    minimum set cover of Yu, Lordi & Schwalbe-Koda (J. Chem. Phys. 164, 164111 (2026), Eq. 9; QUESTS
+    msc_conditional): the frame's largest dH plus its own entropy H(frame), their Eq. 4 over the frame's environments,
+    computed once. Their descriptor and H ignore species (single-element systems); here atoms only meet atoms of their
+    own element, as for dH, and H(frame) is the atom-weighted mean of the per-element entropies (the published H for
+    one element). Each pick adds its atoms to A.
     """
     from quests.descriptor import get_descriptors
-    from quests.entropy import kernel_sum
+    from quests.entropy import entropy, kernel_sum
 
     if not frames:
         return [], np.zeros(0)
     h_of = lambda el: quests["h"].get(el, float(np.median(list(quests["h"].values()))))
     X = get_descriptors(frames, k=quests["k"], cutoff=quests["cutoff"])
     sym = np.concatenate([a.get_chemical_symbols() for a in frames])
-    fid = np.repeat(np.arange(len(frames)), [len(a) for a in frames])
+    n_at = np.array([len(a) for a in frames])
+    fid = np.repeat(np.arange(len(frames)), n_at)
+    start = np.r_[0, np.cumsum(n_at)[:-1]]              # each frame's first row of X (frames are contiguous)
     w = np.concatenate(atom_sigma) ** 2
     A = np.zeros(len(X))
     for el in np.unique(sym):
         if el in quests["ref"]:
             A[sym == el] = kernel_sum(X[sym == el], quests["ref"][el], h=h_of(el), batch_size=2000)
+    if not relative:
+        H = np.array([sum((s == el).sum() * entropy(x[s == el], h=h_of(el)) for el in np.unique(s)) / len(s)
+                      for x, s in zip(np.split(X, start[1:]), np.split(sym, start[1:]))])
+
+    def max_dH():
+        return np.maximum.reduceat(-np.log(np.maximum(A, np.finfo(float).tiny)), start)
 
     def score():
         if relative:
             distinct = np.minimum(1.0, 1.0 / np.maximum(A, np.finfo(float).tiny))
             return u * np.bincount(fid, weights=w * distinct, minlength=len(frames)) / np.bincount(fid, weights=w, minlength=len(frames))
-        dH = -np.log(np.maximum(A, np.finfo(float).tiny))
-        return np.array([dH[fid == f].max() for f in range(len(frames))])
+        return max_dH() + H
+
+    dH0 = None if relative else max_dH()
 
     picks, acq = [], np.zeros(len(frames))
     for _ in range(n_sel):
@@ -596,11 +634,25 @@ def quests_greedy(frames, u, atom_sigma, n_sel, quests, relative=True):
             A[m] += kernel_sum(X[m], X[m & (fid == r)], h=h_of(el), batch_size=2000)
     rest = np.setdiff1d(np.arange(len(frames)), picks)
     acq[rest] = score()[rest]
+    if not relative and picks:
+        print(f"  -> QUESTS set cover | median largest dH (before the batch): picks {np.median(dH0[picks]):.2f}, "
+              f"candidates {np.median(dH0):.2f} | median H(frame): picks {np.median(H[picks]):.3f}, "
+              f"candidates {np.median(H):.3f} (nats)")
     return picks, acq
 
 
-def quests_coverage(frames, quests):
-    """QUESTS coverage of `frames` by the training set: the share of atoms with dH > 0, per frame and per element."""
+def quests_completeness(frames, quests, h=0.015):
+    """QUESTS data completeness of the training set (the atoms of quests["ref"]) w.r.t. the training set plus `frames`
+    (the pool), with one fixed bandwidth h for every element (the QUESTS default 0.015 1/A), so the values compare
+    across AL rounds and runs. These are the dataset metrics of Yu, Lordi & Schwalbe-Koda (J. Chem. Phys. 164, 164111
+    (2026); quests DatasetCompressor): the overlap, i.e. the share of all environments with dH <= 0 w.r.t. the training
+    set, and the training set's entropy H (their Eq. 4) and diversity D = log sum_i 1 / sum_j K_h(x_i, x_j), the log of
+    its number of distinct environments. Atoms only meet atoms of their own element; overall, H is the atom-weighted
+    mean and D = log sum_el exp(D_el).
+
+    Returns the share of novel atoms (dH > 0) of each frame and {element, ..., "all": (overlap, H, D, share of novel
+    atoms of `frames`)}.
+    """
     from quests.descriptor import get_descriptors
     from quests.entropy import kernel_sum
 
@@ -608,11 +660,23 @@ def quests_coverage(frames, quests):
     sym = np.concatenate([a.get_chemical_symbols() for a in frames])
     fid = np.repeat(np.arange(len(frames)), [len(a) for a in frames])
     novel = np.ones(len(X), dtype=bool)
-    for el in np.unique(sym):
-        if el in quests["ref"]:
-            novel[sym == el] = kernel_sum(X[sym == el], quests["ref"][el], h=quests["h"][el], batch_size=2000) < 1.0
+    out, n_all, novel_all, nH, eD = {}, 0, 0, 0.0, 0.0
+    for el in sorted(set(sym) | set(quests["ref"])):
+        ref, m = quests["ref"].get(el, X[:0]), sym == el
+        if len(ref) and m.any():
+            novel[m] = kernel_sum(X[m], ref, h=h, batch_size=2000) < 1.0
+        H = D = np.nan
+        if len(ref):
+            p = kernel_sum(ref, ref, h=h, batch_size=2000)      # sum_j K_h(x_i, x_j), self term included
+            H, D = float(-np.mean(np.log(p / len(p)))), float(np.log(np.sum(1 / p)))
+            nH, eD = nH + len(ref) * H, eD + np.exp(D)
+        n_new = int(novel[m].sum())
+        out[el] = (1 - n_new / (len(ref) + m.sum()), H, D, n_new / max(m.sum(), 1))
+        n_all, novel_all = n_all + len(ref) + int(m.sum()), novel_all + n_new
+    out["all"] = (1 - novel_all / n_all, nH / sum(len(r) for r in quests["ref"].values()), float(np.log(eD)),
+                  novel_all / max(len(X), 1))
     per_frame = np.bincount(fid, weights=novel.astype(float)) / np.bincount(fid)
-    return per_frame, {el: float(novel[sym == el].mean()) for el in np.unique(sym)}
+    return per_frame, out
 
 
 def select_batch(quality, selector, kernel, n_sel, u, G, feat, feat_ref, frames=None, atom_sigma=None, quests=None):
@@ -622,7 +686,11 @@ def select_batch(quality, selector, kernel, n_sel, u, G, feat, feat_ref, frames=
     quality sigma scores u * sqrt(v / v0) (u = sigmaF_mean: quality x diversity), pv scores v. Kernel quests swaps the
     frame-level redundancy for per-atom QUESTS coverage (frames, atom_sigma, quests). selector lcmd: LCMD over the
     feature vectors feat with the training frames feat_ref as initial centres, distances weighted by u (sigma) or not (pv).
+    selector topk (al_quality sigma): the n_sel candidates with the largest u, without a redundancy term; query by
+    committee (for MLIPs e.g. Smith et al., J. Chem. Phys. 148, 241733 (2018)).
     """
+    if selector == "topk":
+        return np.argsort(-np.asarray(u, dtype=float), kind="stable")[:n_sel].tolist(), np.asarray(u, dtype=float)
     w = u if quality == "sigma" else np.ones(len(u))
     if selector == "lcmd":
         return lcmd(feat, feat_ref, w, n_sel)
