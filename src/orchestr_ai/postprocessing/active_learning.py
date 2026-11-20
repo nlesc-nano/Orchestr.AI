@@ -782,7 +782,7 @@ class _PoolActiveLearner:
             print("  -> QUESTS coverage | novel atoms (dH > 0): " + ", ".join(f"{el} {comp[el][3]:.2%}" for el in els)
                   + f" | frames with a novel atom: {np.mean(novel > 0):.1%}")
 
-        # Batch over the candidates (features.select_batch): al_selector greedy or lcmd, al_quality sigma
+        # Batch over the candidates (features.select_batch): al_selector greedy, lcmd or topk, al_quality sigma
         # (sigmaF_mean in the score) or pv (the kernel alone), al_kernel quests for per-atom redundancy.
         kernel = getattr(self, "al_kernel", "latent")
         if kernel == "quests" and getattr(self, "quests", None) is None:

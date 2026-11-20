@@ -232,7 +232,7 @@ def compute_features(all_frames, config, training_data_path=None, train_mask=Non
 # eval options:
 #   al_kernel   latent | lastlayer | soap | ntk_e | ntk_ef | quests   feature space of the batch redundancy
 #   al_quality  sigma | pv                                            ensemble sigmaF_mean in the score, or the kernel alone
-#   al_selector greedy | lcmd                                         batch rule
+#   al_selector greedy | lcmd | topk                                  batch rule
 #   al_members  all | <index>                                         ensemble members of latent / lastlayer / ntk_e / ntk_ef
 #   ntk_probes  <int>                                                 force probes of ntk_ef
 
@@ -245,11 +245,12 @@ def al_options(eval_cfg, framework):
     quality = str(eval_cfg.get("al_quality", "sigma")).lower()
     selector = str(eval_cfg.get("al_selector", "greedy")).lower()
     if (kernel not in ("latent", "lastlayer", "soap", "ntk_e", "ntk_ef", "quests") or quality not in ("sigma", "pv")
-            or selector not in ("greedy", "lcmd") or (kernel, selector) == ("quests", "lcmd")):
+            or selector not in ("greedy", "lcmd", "topk") or (kernel, selector) == ("quests", "lcmd")
+            or (selector, quality) == ("topk", "pv")):
         raise ValueError(
             f"Unsupported pool AL options al_kernel={kernel}, al_quality={quality}, al_selector={selector}: "
-            "al_kernel latent|lastlayer|soap|ntk_e|ntk_ef|quests, al_quality sigma|pv, al_selector greedy|lcmd "
-            "(lcmd needs a frame-level kernel, not quests)."
+            "al_kernel latent|lastlayer|soap|ntk_e|ntk_ef|quests, al_quality sigma|pv, al_selector greedy|lcmd|topk "
+            "(lcmd needs a frame-level kernel, not quests; topk ranks by the ensemble sigmaF_mean: al_quality sigma)."
         )
     if kernel == "lastlayer" and normalize_framework(framework) != "mace":
         raise ValueError(
@@ -685,7 +686,11 @@ def select_batch(quality, selector, kernel, n_sel, u, G, feat, feat_ref, frames=
     quality sigma scores u * sqrt(v / v0) (u = sigmaF_mean: quality x diversity), pv scores v. Kernel quests swaps the
     frame-level redundancy for per-atom QUESTS coverage (frames, atom_sigma, quests). selector lcmd: LCMD over the
     feature vectors feat with the training frames feat_ref as initial centres, distances weighted by u (sigma) or not (pv).
+    selector topk (al_quality sigma): the n_sel candidates with the largest u, without a redundancy term; query by
+    committee (for MLIPs e.g. Smith et al., J. Chem. Phys. 148, 241733 (2018)).
     """
+    if selector == "topk":
+        return np.argsort(-np.asarray(u, dtype=float), kind="stable")[:n_sel].tolist(), np.asarray(u, dtype=float)
     w = u if quality == "sigma" else np.ones(len(u))
     if selector == "lcmd":
         return lcmd(feat, feat_ref, w, n_sel)
